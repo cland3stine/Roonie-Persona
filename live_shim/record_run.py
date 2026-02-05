@@ -24,16 +24,10 @@ def _git_head_sha() -> str:
         return "unknown"
 
 
-def main() -> int:
-    if len(sys.argv) != 2:
-        print("Usage: python live_shim/record_run.py <input_json_path>")
-        return 1
-
-    input_path = Path(sys.argv[1])
-    data = json.loads(input_path.read_text(encoding="utf-8-sig"))
-
-    session_id = data["session_id"]
-    inputs = data["inputs"]
+def run_payload(payload: dict) -> Path:
+    session_id = payload["session_id"]
+    inputs = payload["inputs"]
+    fixture_hint = payload.get("fixture_hint")
 
     director = OfflineDirector()
     env = Env(offline=True)
@@ -57,9 +51,23 @@ def main() -> int:
         "inputs": inputs,
         "decisions": decisions,
     }
+    if fixture_hint:
+        output["fixture_hint"] = fixture_hint
 
     out_path = Path("runs") / f"{session_id}.json"
     out_path.write_text(json.dumps(output, indent=2, sort_keys=False), encoding="utf-8")
+    return out_path
+
+
+def main() -> int:
+    if len(sys.argv) != 2:
+        print("Usage: python live_shim/record_run.py <input_json_path>")
+        return 1
+
+    input_path = Path(sys.argv[1])
+    data = json.loads(input_path.read_text(encoding="utf-8-sig"))
+
+    out_path = run_payload(data)
     print(out_path)
     return 0
 

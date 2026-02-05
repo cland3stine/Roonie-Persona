@@ -1,5 +1,6 @@
 ﻿{
   "session_id": "sample-session-001",
+  "fixture_hint": "P1-0203_mixed_intent_gear_question_plus_greeting",
   "inputs": [
     {
       "event_id": "evt-1",
