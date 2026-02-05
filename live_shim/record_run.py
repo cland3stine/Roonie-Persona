@@ -29,7 +29,7 @@ def _git_head_sha() -> str:
         return "unknown"
 
 
-def run_payload(payload: dict) -> Path:
+def run_payload(payload: dict, emit_outputs: bool = False) -> Path:
     session_id = payload["session_id"]
     inputs = payload["inputs"]
     fixture_hint = payload.get("fixture_hint")
@@ -48,11 +48,6 @@ def run_payload(payload: dict) -> Path:
         decision = director.evaluate(event, env)
         decisions.append(asdict(decision))
 
-    outputs = maybe_emit(decisions)
-    for output, decision in zip(outputs, decisions):
-        if output.get("emitted") and decision.get("response_text"):
-            emit(decision["response_text"])
-
     output = {
         "schema_version": "run-v1",
         "session_id": session_id,
@@ -60,8 +55,13 @@ def run_payload(payload: dict) -> Path:
         "started_at": datetime.now(timezone.utc).isoformat(),
         "inputs": inputs,
         "decisions": decisions,
-        "outputs": outputs,
     }
+    if emit_outputs:
+        outputs = maybe_emit(decisions)
+        for output_rec, decision in zip(outputs, decisions):
+            if output_rec.get("emitted") and decision.get("response_text"):
+                emit(decision["response_text"])
+        output["outputs"] = outputs
     if fixture_hint:
         output["fixture_hint"] = fixture_hint
 
@@ -78,7 +78,7 @@ def main() -> int:
     input_path = Path(sys.argv[1])
     data = json.loads(input_path.read_text(encoding="utf-8-sig"))
 
-    run_payload(data)
+    run_payload(data, emit_outputs=True)
     return 0
 
 
