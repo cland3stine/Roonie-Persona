@@ -1,0 +1,12 @@
+﻿{
+  "session_id": "sample-session-001",
+  "inputs": [
+    {
+      "event_id": "evt-1",
+      "message": "@roonie what camera are you using?",
+      "metadata": {
+        "is_direct_mention": true
+      }
+    }
+  ]
+}
