@@ -1,0 +1,25 @@
+[
+  {
+    "case_id": "P1-0105_addressed_question_no_qmark",
+    "event_id": "evt-105",
+    "action": "NOOP",
+    "route": "none",
+    "response_text": null,
+    "trace": {
+      "gates": {
+        "addressed_to_roonie": true,
+        "trigger_type": "banter",
+        "ambiguity_detected": false,
+        "noop_bias_applied": true
+      },
+      "policy": {
+        "safety_classification": "allowed",
+        "refusal_reason_code": null
+      },
+      "routing": {
+        "selected_responder": null,
+        "routing_reason_codes": []
+      }
+    }
+  }
+]

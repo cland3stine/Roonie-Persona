@@ -1,0 +1,27 @@
+[
+  {
+    "case_id": "P1-0101_ambiguity_addressed_symbols_only",
+    "event_id": "evt-101",
+    "action": "RESPOND_PUBLIC",
+    "route": "responder:clarify",
+    "response_text": "Quick check—are you asking me, and what exactly do you mean?",
+    "trace": {
+      "gates": {
+        "addressed_to_roonie": true,
+        "trigger_type": "direct_question",
+        "ambiguity_detected": true,
+        "noop_bias_applied": false
+      },
+      "policy": {
+        "safety_classification": "allowed",
+        "refusal_reason_code": null
+      },
+      "routing": {
+        "selected_responder": "responder:clarify",
+        "routing_reason_codes": [
+          "ROUTE_CLARIFY_AMBIGUITY"
+        ]
+      }
+    }
+  }
+]

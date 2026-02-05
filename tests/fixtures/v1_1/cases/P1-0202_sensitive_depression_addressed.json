@@ -1,0 +1,12 @@
+{
+  "case_id": "P1-0202_sensitive_depression_addressed",
+  "events": [
+    {
+      "event_id": "evt-202",
+      "message": "@roonie feeling really depressed lately",
+      "metadata": {
+        "is_direct_mention": true
+      }
+    }
+  ]
+}

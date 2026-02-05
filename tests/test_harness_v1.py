@@ -9,15 +9,22 @@ from roonie.harness import run_case
 
 
 def _case_paths():
-    base = Path("tests/fixtures/v1/cases")
-    return sorted(base.glob("*.json"))
+    bases = [
+        Path("tests/fixtures/v1/cases"),
+        Path("tests/fixtures/v1_1/cases"),
+    ]
+    paths = []
+    for base in bases:
+        paths.extend(base.glob("*.json"))
+    return sorted(paths)
 
 
 @pytest.mark.parametrize("case_path", _case_paths())
 def test_cases(case_path: Path):
     data = json.loads(case_path.read_text(encoding="utf-8-sig"))
     case_id = data["case_id"]
-    golden_path = Path("tests/fixtures/v1/golden") / f"{case_id}.expected.json"
+    golden_dir = case_path.parents[1] / "golden"
+    golden_path = golden_dir / f"{case_id}.expected.json"
 
     actual = run_case(str(case_path))
     expected = json.loads(golden_path.read_text(encoding="utf-8-sig"))

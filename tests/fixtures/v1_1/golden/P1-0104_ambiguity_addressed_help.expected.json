@@ -1,0 +1,27 @@
+[
+  {
+    "case_id": "P1-0104_ambiguity_addressed_help",
+    "event_id": "evt-104",
+    "action": "RESPOND_PUBLIC",
+    "route": "responder:policy_safe_info",
+    "response_text": "Camera: (configured gear).",
+    "trace": {
+      "gates": {
+        "addressed_to_roonie": true,
+        "trigger_type": "direct_request",
+        "ambiguity_detected": false,
+        "noop_bias_applied": false
+      },
+      "policy": {
+        "safety_classification": "allowed",
+        "refusal_reason_code": null
+      },
+      "routing": {
+        "selected_responder": "responder:policy_safe_info",
+        "routing_reason_codes": [
+          "ROUTE_SAFE_INFO"
+        ]
+      }
+    }
+  }
+]

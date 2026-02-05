@@ -1,0 +1,12 @@
+{
+  "case_id": "P1-0204_sensitive_job_struggle_addressed",
+  "events": [
+    {
+      "event_id": "evt-204",
+      "message": "@roonie still looking for a job...",
+      "metadata": {
+        "is_direct_mention": true
+      }
+    }
+  ]
+}

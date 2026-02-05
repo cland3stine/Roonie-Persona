@@ -1,0 +1,10 @@
+{
+  "case_id": "P1-0103_ambiguity_not_addressed_question",
+  "events": [
+    {
+      "event_id": "evt-103",
+      "message": "what camera is that?",
+      "metadata": {}
+    }
+  ]
+}

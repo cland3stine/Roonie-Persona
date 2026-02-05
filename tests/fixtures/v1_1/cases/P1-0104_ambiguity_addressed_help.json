@@ -1,0 +1,12 @@
+{
+  "case_id": "P1-0104_ambiguity_addressed_help",
+  "events": [
+    {
+      "event_id": "evt-104",
+      "message": "roonie help",
+      "metadata": {
+        "is_direct_mention": true
+      }
+    }
+  ]
+}

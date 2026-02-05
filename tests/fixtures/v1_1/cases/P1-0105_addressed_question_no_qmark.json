@@ -1,0 +1,12 @@
+{
+  "case_id": "P1-0105_addressed_question_no_qmark",
+  "events": [
+    {
+      "event_id": "evt-105",
+      "message": "@roonie what camera are you using",
+      "metadata": {
+        "is_direct_mention": true
+      }
+    }
+  ]
+}

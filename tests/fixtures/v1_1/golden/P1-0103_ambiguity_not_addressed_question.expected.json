@@ -1,0 +1,25 @@
+[
+  {
+    "case_id": "P1-0103_ambiguity_not_addressed_question",
+    "event_id": "evt-103",
+    "action": "NOOP",
+    "route": "none",
+    "response_text": null,
+    "trace": {
+      "gates": {
+        "addressed_to_roonie": false,
+        "trigger_type": "direct_question",
+        "ambiguity_detected": true,
+        "noop_bias_applied": true
+      },
+      "policy": {
+        "safety_classification": "allowed",
+        "refusal_reason_code": null
+      },
+      "routing": {
+        "selected_responder": null,
+        "routing_reason_codes": []
+      }
+    }
+  }
+]

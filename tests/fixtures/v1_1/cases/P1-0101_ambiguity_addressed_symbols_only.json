@@ -1,0 +1,12 @@
+{
+  "case_id": "P1-0101_ambiguity_addressed_symbols_only",
+  "events": [
+    {
+      "event_id": "evt-101",
+      "message": "@roonie ???",
+      "metadata": {
+        "is_direct_mention": true
+      }
+    }
+  ]
+}

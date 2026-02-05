@@ -1,0 +1,12 @@
+{
+  "case_id": "P1-0106_addressed_banter_noop",
+  "events": [
+    {
+      "event_id": "evt-106",
+      "message": "@roonie lol",
+      "metadata": {
+        "is_direct_mention": true
+      }
+    }
+  ]
+}

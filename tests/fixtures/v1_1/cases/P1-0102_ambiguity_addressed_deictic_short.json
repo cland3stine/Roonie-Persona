@@ -1,0 +1,12 @@
+{
+  "case_id": "P1-0102_ambiguity_addressed_deictic_short",
+  "events": [
+    {
+      "event_id": "evt-102",
+      "message": "@roonie that thing again",
+      "metadata": {
+        "is_direct_mention": true
+      }
+    }
+  ]
+}
