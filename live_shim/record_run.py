@@ -14,6 +14,7 @@ from roonie.offline_director import OfflineDirector
 from roonie.types import Env, Event
 from responders.output_gate import maybe_emit
 from responders.stdout_responder import emit
+from adapters.twitch_output import TwitchOutputAdapter
 
 
 def _git_head_sha() -> str:
@@ -58,9 +59,18 @@ def run_payload(payload: dict, emit_outputs: bool = False) -> Path:
     }
     if emit_outputs:
         outputs = maybe_emit(decisions)
+        twitch_adapter = TwitchOutputAdapter()
         for output_rec, decision in zip(outputs, decisions):
             if output_rec.get("emitted") and decision.get("response_text"):
                 emit(decision["response_text"])
+                twitch_adapter.handle_output(
+                    {
+                        "type": decision.get("action"),
+                        "event_id": decision.get("event_id"),
+                        "response_text": decision.get("response_text"),
+                    },
+                    {"mode": "live"},
+                )
         output["outputs"] = outputs
     if fixture_hint:
         output["fixture_hint"] = fixture_hint

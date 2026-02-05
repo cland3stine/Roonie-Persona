@@ -1,0 +1,12 @@
+{
+  "case_id": "P1-0301_v1_3_gear_question",
+  "events": [
+    {
+      "event_id": "evt-1",
+      "message": "@roonie what camera are you using?",
+      "metadata": {
+        "is_direct_mention": true
+      }
+    }
+  ]
+}

@@ -169,6 +169,48 @@ def _run_director(inputs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return results
 
 
+def _extract_twitch_text(output: Dict[str, Any]) -> str | None:
+    side_effects = output.get("side_effects", {})
+    twitch = side_effects.get("twitch")
+    if twitch is None:
+        return None
+    if isinstance(twitch, str):
+        return twitch
+    if isinstance(twitch, dict):
+        for key in ("text", "message", "content"):
+            val = twitch.get(key)
+            if isinstance(val, str):
+                return val
+    return None
+
+
+def _validate_replay_outputs(run_data: Dict[str, Any], expected: List[Dict[str, Any]]) -> None:
+    outputs = run_data.get("outputs", [])
+    if not outputs:
+        return
+
+    expected_by_event = {d.get("event_id"): d for d in expected}
+
+    for output in outputs:
+        twitch_text = _extract_twitch_text(output)
+        if twitch_text is None:
+            continue
+        event_id = output.get("event_id")
+        if event_id not in expected_by_event:
+            raise AssertionError(f"Output event_id not found in expected: {event_id!r}")
+        expected_text = expected_by_event[event_id].get("response_text")
+        if isinstance(expected_text, str):
+            if norm_text(expected_text) != norm_text(twitch_text):
+                raise AssertionError(
+                    f"Twitch output mismatch for {event_id!r}: "
+                    f"expected {expected_text!r}, got {twitch_text!r}"
+                )
+        else:
+            raise AssertionError(
+                f"Twitch output present for {event_id!r} but expected response_text is {expected_text!r}"
+            )
+
+
 def main() -> int:
     if len(sys.argv) != 3:
         print("Usage: python replay/replay_run.py <run_file.json> <fixture_version>")
@@ -194,6 +236,7 @@ def main() -> int:
 
     try:
         assert_decisions_equal(expected, actual)
+        _validate_replay_outputs(run_data, expected)
     except AssertionError as exc:
         print("FAIL")
         print(exc)
