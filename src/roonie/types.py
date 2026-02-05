@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional
 
-Action = Literal["NOOP", "RESPOND_PUBLIC"]
+Action = Literal["NOOP", "RESPOND_PUBLIC", "MEMORY_WRITE_INTENT"]
 Route = Literal[
     "none",
     "responder:neutral_ack",

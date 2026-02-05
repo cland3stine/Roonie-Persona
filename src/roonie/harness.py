@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from .offline_director import OfflineDirector
+from memory.intent_evaluator import evaluate_memory_intents
 from .types import DecisionRecord, Env, Event
 
 
@@ -47,6 +48,15 @@ def run_case(case_json_path: str) -> List[Dict[str, Any]]:
         )
         decision = director.evaluate(event, env)
         decisions.append(_normalize_decision(decision))
+        memory_intents = evaluate_memory_intents(
+            {
+                "case_id": case_id,
+                "event_id": event.event_id,
+                "message": event.message,
+                "metadata": event.metadata,
+            }
+        )
+        decisions.extend(memory_intents)
 
     return decisions
 

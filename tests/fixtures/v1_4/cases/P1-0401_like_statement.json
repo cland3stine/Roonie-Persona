@@ -1,0 +1,10 @@
+﻿{
+  "case_id": "P1-0401_like_statement",
+  "events": [
+    {
+      "event_id": "evt-1",
+      "message": "I like progressive house",
+      "metadata": {"user": "userA"}
+    }
+  ]
+}

@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Tuple
 
 from roonie.offline_director import OfflineDirector
 from roonie.types import Env, Event
+from memory.intent_evaluator import evaluate_memory_intents
 
 
 def _diff_strings(label: str, expected: str, actual: str) -> str:
@@ -166,6 +167,15 @@ def _run_director(inputs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         )
         decision = director.evaluate(event, env)
         results.append(asdict(decision))
+        results.extend(
+            evaluate_memory_intents(
+                {
+                    "event_id": event.event_id,
+                    "message": event.message,
+                    "metadata": event.metadata,
+                }
+            )
+        )
     return results
 
 

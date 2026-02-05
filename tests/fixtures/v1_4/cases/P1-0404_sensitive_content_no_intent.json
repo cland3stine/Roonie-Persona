@@ -1,0 +1,10 @@
+﻿{
+  "case_id": "P1-0404_sensitive_content_no_intent",
+  "events": [
+    {
+      "event_id": "evt-1",
+      "message": "I love when I'm depressed",
+      "metadata": {"user": "userD"}
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+[
+  {
+    "case_id": "P1-0403_overwrite_statement",
+    "event_id": "evt-1",
+    "action": "NOOP",
+    "route": "none",
+    "response_text": null,
+    "trace": {
+      "gates": {
+        "addressed_to_roonie": false,
+        "trigger_type": "banter",
+        "ambiguity_detected": false,
+        "noop_bias_applied": true
+      },
+      "policy": {
+        "safety_classification": "allowed",
+        "refusal_reason_code": null
+      },
+      "routing": {
+        "selected_responder": null,
+        "routing_reason_codes": []
+      }
+    }
+  },
+  {
+    "case_id": "P1-0403_overwrite_statement",
+    "event_id": "evt-1",
+    "action": "MEMORY_WRITE_INTENT",
+    "route": "none",
+    "response_text": null,
+    "trace": {
+      "memory_intent": {
+        "scope": "viewer",
+        "user": "userC",
+        "preference": "like",
+        "object": "deep house",
+        "confidence": 0.7,
+        "ttl_days": 180,
+        "cue": "i like",
+        "reason": "overwrite"
+      }
+    }
+  }
+]

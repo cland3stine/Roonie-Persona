@@ -1,0 +1,11 @@
+﻿{
+  "case_id": "P1-0403_overwrite_statement",
+  "events": [
+    {
+      "event_id": "evt-1",
+      "message": "I hate deep house but I like deep house",
+      "metadata": {"user": "userC"}
+    }
+  ]
+}
+

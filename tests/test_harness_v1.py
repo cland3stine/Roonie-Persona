@@ -111,6 +111,7 @@ def _case_paths():
         Path("tests/fixtures/v1/cases"),
         Path("tests/fixtures/v1_1/cases"),
         Path("tests/fixtures/v1_2/cases"),
+        Path("tests/fixtures/v1_4/cases"),
     ]
     paths = []
     for base in bases:

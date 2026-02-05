@@ -1,0 +1,10 @@
+﻿{
+  "case_id": "P1-0402_hate_statement",
+  "events": [
+    {
+      "event_id": "evt-1",
+      "message": "I hate fluorescent lights",
+      "metadata": {"user": "userB"}
+    }
+  ]
+}

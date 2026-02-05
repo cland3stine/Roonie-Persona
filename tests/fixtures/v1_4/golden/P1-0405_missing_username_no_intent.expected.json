@@ -1,0 +1,25 @@
+[
+  {
+    "case_id": "P1-0405_missing_username_no_intent",
+    "event_id": "evt-1",
+    "action": "NOOP",
+    "route": "none",
+    "response_text": null,
+    "trace": {
+      "gates": {
+        "addressed_to_roonie": false,
+        "trigger_type": "banter",
+        "ambiguity_detected": false,
+        "noop_bias_applied": true
+      },
+      "policy": {
+        "safety_classification": "allowed",
+        "refusal_reason_code": null
+      },
+      "routing": {
+        "selected_responder": null,
+        "routing_reason_codes": []
+      }
+    }
+  }
+]

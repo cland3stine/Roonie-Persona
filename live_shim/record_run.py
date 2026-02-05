@@ -14,6 +14,7 @@ from roonie.offline_director import OfflineDirector
 from roonie.types import Env, Event
 from responders.output_gate import maybe_emit
 from responders.stdout_responder import emit
+from memory.intent_evaluator import evaluate_memory_intents
 from adapters.twitch_output import TwitchOutputAdapter
 
 
@@ -48,6 +49,15 @@ def run_payload(payload: dict, emit_outputs: bool = False) -> Path:
         )
         decision = director.evaluate(event, env)
         decisions.append(asdict(decision))
+        decisions.extend(
+            evaluate_memory_intents(
+                {
+                    "event_id": event.event_id,
+                    "message": event.message,
+                    "metadata": event.metadata,
+                }
+            )
+        )
 
     output = {
         "schema_version": "run-v1",
