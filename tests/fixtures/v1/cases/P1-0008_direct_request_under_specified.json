@@ -1,0 +1,12 @@
+﻿{
+    "case_id":  "P1-0008_direct_request_under_specified",
+    "events":  [
+                   {
+                       "event_id":  "evt-8",
+                       "message":  "roonie fix it",
+                       "metadata":  {
+                                        "is_direct_mention":  true
+                                    }
+                   }
+               ]
+}

@@ -1,0 +1,12 @@
+﻿{
+    "case_id":  "P1-0003_ambiguity_not_addressed",
+    "events":  [
+                   {
+                       "event_id":  "evt-3",
+                       "message":  "what?",
+                       "metadata":  {
+
+                                    }
+                   }
+               ]
+}

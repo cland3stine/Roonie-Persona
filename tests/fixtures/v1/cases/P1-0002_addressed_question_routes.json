@@ -1,0 +1,12 @@
+﻿{
+    "case_id":  "P1-0002_addressed_question_routes",
+    "events":  [
+                   {
+                       "event_id":  "evt-2",
+                       "message":  "@roonie what camera are you using?",
+                       "metadata":  {
+
+                                    }
+                   }
+               ]
+}

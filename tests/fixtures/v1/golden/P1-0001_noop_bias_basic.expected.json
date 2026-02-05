@@ -1,0 +1,25 @@
+[
+  {
+    "action": "NOOP",
+    "response_text": null,
+    "event_id": "evt-1",
+    "route": "none",
+    "case_id": "P1-0001_noop_bias_basic",
+    "trace": {
+      "routing": {
+        "routing_reason_codes": [],
+        "selected_responder": null
+      },
+      "policy": {
+        "refusal_reason_code": null,
+        "safety_classification": "allowed"
+      },
+      "gates": {
+        "ambiguity_detected": false,
+        "trigger_type": "banter",
+        "addressed_to_roonie": false,
+        "noop_bias_applied": true
+      }
+    }
+  }
+]

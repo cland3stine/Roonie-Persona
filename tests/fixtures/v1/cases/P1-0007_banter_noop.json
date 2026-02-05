@@ -1,0 +1,12 @@
+﻿{
+    "case_id":  "P1-0007_banter_noop",
+    "events":  [
+                   {
+                       "event_id":  "evt-7",
+                       "message":  "lol that drop",
+                       "metadata":  {
+
+                                    }
+                   }
+               ]
+}

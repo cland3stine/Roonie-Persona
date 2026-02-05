@@ -1,0 +1,12 @@
+﻿{
+    "case_id":  "P1-0001_noop_bias_basic",
+    "events":  [
+                   {
+                       "event_id":  "evt-1",
+                       "message":  "nice set tonight",
+                       "metadata":  {
+
+                                    }
+                   }
+               ]
+}

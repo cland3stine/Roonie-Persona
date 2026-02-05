@@ -1,0 +1,27 @@
+[
+  {
+    "action": "RESPOND_PUBLIC",
+    "response_text": "Camera: (configured gear).",
+    "event_id": "evt-2",
+    "route": "responder:policy_safe_info",
+    "case_id": "P1-0002_addressed_question_routes",
+    "trace": {
+      "routing": {
+        "routing_reason_codes": [
+          "ROUTE_SAFE_INFO"
+        ],
+        "selected_responder": "responder:policy_safe_info"
+      },
+      "policy": {
+        "refusal_reason_code": null,
+        "safety_classification": "allowed"
+      },
+      "gates": {
+        "ambiguity_detected": false,
+        "trigger_type": "direct_question",
+        "addressed_to_roonie": true,
+        "noop_bias_applied": false
+      }
+    }
+  }
+]

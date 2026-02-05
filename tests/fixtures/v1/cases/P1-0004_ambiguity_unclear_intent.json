@@ -1,0 +1,12 @@
+﻿{
+    "case_id":  "P1-0004_ambiguity_unclear_intent",
+    "events":  [
+                   {
+                       "event_id":  "evt-4",
+                       "message":  "roonie??",
+                       "metadata":  {
+                                        "is_direct_mention":  true
+                                    }
+                   }
+               ]
+}

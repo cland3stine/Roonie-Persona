@@ -1,0 +1,12 @@
+﻿{
+    "case_id":  "P1-0006_sensitive_no_followup",
+    "events":  [
+                   {
+                       "event_id":  "evt-6",
+                       "message":  "@roonie I\u0027m feeling depressed",
+                       "metadata":  {
+
+                                    }
+                   }
+               ]
+}

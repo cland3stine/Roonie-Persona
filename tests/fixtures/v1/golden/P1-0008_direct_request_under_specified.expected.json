@@ -1,0 +1,27 @@
+[
+  {
+    "action": "RESPOND_PUBLIC",
+    "response_text": "Quick check—are you asking me, and what exactly do you mean?",
+    "event_id": "evt-8",
+    "route": "responder:clarify",
+    "case_id": "P1-0008_direct_request_under_specified",
+    "trace": {
+      "routing": {
+        "routing_reason_codes": [
+          "ROUTE_CLARIFY_AMBIGUITY"
+        ],
+        "selected_responder": "responder:clarify"
+      },
+      "policy": {
+        "refusal_reason_code": null,
+        "safety_classification": "allowed"
+      },
+      "gates": {
+        "ambiguity_detected": true,
+        "trigger_type": "direct_request",
+        "addressed_to_roonie": true,
+        "noop_bias_applied": false
+      }
+    }
+  }
+]
