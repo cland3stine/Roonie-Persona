@@ -1,0 +1,12 @@
+﻿{
+    "case_id":  "P1-0202_sarcasm_address_with_actionable_signal",
+    "events":  [
+                   {
+                       "event_id":  "evt-1",
+                       "message":  "@roonie yeah sure no audio btw",
+                       "metadata":  {
+                                        "is_direct_mention":  true
+                                    }
+                   }
+               ]
+}

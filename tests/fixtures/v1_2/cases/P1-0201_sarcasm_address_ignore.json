@@ -1,0 +1,12 @@
+﻿{
+    "case_id":  "P1-0201_sarcasm_address_ignore",
+    "events":  [
+                   {
+                       "event_id":  "evt-1",
+                       "message":  "@roonie sure buddy",
+                       "metadata":  {
+                                        "is_direct_mention":  true
+                                    }
+                   }
+               ]
+}

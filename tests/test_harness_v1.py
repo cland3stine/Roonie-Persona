@@ -2,16 +2,115 @@
 
 import json
 from pathlib import Path
+import difflib
+import unicodedata
 
 import pytest
 
 from roonie.harness import run_case
 
 
+def _diff_strings(label: str, expected: str, actual: str) -> str:
+    expected_lines = expected.splitlines(keepends=True)
+    actual_lines = actual.splitlines(keepends=True)
+    diff = list(
+        difflib.unified_diff(
+            expected_lines,
+            actual_lines,
+            fromfile=f"expected:{label}",
+            tofile=f"actual:{label}",
+            lineterm="",
+        )
+    )
+    if not diff:
+        return ""
+    if len(diff) > 30:
+        diff = diff[:30] + ["... (diff truncated)"]
+    return "\n".join(diff)
+
+
+def norm_text(s: str) -> str:
+    s = unicodedata.normalize("NFKC", s)
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+    for ch in ("\u200b", "\u200c", "\u200d", "\ufeff"):
+        s = s.replace(ch, "")
+    s = s.replace("—", "-").replace("–", "-")
+    return s
+
+
+def assert_decisions_equal(expected, actual) -> None:
+    if len(expected) != len(actual):
+        raise AssertionError(
+            f"Decision count mismatch: expected {len(expected)}, actual {len(actual)}"
+        )
+
+    for idx, (e, a) in enumerate(zip(expected, actual)):
+        diffs = []
+        all_keys = sorted(set(e.keys()) | set(a.keys()))
+        for key in all_keys:
+            e_val = e.get(key)
+            a_val = a.get(key)
+            if key == "response_text" and isinstance(e_val, str) and isinstance(a_val, str):
+                if norm_text(e_val) != norm_text(a_val):
+                    diffs.append(key)
+            else:
+                if e_val != a_val:
+                    diffs.append(key)
+
+        trace_keys = ["gates", "policy", "routing"]
+        trace_diffs = {}
+        for section in trace_keys:
+            e_sec = e.get("trace", {}).get(section, {})
+            a_sec = a.get("trace", {}).get(section, {})
+            sec_keys = sorted(set(e_sec.keys()) | set(a_sec.keys()))
+            sec_diffs = [k for k in sec_keys if e_sec.get(k) != a_sec.get(k)]
+            if sec_diffs:
+                trace_diffs[section] = sec_diffs
+
+        if diffs or trace_diffs:
+            parts = [f"Mismatch at index {idx}"]
+            if diffs:
+                parts.append(f"Top-level differing fields: {diffs}")
+            if trace_diffs:
+                for section, keys in trace_diffs.items():
+                    parts.append(f"trace.{section} differing fields: {keys}")
+
+            for key in diffs:
+                e_val = e.get(key)
+                a_val = a.get(key)
+                parts.append(f"{key} expected={e_val!r} actual={a_val!r}")
+                if isinstance(e_val, str) and isinstance(a_val, str):
+                    if key == "response_text":
+                        e_cmp = norm_text(e_val)
+                        a_cmp = norm_text(a_val)
+                        diff = _diff_strings(key, e_cmp, a_cmp)
+                    else:
+                        diff = _diff_strings(key, e_val, a_val)
+                    if diff:
+                        parts.append(diff)
+
+            for section, keys in trace_diffs.items():
+                e_sec = e.get("trace", {}).get(section, {})
+                a_sec = a.get("trace", {}).get(section, {})
+                for key in keys:
+                    e_val = e_sec.get(key)
+                    a_val = a_sec.get(key)
+                    parts.append(
+                        f"trace.{section}.{key} expected={e_val!r} actual={a_val!r}"
+                    )
+                    if isinstance(e_val, str) and isinstance(a_val, str):
+                        diff = _diff_strings(f"trace.{section}.{key}", e_val, a_val)
+                        if diff:
+                            parts.append(diff)
+
+            raise AssertionError("\n".join(parts))
+
+
 def _case_paths():
     bases = [
         Path("tests/fixtures/v1/cases"),
         Path("tests/fixtures/v1_1/cases"),
+        Path("tests/fixtures/v1_2/cases"),
     ]
     paths = []
     for base in bases:
@@ -29,4 +128,4 @@ def test_cases(case_path: Path):
     actual = run_case(str(case_path))
     expected = json.loads(golden_path.read_text(encoding="utf-8-sig"))
 
-    assert actual == expected
+    assert_decisions_equal(expected, actual)

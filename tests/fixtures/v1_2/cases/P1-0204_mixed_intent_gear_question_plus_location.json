@@ -1,0 +1,12 @@
+﻿{
+    "case_id":  "P1-0204_mixed_intent_gear_question_plus_location",
+    "events":  [
+                   {
+                       "event_id":  "evt-1",
+                       "message":  "@roonie what camera is that? hi from Berlin",
+                       "metadata":  {
+                                        "is_direct_mention":  true
+                                    }
+                   }
+               ]
+}

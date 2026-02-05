@@ -1,0 +1,26 @@
+﻿{
+    "case_id":  "P1-0205_batch_audio_then_gear_then_greeting",
+    "events":  [
+                   {
+                       "event_id":  "evt-1",
+                       "message":  "@roonie no audio",
+                       "metadata":  {
+                                        "is_direct_mention":  true
+                                    }
+                   },
+                   {
+                       "event_id":  "evt-2",
+                       "message":  "@roonie what camera are you using?",
+                       "metadata":  {
+                                        "is_direct_mention":  true
+                                    }
+                   },
+                   {
+                       "event_id":  "evt-3",
+                       "message":  "@roonie hey there",
+                       "metadata":  {
+                                        "is_direct_mention":  true
+                                    }
+                   }
+               ]
+}

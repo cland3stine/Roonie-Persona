@@ -1,0 +1,25 @@
+[
+  {
+    "case_id": "P1-0201_sarcasm_address_ignore",
+    "event_id": "evt-1",
+    "action": "NOOP",
+    "route": "none",
+    "response_text": null,
+    "trace": {
+      "gates": {
+        "addressed_to_roonie": true,
+        "trigger_type": "banter",
+        "ambiguity_detected": false,
+        "noop_bias_applied": true
+      },
+      "policy": {
+        "safety_classification": "allowed",
+        "refusal_reason_code": null
+      },
+      "routing": {
+        "selected_responder": null,
+        "routing_reason_codes": []
+      }
+    }
+  }
+]

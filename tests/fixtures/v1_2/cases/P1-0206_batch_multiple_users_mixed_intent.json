@@ -1,0 +1,29 @@
+﻿{
+    "case_id":  "P1-0206_batch_multiple_users_mixed_intent",
+    "events":  [
+                   {
+                       "event_id":  "evt-1",
+                       "message":  "@roonie what camera is that?",
+                       "metadata":  {
+                                        "user":  "userA",
+                                        "is_direct_mention":  true
+                                    }
+                   },
+                   {
+                       "event_id":  "evt-2",
+                       "message":  "@roonie no audio",
+                       "metadata":  {
+                                        "user":  "userB",
+                                        "is_direct_mention":  true
+                                    }
+                   },
+                   {
+                       "event_id":  "evt-3",
+                       "message":  "@roonie hi",
+                       "metadata":  {
+                                        "user":  "userA",
+                                        "is_direct_mention":  true
+                                    }
+                   }
+               ]
+}

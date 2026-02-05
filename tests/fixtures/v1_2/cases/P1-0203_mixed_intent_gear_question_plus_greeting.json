@@ -1,0 +1,12 @@
+﻿{
+    "case_id":  "P1-0203_mixed_intent_gear_question_plus_greeting",
+    "events":  [
+                   {
+                       "event_id":  "evt-1",
+                       "message":  "@roonie camera? also hi",
+                       "metadata":  {
+                                        "is_direct_mention":  true
+                                    }
+                   }
+               ]
+}
