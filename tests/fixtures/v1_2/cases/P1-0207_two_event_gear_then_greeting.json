@@ -1,0 +1,19 @@
+﻿{
+  "case_id": "P1-0207_two_event_gear_then_greeting",
+  "events": [
+    {
+      "event_id": "evt-1",
+      "message": "@roonie what camera are you using?",
+      "metadata": {
+        "is_direct_mention": true
+      }
+    },
+    {
+      "event_id": "evt-2",
+      "message": "@roonie hey there",
+      "metadata": {
+        "is_direct_mention": true
+      }
+    }
+  ]
+}
