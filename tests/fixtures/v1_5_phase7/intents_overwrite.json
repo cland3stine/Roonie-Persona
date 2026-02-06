@@ -1,0 +1,38 @@
+[
+  {
+    "case_id": "P7-overwrite-1",
+    "event_id": "evt-1",
+    "action": "MEMORY_WRITE_INTENT",
+    "route": "none",
+    "response_text": null,
+    "trace": {
+      "memory_intent": {
+        "scope": "viewer",
+        "user": "userC",
+        "preference": "like",
+        "object": "deep house",
+        "confidence": 0.7,
+        "ttl_days": 180,
+        "cue": "i like"
+      }
+    }
+  },
+  {
+    "case_id": "P7-overwrite-2",
+    "event_id": "evt-2",
+    "action": "MEMORY_WRITE_INTENT",
+    "route": "none",
+    "response_text": null,
+    "trace": {
+      "memory_intent": {
+        "scope": "viewer",
+        "user": "userC",
+        "preference": "dislike",
+        "object": "deep house",
+        "ttl_days": 365,
+        "cue": "i hate",
+        "reason": "overwrite"
+      }
+    }
+  }
+]

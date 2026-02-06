@@ -1,0 +1,28 @@
+[
+  {
+    "case_id": "P7-basic",
+    "event_id": "evt-1",
+    "action": "NOOP",
+    "route": "none",
+    "response_text": null,
+    "trace": {"gates": {}, "policy": {}, "routing": {}}
+  },
+  {
+    "case_id": "P7-basic",
+    "event_id": "evt-1",
+    "action": "MEMORY_WRITE_INTENT",
+    "route": "none",
+    "response_text": null,
+    "trace": {
+      "memory_intent": {
+        "scope": "viewer",
+        "user": "userA",
+        "preference": "like",
+        "object": "progressive house",
+        "confidence": 0.7,
+        "ttl_days": 180,
+        "cue": "i like"
+      }
+    }
+  }
+]
