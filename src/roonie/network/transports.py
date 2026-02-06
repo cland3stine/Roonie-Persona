@@ -21,7 +21,7 @@ class FakeTransport:
             raise ValueError("FakeTransport requires fixture_name for deterministic responses")
 
         p = self.fixtures_dir / fixture_name
-        data = json.loads(p.read_text(encoding="utf-8"))
+        data = json.loads(p.read_text(encoding="utf-8-sig"))
 
         return HttpResponse(
             status=int(data["status"]),
