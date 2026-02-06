@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from src.roonie.network import NetworkClient
+from src.metadata.discogs_client import DiscogsClient
 
 
 @dataclass(frozen=True)
@@ -25,8 +26,9 @@ class DiscogsEnricher:
     - no fuzzy matching, no inference
     """
 
-    def __init__(self, net: NetworkClient):
+    def __init__(self, net: NetworkClient, *, token=None):
         self.net = net
+        self.client = DiscogsClient(net=net, token=token)
 
     @staticmethod
     def _desired_title(artist: str, title: str) -> str:
@@ -39,8 +41,7 @@ class DiscogsEnricher:
     def enrich_track(self, *, artist: str, title: str, fixture_name: str) -> Optional[DiscogsTrackMeta]:
         # In Phase 9A we do not build real URLs; we just call through the network boundary.
         # URL is informational only in fake transport mode.
-        url = "https://api.discogs.local/database/search"
-        body = self.net.get_json(url, fixture_name=fixture_name)
+        body = self.client.search(query=self._desired_title(artist, title), fixture_name=fixture_name)
 
         results = []
         if isinstance(body, dict):
