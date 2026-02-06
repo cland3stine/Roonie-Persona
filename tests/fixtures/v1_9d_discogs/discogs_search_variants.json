@@ -1,0 +1,35 @@
+{
+  "status": 200,
+  "headers": {"content-type": "application/json"},
+  "body": {
+    "results": [
+      {
+        "id": 300,
+        "title": "Artist A \u2014 Track One",
+        "year": 2020,
+        "label": ["Label X"],
+        "catno": "X-001",
+        "genre": ["Electronic"],
+        "style": ["Progressive House"]
+      },
+      {
+        "id": 200,
+        "title": "Artist A \u2013 Track One",
+        "year": 2019,
+        "label": ["Label Y"],
+        "catno": "Y-001",
+        "genre": ["Electronic"],
+        "style": ["Progressive House"]
+      },
+      {
+        "id": 250,
+        "title": "  Artist   A  -   Track   One  ",
+        "year": 2021,
+        "label": ["Label Z"],
+        "catno": "Z-001",
+        "genre": ["Electronic"],
+        "style": ["Progressive House"]
+      }
+    ]
+  }
+}

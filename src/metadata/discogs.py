@@ -36,8 +36,9 @@ class DiscogsEnricher:
 
     @staticmethod
     def _norm(s: str) -> str:
+        # Normalize dash variants to hyphen-minus for deterministic matching
+        s = s.replace("\u2014", "-").replace("\u2013", "-")
         return " ".join(s.strip().lower().split())
-
     def enrich_track(self, *, artist: str, title: str, fixture_name: str) -> Optional[DiscogsTrackMeta]:
         # In Phase 9A we do not build real URLs; we just call through the network boundary.
         # URL is informational only in fake transport mode.
@@ -52,19 +53,27 @@ class DiscogsEnricher:
 
         desired = self._norm(self._desired_title(artist, title))
 
+        matches: List[dict] = []
         for r in results:
             if not isinstance(r, dict):
                 continue
             rt = r.get("title")
-            if isinstance(rt, str) and self._norm(rt) == desired:
-                return DiscogsTrackMeta(
-                    release_id=int(r.get("id")),
-                    title=rt,
-                    year=int(r["year"]) if isinstance(r.get("year"), int) else None,
-                    label=(r.get("label") or [None])[0] if isinstance(r.get("label"), list) else None,
-                    catno=r.get("catno") if isinstance(r.get("catno"), str) else None,
-                    genres=[x for x in (r.get("genre") or []) if isinstance(x, str)],
-                    styles=[x for x in (r.get("style") or []) if isinstance(x, str)],
-                )
+            rid = r.get("id")
+            if isinstance(rt, str) and self._norm(rt) == desired and isinstance(rid, int):
+                matches.append(r)
 
-        return None
+        if not matches:
+            return None
+
+        # Tie-break A: lowest id wins
+        r = min(matches, key=lambda x: int(x.get("id")))
+        rt = r.get("title")
+        return DiscogsTrackMeta(
+            release_id=int(r.get("id")),
+            title=str(rt) if rt is not None else "",
+            year=int(r["year"]) if isinstance(r.get("year"), int) else None,
+            label=(r.get("label") or [None])[0] if isinstance(r.get("label"), list) else None,
+            catno=r.get("catno") if isinstance(r.get("catno"), str) else None,
+            genres=[x for x in (r.get("genre") or []) if isinstance(x, str)],
+            styles=[x for x in (r.get("style") or []) if isinstance(x, str)],
+        )
