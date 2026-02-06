@@ -1,0 +1,5 @@
+[memory]
+db_path = "data/memory.sqlite"
+
+[network]
+enabled = false
