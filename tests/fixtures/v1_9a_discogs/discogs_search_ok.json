@@ -1,0 +1,26 @@
+{
+  "status": 200,
+  "headers": {"content-type": "application/json"},
+  "body": {
+    "results": [
+      {
+        "id": 111,
+        "title": "Artist A - Track One",
+        "year": 2020,
+        "label": ["Label One"],
+        "catno": "CAT001",
+        "genre": ["Electronic"],
+        "style": ["Progressive House"]
+      },
+      {
+        "id": 222,
+        "title": "Artist A - Track One (Remix)",
+        "year": 2021,
+        "label": ["Label Two"],
+        "catno": "CAT002",
+        "genre": ["Electronic"],
+        "style": ["House"]
+      }
+    ]
+  }
+}
