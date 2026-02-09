@@ -1,0 +1,11 @@
+{
+  "system": {
+    "armed": true,
+    "kill_switch": false,
+    "presence_mode": "silent"
+  },
+  "presence_decision": {
+    "allowed": true,
+    "lane": "ambient"
+  }
+}
