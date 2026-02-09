@@ -1,0 +1,5 @@
+[twitch]
+enabled = true
+armed = true
+kill_switch = true
+mode = "live"
