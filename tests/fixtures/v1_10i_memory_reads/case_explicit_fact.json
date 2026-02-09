@@ -1,0 +1,11 @@
+{
+  "viewer_key": "viewer:alice",
+  "message": "what timezone am I in?",
+  "explicit_context": true,
+  "requested_slots": ["facts.timezone"],
+  "expected": {
+    "used": true,
+    "included": { "facts.timezone": "America/New_York" },
+    "suppressed": {}
+  }
+}

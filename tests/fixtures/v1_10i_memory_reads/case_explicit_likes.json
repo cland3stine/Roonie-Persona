@@ -1,0 +1,11 @@
+{
+  "viewer_key": "viewer:alice",
+  "message": "what kind of music do I like again?",
+  "explicit_context": true,
+  "requested_slots": ["preferences.likes", "preferences.dislikes"],
+  "expected": {
+    "used": true,
+    "included": { "preferences.likes": ["warehouse techno"] },
+    "suppressed": { "preferences.dislikes": ["pineapple on pizza"] }
+  }
+}

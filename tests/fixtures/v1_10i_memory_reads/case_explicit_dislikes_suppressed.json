@@ -1,0 +1,11 @@
+{
+  "viewer_key": "viewer:alice",
+  "message": "remind me what I hate",
+  "explicit_context": true,
+  "requested_slots": ["preferences.dislikes"],
+  "expected": {
+    "used": true,
+    "included": {},
+    "suppressed": { "preferences.dislikes": ["pineapple on pizza"] }
+  }
+}

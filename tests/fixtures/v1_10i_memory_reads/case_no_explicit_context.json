@@ -1,0 +1,7 @@
+{
+  "viewer_key": "viewer:alice",
+  "message": "yo what's up",
+  "explicit_context": false,
+  "requested_slots": ["preferences.likes"],
+  "expected": { "used": false, "included": {}, "suppressed": {} }
+}
