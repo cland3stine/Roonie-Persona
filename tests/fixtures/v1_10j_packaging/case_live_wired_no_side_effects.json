@@ -1,0 +1,21 @@
+{
+  "system": {
+    "armed": true,
+    "kill_switch": false,
+    "presence_mode": "normal"
+  },
+  "twitch": {
+    "enabled": true,
+    "armed": true,
+    "kill_switch": false,
+    "mode": "live"
+  },
+  "providers": {
+    "default_provider": "openai",
+    "providers": {
+      "openai": { "enabled": true },
+      "anthropic": { "enabled": false },
+      "grok": { "enabled": false }
+    }
+  }
+}
