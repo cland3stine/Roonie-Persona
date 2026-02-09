@@ -1,0 +1,12 @@
+{
+  "default_provider": "openai",
+  "providers": {
+    "openai": { "enabled": true },
+    "anthropic": { "enabled": true },
+    "grok": { "enabled": false }
+  },
+  "routing": {
+    "shadow_enabled": true,
+    "shadow_provider": "anthropic"
+  }
+}
