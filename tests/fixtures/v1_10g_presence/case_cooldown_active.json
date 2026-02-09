@@ -1,0 +1,7 @@
+{
+  "budget": { "max_per_hour": 5, "used": 1 },
+  "cooldown_seconds": 120,
+  "lane": "ambient",
+  "named_budget": { "max_per_hour": 0, "used": 0 },
+  "event": { "type": "track_change" }
+}
