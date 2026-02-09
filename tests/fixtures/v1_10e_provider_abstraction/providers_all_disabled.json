@@ -1,0 +1,8 @@
+{
+  "default_provider": "none",
+  "providers": {
+    "openai": { "enabled": false },
+    "anthropic": { "enabled": false },
+    "grok": { "enabled": false }
+  }
+}
