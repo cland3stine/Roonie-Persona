@@ -1,0 +1,10 @@
+﻿{
+  "status": 200,
+  "headers": { "content-type": "application/json" },
+  "body": {
+    "id": "grok_test",
+    "choices": [
+      { "message": { "role": "assistant", "content": "Grok says hello (fixture)." } }
+    ]
+  }
+}

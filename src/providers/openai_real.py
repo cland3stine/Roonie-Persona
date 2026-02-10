@@ -1,0 +1,51 @@
+from __future__ import annotations
+
+from typing import Any, Dict, Optional
+
+from src.providers.base import Provider
+from src.roonie.network.types import Transport
+
+
+class OpenAIProvider(Provider):
+    transport: Transport
+    api_key: str
+
+    def __init__(
+        self,
+        *,
+        enabled: bool,
+        transport: Transport,
+        api_key: str = "",
+        name: str = "openai",
+    ):
+        super().__init__(name=name, enabled=enabled)
+        object.__setattr__(self, "transport", transport)
+        object.__setattr__(self, "api_key", api_key)
+
+    def generate(self, *, prompt: str, context: Dict[str, Any]) -> Optional[str]:
+        if not self.enabled:
+            return None
+
+        fixture_name = context.get("fixture_name")
+        url = "https://api.openai.com/v1/chat/completions"
+        payload = {
+            "model": context.get("model", "gpt-5.2"),
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        api_key = (self.api_key or "").strip() or "REDACTED"
+        headers = {"Authorization": f"Bearer {api_key}"}
+
+        resp = self.transport.post_json(
+            url,
+            payload=payload,
+            headers=headers,
+            fixture_name=str(fixture_name) if fixture_name is not None else None,
+        )
+
+        if int(resp.status) != 200 or not isinstance(resp.body, dict):
+            return None
+
+        try:
+            return str(resp.body["choices"][0]["message"]["content"])
+        except Exception:
+            return None
