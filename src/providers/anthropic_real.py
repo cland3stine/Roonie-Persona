@@ -47,24 +47,53 @@ class AnthropicProvider(Provider):
             return None
 
         try:
-            # Common shapes:
-            # - {"content":[{"type":"text","text":"..."}]}
-            # - {"content":"..."}  (less common)
-            content = resp.body.get("content")
+            body = resp.body
+
+            # 1) Anthropic Messages API common shape:
+            # {"content":[{"type":"text","text":"..."}], ...}
+            content = body.get("content") if isinstance(body, dict) else None
             if isinstance(content, list):
-                # collect any text fields
-                text_parts = []
+                parts = []
                 for part in content:
                     if isinstance(part, dict):
                         t = part.get("text")
                         if t is not None:
-                            text_parts.append(str(t))
-                if text_parts:
-                    return "\n".join(text_parts)
-                return None
-            if isinstance(content, str):
-                return content
-            # Some error-ish bodies still return 200 in edge cases; be conservative.
-            return None
+                            parts.append(str(t))
+                if parts:
+                    return "\n".join(parts)
+
+            # 2) Some variants use 'completion'
+            completion = body.get("completion") if isinstance(body, dict) else None
+            if isinstance(completion, str) and completion.strip():
+                return completion
+
+            # 3) Gateway / wrapper variants (OpenAI-ish):
+            # {"choices":[{"message":{"content":"..."}}]}
+            choices = body.get("choices") if isinstance(body, dict) else None
+            if isinstance(choices, list) and choices:
+                ch0 = choices[0]
+                if isinstance(ch0, dict):
+                    msg = ch0.get("message")
+                    if isinstance(msg, dict):
+                        c = msg.get("content")
+                        if isinstance(c, str) and c.strip():
+                            return c
+                    # sometimes: {"text":"..."}
+                    t = ch0.get("text")
+                    if isinstance(t, str) and t.strip():
+                        return t
+
+            # If we got here, response succeeded but we couldn't find text.
+            # Raise a schema-only error (safe) so the caller can log it in shadow mode.
+            if isinstance(body, dict):
+                keys = sorted(list(body.keys()))
+                sample = {k: type(body.get(k)).__name__ for k in keys[:25]}
+                # If we got here, response succeeded but we couldn't find text.
+            # Return schema-only marker for shadow logs (safe, no content).
+            if isinstance(body, dict):
+                keys = sorted(list(body.keys()))
+                sample = {k: type(body.get(k)).__name__ for k in keys[:25]}
+                return f"[[SCHEMA]] keys={keys[:25]} types={sample}"
+            return f"[[SCHEMA]] body_type={type(body).__name__}"
         except Exception:
             return None

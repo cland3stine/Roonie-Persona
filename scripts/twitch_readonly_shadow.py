@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import os
 import time
+import random
 from datetime import datetime
 from typing import Any, Dict
 
@@ -37,6 +38,50 @@ def _load_secrets_env(path: Path) -> None:
 
 def _now_tag() -> str:
     return datetime.now().strftime("%Y-%m-%d_%H%M%S")
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name) or default)
+    except Exception:
+        return default
+
+
+def _compute_reply_delay_seconds(*, reply_text: str) -> float:
+    """
+    Human-ish delay: short replies wait less; longer replies wait more.
+    Controlled by env vars (seconds):
+      ROONIE_DELAY_SHORT_MIN / ROONIE_DELAY_SHORT_MAX (default 5..10)
+      ROONIE_DELAY_LONG_MIN  / ROONIE_DELAY_LONG_MAX  (default 10..20)
+      ROONIE_DELAY_LONG_CHARS (default 140)  # threshold for "long"
+      ROONIE_DELAY_SEED (optional)           # for reproducible tests
+    """
+    # Allow disabling by setting max to 0
+    short_min = _env_float("ROONIE_DELAY_SHORT_MIN", 5.0)
+    short_max = _env_float("ROONIE_DELAY_SHORT_MAX", 10.0)
+    long_min  = _env_float("ROONIE_DELAY_LONG_MIN", 10.0)
+    long_max  = _env_float("ROONIE_DELAY_LONG_MAX", 20.0)
+    long_chars = int(os.getenv("ROONIE_DELAY_LONG_CHARS") or "140")
+
+    # Clamp
+    short_min = max(0.0, short_min); short_max = max(short_min, short_max)
+    long_min  = max(0.0, long_min);  long_max  = max(long_min, long_max)
+
+    if short_max == 0.0 and long_max == 0.0:
+        return 0.0
+
+    # Optional seed (useful for controlled dry-runs)
+    seed = os.getenv("ROONIE_DELAY_SEED")
+    if seed:
+        try:
+            random.seed(int(seed))
+        except Exception:
+            random.seed(seed)
+
+    is_long = len(reply_text or "") >= long_chars
+    lo, hi = (long_min, long_max) if is_long else (short_min, short_max)
+    return random.uniform(lo, hi)
+
 
 def main() -> int:
     repo_root = Path(__file__).resolve().parents[1]
@@ -120,6 +165,12 @@ def main() -> int:
         lat_primary = int((time.perf_counter() - t0) * 1000)
         print(f"\n#{count} {msg.nick}: {text}")
         print(f"PRIMARY(openai) latency_ms={lat_primary}")
+        delay_s = 0.0
+        # No artificial delay in offline mode
+        if not bool(int(os.getenv('ROONIE_OFFLINE') or '0')):
+            delay_s = _compute_reply_delay_seconds(reply_text=(out_primary or ""))
+        if delay_s > 0:
+            time.sleep(delay_s)
         print(out_primary or "(None)")
 
         # Shadows (logged)

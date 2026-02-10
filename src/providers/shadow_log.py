@@ -2,6 +2,8 @@
 
 import json
 from dataclasses import dataclass
+
+SCHEMA_MARKER = "[[SCHEMA]]"
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
