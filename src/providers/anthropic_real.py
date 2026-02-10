@@ -75,7 +75,11 @@ class AnthropicProvider(Provider):
             "messages": [{"role": "user", "content": prompt}],
         }
         api_key = (self.api_key or "").strip() or "REDACTED"
-        headers = {"x-api-key": api_key}
+        headers = {
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
 
         resp = self.transport.post_json(
             url,
