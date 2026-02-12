@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import os
 import socket
+import ssl
 from typing import Any, Dict
 
 HOST = "irc.chat.twitch.tv"
-PORT = 6667
+PORT = 6697
 
 
 class TwitchOutputAdapter:
@@ -44,6 +45,8 @@ class TwitchOutputAdapter:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(5.0)
             sock.connect((HOST, PORT))
+            sock = ssl.create_default_context().wrap_socket(sock, server_hostname=HOST)
+            sock.settimeout(5.0)
             sock.sendall(f"PASS {token}\r\n".encode("utf-8"))
             sock.sendall(f"NICK {nick}\r\n".encode("utf-8"))
             sock.sendall(f"JOIN #{channel}\r\n".encode("utf-8"))
