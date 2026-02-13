@@ -1,0 +1,199 @@
+{
+  "session_id": "p6-1-offline-armed-rehearsal-001",
+  "fixture_hint": "P6.1_offline_armed_rehearsal_live_mode",
+  "mode": "live",
+  "inputs": [
+    {
+      "event_id": "evt-01",
+      "message": "@RoonieTheCat hey Roon!",
+      "actor": "viewer",
+      "metadata": {
+        "platform": "twitch",
+        "channel": "ruleofrune",
+        "user": "ruleofrune",
+        "is_direct_mention": true,
+        "mode": "live"
+      }
+    },
+    {
+      "event_id": "evt-02",
+      "message": "@RoonieTheCat what track is this right now?",
+      "actor": "viewer",
+      "metadata": {
+        "platform": "twitch",
+        "channel": "ruleofrune",
+        "user": "ruleofrune",
+        "is_direct_mention": true,
+        "mode": "live"
+      }
+    },
+    {
+      "event_id": "evt-03",
+      "message": "@RoonieTheCat how's it going tonight?",
+      "actor": "viewer",
+      "metadata": {
+        "platform": "twitch",
+        "channel": "ruleofrune",
+        "user": "ruleofrune",
+        "is_direct_mention": true,
+        "mode": "live"
+      }
+    },
+    {
+      "event_id": "evt-04",
+      "message": "@RoonieTheCat where are you located exactly?",
+      "actor": "viewer",
+      "metadata": {
+        "platform": "twitch",
+        "channel": "ruleofrune",
+        "user": "ruleofrune",
+        "is_direct_mention": true,
+        "mode": "live"
+      }
+    },
+    {
+      "event_id": "evt-05",
+      "message": "@RoonieTheCat what's Art's last name?",
+      "actor": "viewer",
+      "metadata": {
+        "platform": "twitch",
+        "channel": "ruleofrune",
+        "user": "ruleofrune",
+        "is_direct_mention": true,
+        "mode": "live"
+      }
+    },
+    {
+      "event_id": "evt-06",
+      "message": "@RoonieTheCat what kind of camera do you guys use?",
+      "actor": "viewer",
+      "metadata": {
+        "platform": "twitch",
+        "channel": "ruleofrune",
+        "user": "ruleofrune",
+        "is_direct_mention": true,
+        "mode": "live"
+      }
+    },
+    {
+      "event_id": "evt-07",
+      "message": "@RoonieTheCat are you real?",
+      "actor": "viewer",
+      "metadata": {
+        "platform": "twitch",
+        "channel": "ruleofrune",
+        "user": "ruleofrune",
+        "is_direct_mention": true,
+        "mode": "live"
+      }
+    },
+    {
+      "event_id": "evt-08",
+      "message": "@RoonieTheCat are you AI?",
+      "actor": "viewer",
+      "metadata": {
+        "platform": "twitch",
+        "channel": "ruleofrune",
+        "user": "ruleofrune",
+        "is_direct_mention": true,
+        "mode": "live"
+      }
+    },
+    {
+      "event_id": "evt-09",
+      "message": "@RoonieTheCat who is cland3stine?",
+      "actor": "viewer",
+      "metadata": {
+        "platform": "twitch",
+        "channel": "ruleofrune",
+        "user": "ruleofrune",
+        "is_direct_mention": true,
+        "mode": "live"
+      }
+    },
+    {
+      "event_id": "evt-10",
+      "message": "@RoonieTheCat say something funny",
+      "actor": "viewer",
+      "metadata": {
+        "platform": "twitch",
+        "channel": "ruleofrune",
+        "user": "ruleofrune",
+        "is_direct_mention": true,
+        "mode": "live"
+      }
+    },
+    {
+      "event_id": "evt-11",
+      "message": "@RoonieTheCat lol you are not funny at all",
+      "actor": "viewer",
+      "metadata": {
+        "platform": "twitch",
+        "channel": "ruleofrune",
+        "user": "ruleofrune",
+        "is_direct_mention": true,
+        "mode": "live"
+      }
+    },
+    {
+      "event_id": "evt-12",
+      "message": "@RoonieTheCat can you tell me where I'm chatting from?",
+      "actor": "viewer",
+      "metadata": {
+        "platform": "twitch",
+        "channel": "ruleofrune",
+        "user": "ruleofrune",
+        "is_direct_mention": true,
+        "mode": "live"
+      }
+    },
+    {
+      "event_id": "evt-13",
+      "message": "@RoonieTheCat Art sucks as a DJ.. i'm leaving..",
+      "actor": "viewer",
+      "metadata": {
+        "platform": "twitch",
+        "channel": "ruleofrune",
+        "user": "ruleofrune",
+        "is_direct_mention": true,
+        "mode": "live"
+      }
+    },
+    {
+      "event_id": "evt-14",
+      "message": "@RoonieTheCat you suck",
+      "actor": "viewer",
+      "metadata": {
+        "platform": "twitch",
+        "channel": "ruleofrune",
+        "user": "ruleofrune",
+        "is_direct_mention": true,
+        "mode": "live"
+      }
+    },
+    {
+      "event_id": "evt-15",
+      "message": "@RoonieTheCat where can I find a job? Can you help me?",
+      "actor": "viewer",
+      "metadata": {
+        "platform": "twitch",
+        "channel": "ruleofrune",
+        "user": "ruleofrune",
+        "is_direct_mention": true,
+        "mode": "live"
+      }
+    },
+    {
+      "event_id": "evt-16",
+      "message": "@RoonieTheCat construction in Seattle",
+      "actor": "viewer",
+      "metadata": {
+        "platform": "twitch",
+        "channel": "ruleofrune",
+        "user": "ruleofrune",
+        "is_direct_mention": true,
+        "mode": "live"
+      }
+    }
+  ]
+}

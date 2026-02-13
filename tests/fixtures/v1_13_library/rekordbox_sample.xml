@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<DJ_PLAYLISTS Version="1.0.0">
+  <COLLECTION Entries="3">
+    <TRACK TrackID="1" Name="Lamur" Artist="Guy J" AverageBpm="122.0" Tonality="Am" Location="file:///music/Guy%20J%20-%20Lamur.mp3" />
+    <TRACK TrackID="2" Name="Dystopian" Artist="Henry Saiz" Mix="Dub Mix" AverageBpm="124" Tonality="Cm" />
+    <TRACK TrackID="3" Name="Sequential" Artist="Hernan Cattaneo" AverageBpm="121" Tonality="Fm" />
+  </COLLECTION>
+</DJ_PLAYLISTS>

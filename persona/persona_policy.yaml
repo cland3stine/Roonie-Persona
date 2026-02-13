@@ -1,0 +1,9 @@
+version: 1
+persona: roonie
+senses:
+  enabled: false
+  local_only: true
+  whitelist:
+    - Art
+    - Jen
+

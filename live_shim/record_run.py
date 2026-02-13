@@ -2,7 +2,6 @@
 
 import json
 import subprocess
-from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
@@ -48,7 +47,7 @@ def run_payload(payload: dict, emit_outputs: bool = False) -> Path:
             metadata=item.get("metadata", {}),
         )
         decision = director.evaluate(event, env)
-        decisions.append(asdict(decision))
+        decisions.append(decision.to_dict(exclude_defaults=True))
         decisions.extend(
             evaluate_memory_intents(
                 {

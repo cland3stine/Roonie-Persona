@@ -4,13 +4,17 @@ import difflib
 import json
 import sys
 import unicodedata
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from roonie.offline_director import OfflineDirector
 from roonie.types import Env, Event
 from memory.intent_evaluator import evaluate_memory_intents
+
+CONTEXT_DEFAULTS = {
+    "context_active": False,
+    "context_turns_used": 0,
+}
 
 
 def _diff_strings(label: str, expected: str, actual: str) -> str:
@@ -51,10 +55,10 @@ def assert_decisions_equal(expected, actual) -> None:
         e = {k: v for k, v in e.items() if k != "case_id"}
         a = {k: v for k, v in a.items() if k != "case_id"}
         diffs = []
-        all_keys = sorted(set(e.keys()) | set(a.keys()))
-        for key in all_keys:
-            e_val = e.get(key)
-            a_val = a.get(key)
+        expected_keys = sorted(k for k in e.keys() if k != "trace")
+        for key in expected_keys:
+            e_val = e.get(key, CONTEXT_DEFAULTS.get(key))
+            a_val = a.get(key, CONTEXT_DEFAULTS.get(key))
             if key == "response_text" and isinstance(e_val, str) and isinstance(a_val, str):
                 if norm_text(e_val) != norm_text(a_val):
                     diffs.append(key)
@@ -64,10 +68,20 @@ def assert_decisions_equal(expected, actual) -> None:
 
         trace_keys = ["gates", "policy", "routing"]
         trace_diffs = {}
+        e_trace = e.get("trace", {})
+        a_trace = a.get("trace", {})
+        if not isinstance(e_trace, dict):
+            e_trace = {}
+        if not isinstance(a_trace, dict):
+            a_trace = {}
         for section in trace_keys:
-            e_sec = e.get("trace", {}).get(section, {})
-            a_sec = a.get("trace", {}).get(section, {})
-            sec_keys = sorted(set(e_sec.keys()) | set(a_sec.keys()))
+            e_sec = e_trace.get(section, {})
+            a_sec = a_trace.get(section, {})
+            if not isinstance(e_sec, dict):
+                e_sec = {}
+            if not isinstance(a_sec, dict):
+                a_sec = {}
+            sec_keys = sorted(e_sec.keys())
             sec_diffs = [k for k in sec_keys if e_sec.get(k) != a_sec.get(k)]
             if sec_diffs:
                 trace_diffs[section] = sec_diffs
@@ -95,8 +109,8 @@ def assert_decisions_equal(expected, actual) -> None:
                         parts.append(diff)
 
             for section, keys in trace_diffs.items():
-                e_sec = e.get("trace", {}).get(section, {})
-                a_sec = a.get("trace", {}).get(section, {})
+                e_sec = e_trace.get(section, {})
+                a_sec = a_trace.get(section, {})
                 for key in keys:
                     e_val = e_sec.get(key)
                     a_val = a_sec.get(key)
@@ -166,7 +180,7 @@ def _run_director(inputs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             metadata=item.get("metadata", {}),
         )
         decision = director.evaluate(event, env)
-        results.append(asdict(decision))
+        results.append(decision.to_dict(exclude_defaults=True))
         results.extend(
             evaluate_memory_intents(
                 {

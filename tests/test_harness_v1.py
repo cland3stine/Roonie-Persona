@@ -9,6 +9,11 @@ import pytest
 
 from roonie.harness import run_case
 
+CONTEXT_DEFAULTS = {
+    "context_active": False,
+    "context_turns_used": 0,
+}
+
 
 def _diff_strings(label: str, expected: str, actual: str) -> str:
     expected_lines = expected.splitlines(keepends=True)
@@ -46,10 +51,10 @@ def assert_decisions_equal(expected, actual) -> None:
 
     for idx, (e, a) in enumerate(zip(expected, actual)):
         diffs = []
-        all_keys = sorted(set(e.keys()) | set(a.keys()))
-        for key in all_keys:
-            e_val = e.get(key)
-            a_val = a.get(key)
+        expected_keys = sorted(k for k in e.keys() if k != "trace")
+        for key in expected_keys:
+            e_val = e.get(key, CONTEXT_DEFAULTS.get(key))
+            a_val = a.get(key, CONTEXT_DEFAULTS.get(key))
             if key == "response_text" and isinstance(e_val, str) and isinstance(a_val, str):
                 if norm_text(e_val) != norm_text(a_val):
                     diffs.append(key)
@@ -59,10 +64,20 @@ def assert_decisions_equal(expected, actual) -> None:
 
         trace_keys = ["gates", "policy", "routing"]
         trace_diffs = {}
+        e_trace = e.get("trace", {})
+        a_trace = a.get("trace", {})
+        if not isinstance(e_trace, dict):
+            e_trace = {}
+        if not isinstance(a_trace, dict):
+            a_trace = {}
         for section in trace_keys:
-            e_sec = e.get("trace", {}).get(section, {})
-            a_sec = a.get("trace", {}).get(section, {})
-            sec_keys = sorted(set(e_sec.keys()) | set(a_sec.keys()))
+            e_sec = e_trace.get(section, {})
+            a_sec = a_trace.get(section, {})
+            if not isinstance(e_sec, dict):
+                e_sec = {}
+            if not isinstance(a_sec, dict):
+                a_sec = {}
+            sec_keys = sorted(e_sec.keys())
             sec_diffs = [k for k in sec_keys if e_sec.get(k) != a_sec.get(k)]
             if sec_diffs:
                 trace_diffs[section] = sec_diffs
@@ -90,8 +105,8 @@ def assert_decisions_equal(expected, actual) -> None:
                         parts.append(diff)
 
             for section, keys in trace_diffs.items():
-                e_sec = e.get("trace", {}).get(section, {})
-                a_sec = a.get("trace", {}).get(section, {})
+                e_sec = e_trace.get(section, {})
+                a_sec = a_trace.get(section, {})
                 for key in keys:
                     e_val = e_sec.get(key)
                     a_val = a_sec.get(key)

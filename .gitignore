@@ -4,3 +4,8 @@
 .pytest_cache/
 runs/
 config/secrets.env
+.cache/
+.tmp_twtest/
+frontend/node_modules/
+dist/
+data/

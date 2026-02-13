@@ -3,7 +3,7 @@
 import re
 from typing import Dict, Optional
 
-from .offline_responders import respond
+from .offline_responders import classify_safe_info_category, library_availability_response, respond
 from .types import DecisionRecord, Env, Event
 
 
@@ -91,6 +91,9 @@ class OfflineDirector:
         route = "none"
         routing_reason_codes = []
         selected_responder: Optional[str] = None
+        utility_category: Optional[str] = None
+        utility_source: Optional[str] = None
+        match_confidence: Optional[str] = None
 
         if addressed_to_roonie and (
             trigger_type in ("direct_question", "direct_request")
@@ -118,6 +121,12 @@ class OfflineDirector:
                 action = "RESPOND_PUBLIC"
                 route = "responder:policy_safe_info"
                 selected_responder = route
+                utility_category = classify_safe_info_category(message)
+                if utility_category == "utility_library":
+                    utility_source = "library_index"
+                    match_confidence, _ = library_availability_response(message)
+                else:
+                    utility_source = "studio_profile"
                 routing_reason_codes.append("ROUTE_SAFE_INFO")
 
         response_text = None
@@ -138,6 +147,9 @@ class OfflineDirector:
             "routing": {
                 "selected_responder": selected_responder,
                 "routing_reason_codes": routing_reason_codes,
+                "utility_category": utility_category,
+                "utility_source": utility_source,
+                "match_confidence": match_confidence,
             },
         }
 

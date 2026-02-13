@@ -1,0 +1,38 @@
+{
+  "provider_cfg": {
+    "default_provider": "openai",
+    "providers": {
+      "openai": { "enabled": true },
+      "anthropic": { "enabled": false },
+      "grok": { "enabled": false }
+    }
+  },
+  "routing_cfg": {
+    "shadow_enabled": false,
+    "shadow_provider": "none"
+  },
+  "events": [
+    {
+      "event_id": "ctx-1",
+      "message": "@RoonieTheCat where can I find a job? Can you help me?",
+      "metadata": {
+        "case_id": "ctx-job",
+        "channel": "ruleofrune",
+        "user": "ruleofrune",
+        "is_direct_mention": true,
+        "category": "operator_queue"
+      }
+    },
+    {
+      "event_id": "ctx-2",
+      "message": "@RoonieTheCat Construction in Seattle",
+      "metadata": {
+        "case_id": "ctx-job",
+        "channel": "ruleofrune",
+        "user": "ruleofrune",
+        "is_direct_mention": true,
+        "category": "utility_library"
+      }
+    }
+  ]
+}
