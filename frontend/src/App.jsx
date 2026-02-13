@@ -33,6 +33,7 @@ const API_BASE =
 const OPERATOR_KEY_STORAGE_KEY = "ROONIE_OPERATOR_KEY";
 const OPERATOR_ACTOR_STORAGE_KEY = "ROONIE_OPERATOR_ACTOR";
 const LAST_LOGIN_USERNAME_STORAGE_KEY = "ROONIE_LAST_LOGIN_USERNAME";
+const REMEMBER_LOGIN_STORAGE_KEY = "ROONIE_REMEMBER_LOGIN";
 const OPERATOR_KEY =
   (typeof window !== "undefined" && (window.__ROONIE_OPERATOR_KEY__ || window.localStorage.getItem(OPERATOR_KEY_STORAGE_KEY))) || "";
 const INITIAL_OPERATOR_ACTOR =
@@ -247,8 +248,14 @@ function LevelIndicator({ level }) {
 }
 
 function DashboardAuthOverlay({ visible, busy, errorText, onSubmit }) {
+  const [rememberLogin, setRememberLogin] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem(REMEMBER_LOGIN_STORAGE_KEY) === "1";
+  });
   const [username, setUsername] = useState(() => {
     if (typeof window === "undefined") return "";
+    const remember = window.localStorage.getItem(REMEMBER_LOGIN_STORAGE_KEY) === "1";
+    if (!remember) return "";
     const saved = window.localStorage.getItem(LAST_LOGIN_USERNAME_STORAGE_KEY);
     return saved ? String(saved) : "";
   });
@@ -287,8 +294,16 @@ function DashboardAuthOverlay({ visible, busy, errorText, onSubmit }) {
           }}
         />
         {errorText ? <div style={{ fontSize: 11, color: "#ff851b", marginBottom: 8 }}>{errorText}</div> : null}
+        <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, ...TEXT_STYLES.muted }}>
+          <input
+            type="checkbox"
+            checked={rememberLogin}
+            onChange={(e) => setRememberLogin(Boolean(e.target.checked))}
+          />
+          Remember login info
+        </label>
         <button
-          onClick={() => onSubmit(username, password)}
+          onClick={() => onSubmit(username, password, rememberLogin)}
           disabled={busy || !username || !password}
           style={{
             width: "100%", background: "#2a2a2e", color: "#ccc", border: "1px solid #3a3a3e", borderRadius: 2,
@@ -734,7 +749,7 @@ function useDashboardData() {
     }
   };
 
-  const loginDashboard = async (username, password) => {
+  const loginDashboard = async (username, password, rememberLogin = false) => {
     try {
       const response = await apiFetch(`${API_BASE}/api/auth/login`, {
         method: "POST",
@@ -745,7 +760,13 @@ function useDashboardData() {
       if (response.ok && body?.authenticated) {
         setAuthData(body);
         if (typeof window !== "undefined") {
-          window.localStorage.setItem(LAST_LOGIN_USERNAME_STORAGE_KEY, String(username || "").trim());
+          if (rememberLogin) {
+            window.localStorage.setItem(REMEMBER_LOGIN_STORAGE_KEY, "1");
+            window.localStorage.setItem(LAST_LOGIN_USERNAME_STORAGE_KEY, String(username || "").trim());
+          } else {
+            window.localStorage.removeItem(REMEMBER_LOGIN_STORAGE_KEY);
+            window.localStorage.removeItem(LAST_LOGIN_USERNAME_STORAGE_KEY);
+          }
         }
         await refreshData();
         return { ok: true, body };
@@ -766,6 +787,10 @@ function useDashboardData() {
     } catch (_err) {
       // Ignore logout errors; refresh handles state.
     } finally {
+      if (typeof window !== "undefined") {
+        window.localStorage.removeItem(LAST_LOGIN_USERNAME_STORAGE_KEY);
+        window.localStorage.removeItem(REMEMBER_LOGIN_STORAGE_KEY);
+      }
       setAuthData({ authenticated: false, username: null, role: null });
       setAuthChecked(true);
       await refreshData();
@@ -1331,7 +1356,7 @@ function ProvidersPage({ providersStatusData, routingStatusData, systemHealthDat
   const routingModelLine = `${a?.model || AWAITING} | Routing ${routingEnabled ? "ON" : "OFF"} (${routingOverride}) | Last ${(routingClass ? routingClass.toUpperCase() : AWAITING)} | Lat O:${openaiLatency !== null ? `${Math.round(openaiLatency)}ms` : AWAITING} G:${grokLatency !== null ? `${Math.round(grokLatency)}ms` : AWAITING} | ModBlock O:${countText(openaiBlocks)} G:${countText(grokBlocks)} | Hits M:${countText(musicHits)} G:${countText(generalHits)} O:${countText(overrideHits)} | Memory ${memoryReachable === true ? "OK" : (memoryReachable === false ? "ERR" : AWAITING)} | ${readinessText}`;
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-      <RackPanel><RackLabel>Active Provider</RackLabel><div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}><Led color="#2ecc40" size={10} pulse={Boolean(a)} label="ACTIVE" /><div><div style={{ fontSize: 18, fontWeight: 700, color: "#ccc", fontFamily: "'JetBrains Mono', monospace" }}>{a?.name || AWAITING}</div><div style={{ fontSize: 11, color: "#666", fontFamily: "'JetBrains Mono', monospace" }}>{routingModelLine}</div></div></div><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}><div><RackLabel>Latency (avg)</RackLabel><div style={{ fontSize: 20, fontWeight: 700, color: "#ccc", fontFamily: "'JetBrains Mono', monospace" }}>{a?.latency !== null && Number.isFinite(a?.latency) ? `${a.latency}ms` : AWAITING}</div></div><div><RackLabel>Failures</RackLabel><div style={{ fontSize: 20, fontWeight: 700, color: "#ccc", fontFamily: "'JetBrains Mono', monospace" }}>{a?.failures !== null && Number.isFinite(a?.failures) ? `${a.failures}` : AWAITING}</div></div></div>{a?.latency !== null && Number.isFinite(a?.latency) && <div style={{ marginTop: 16 }}><MeterBar value={a.latency} max={1000} color={a.latency < 500 ? "#2ecc40" : "#ff851b"} label="Response latency" /></div>}<div style={{ marginTop: 10, fontSize: 10, color: "#555", fontFamily: "'JetBrains Mono', monospace" }}>Requests: {a?.requests !== null && Number.isFinite(a?.requests) ? a.requests : AWAITING} | Moderation blocks: {a?.moderationBlocks !== null && Number.isFinite(a?.moderationBlocks) ? a.moderationBlocks : AWAITING}</div></RackPanel>
+      <RackPanel><RackLabel>Active Provider</RackLabel><div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}><Led color="#2ecc40" size={10} pulse={Boolean(a)} label="ACTIVE" /><div><div style={{ fontSize: 18, fontWeight: 700, color: "#ccc", fontFamily: "'JetBrains Mono', monospace" }}>{a?.name || AWAITING}</div><div style={{ fontSize: 11, color: "#666", fontFamily: "'JetBrains Mono', monospace", lineHeight: 1.4, wordBreak: "break-word" }}>{routingModelLine}</div></div></div><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}><div><RackLabel>Latency (avg)</RackLabel><div style={{ fontSize: 20, fontWeight: 700, color: "#ccc", fontFamily: "'JetBrains Mono', monospace" }}>{a?.latency !== null && Number.isFinite(a?.latency) ? `${a.latency}ms` : AWAITING}</div></div><div><RackLabel>Failures</RackLabel><div style={{ fontSize: 20, fontWeight: 700, color: "#ccc", fontFamily: "'JetBrains Mono', monospace" }}>{a?.failures !== null && Number.isFinite(a?.failures) ? `${a.failures}` : AWAITING}</div></div></div>{a?.latency !== null && Number.isFinite(a?.latency) && <div style={{ marginTop: 16 }}><MeterBar value={a.latency} max={1000} color={a.latency < 500 ? "#2ecc40" : "#ff851b"} label="Response latency" /></div>}<div style={{ marginTop: 10, fontSize: 10, color: "#555", fontFamily: "'JetBrains Mono', monospace" }}>Requests: {a?.requests !== null && Number.isFinite(a?.requests) ? a.requests : AWAITING} | Moderation blocks: {a?.moderationBlocks !== null && Number.isFinite(a?.moderationBlocks) ? a.moderationBlocks : AWAITING}</div></RackPanel>
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         <RackPanel><RackLabel>Usage - Today</RackLabel><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}><div><div style={{ fontSize: 28, fontWeight: 800, color: "#ccc", fontFamily: "'JetBrains Mono', monospace", lineHeight: 1 }}>{dailyCostText}</div><div style={{ fontSize: 10, color: "#555", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", marginTop: 4 }}>COST TODAY</div></div><div><div style={{ fontSize: 28, fontWeight: 800, color: "#ccc", fontFamily: "'JetBrains Mono', monospace", lineHeight: 1 }}>{requestsUsed !== null && Number.isFinite(requestsUsed) ? requestsUsed : AWAITING}</div><div style={{ fontSize: 10, color: "#555", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", marginTop: 4 }}>API CALLS</div></div></div>{requestsMax > 0 && requestsUsed !== null && Number.isFinite(requestsUsed) && <MeterBar value={Math.min(requestsUsed, requestsMax)} max={requestsMax} color="#7faacc" label={`Daily request cap (${requestsMax})`} />}</RackPanel>
         <RackPanel><RackLabel>Provider Switch - Pre-Approved Only</RackLabel>{providers.map((p) => (<button key={p.id} onClick={() => setProviderActive(p.id)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: ap === p.id ? "#2a2a2e" : "transparent", border: `1px solid ${ap === p.id ? "#7faacc44" : "#252528"}`, borderRadius: 3, padding: "10px 14px", marginBottom: 6, cursor: "pointer", boxSizing: "border-box" }}><div style={{ display: "flex", alignItems: "center", gap: 8 }}><Led color={ap === p.id ? "#2ecc40" : "#555"} size={6} /><span style={{ fontSize: 12, color: ap === p.id ? "#ccc" : "#666", fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>{p.name}</span></div><span style={{ fontSize: 9, letterSpacing: 1.5, color: ap === p.id ? "#2ecc40" : "#555", fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>{ap === p.id ? "ACTIVE" : "STANDBY"}</span></button>))}{!providers.length && <AwaitingBlock style={{ padding: "6px 0" }} />}<div style={{ marginTop: 8 }}><RackButton label="NOT AVAILABLE" color="#7faacc" disabled /></div></RackPanel>
@@ -1347,6 +1372,9 @@ function AuthPage({ twitchStatusData, twitchConnectStart, twitchDisconnect, twit
   const bot = accounts.bot || {};
   const broadcaster = accounts.broadcaster || {};
   const scopesPresent = twitchStatusData?.scopes_present || {};
+  const missingConfigFields = Array.isArray(twitchStatusData?.missing_config_fields) ? twitchStatusData.missing_config_fields : [];
+  const primaryChannelRaw = String(twitchStatusData?.primary_channel || "").trim();
+  const primaryChannel = primaryChannelRaw ? `#${primaryChannelRaw.replace(/^#/, "")}` : "";
   const caps = [
     { name: "Read chat events", on: Boolean(scopesPresent["chat:read"]) },
     { name: "Send chat messages", on: Boolean(scopesPresent["chat:edit"]) },
@@ -1366,6 +1394,7 @@ function AuthPage({ twitchStatusData, twitchConnectStart, twitchDisconnect, twit
     const accountRole = String(account?.role || "").trim() || AWAITING;
     const accountId = String(account?.account || "").toLowerCase();
     const canDisconnect = Boolean(account?.disconnect_available && accountId);
+    const canConnect = Boolean(account?.connect_available && accountId);
     const statusLabel = connected === true ? "CONNECTED" : (connected === false ? "DISCONNECTED" : AWAITING.toUpperCase());
     return (
       <div style={{ marginBottom: 16 }}>
@@ -1384,9 +1413,9 @@ function AuthPage({ twitchStatusData, twitchConnectStart, twitchDisconnect, twit
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <RackButton
-            label={connected === true ? "RECONNECT" : "CONNECT"}
+            label={canConnect ? (connected === true ? "RECONNECT" : "CONNECT") : "NOT AVAILABLE"}
             color="#7faacc"
-            disabled={!accountId}
+            disabled={!canConnect}
             onClick={async () => {
               const result = await twitchConnectStart(accountId);
               const authUrl = result?.body?.auth_url;
@@ -1439,6 +1468,12 @@ function AuthPage({ twitchStatusData, twitchConnectStart, twitchDisconnect, twit
           <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
             <Led color={healthOk ? "#2ecc40" : "#ff851b"} size={8} pulse={healthOk} />
             <span style={{ fontSize: 13, fontWeight: 700, color: healthOk ? "#2ecc40" : "#ff851b", fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1.5 }}>{healthLabel}</span>
+          </div>
+          <RackLabel>Primary Channel</RackLabel>
+          <div style={{ ...TEXT_STYLES.body, marginBottom: 8 }}>{primaryChannel || AWAITING}</div>
+          <RackLabel>Missing Config</RackLabel>
+          <div style={{ ...TEXT_STYLES.muted, marginBottom: 10 }}>
+            {missingConfigFields.length ? missingConfigFields.join(", ") : "none"}
           </div>
           <RackLabel>Last Refresh</RackLabel>
           <div style={{ fontSize: 12, color: "#888", fontFamily: "'JetBrains Mono', monospace" }}>{lastRefresh}</div>
@@ -1702,10 +1737,10 @@ export default function RoonieControlRoom() {
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState("");
 
-  const handleAuthLogin = async (username, password) => {
+  const handleAuthLogin = async (username, password, rememberLogin) => {
     setAuthBusy(true);
     setAuthError("");
-    const result = await loginDashboard(username, password);
+    const result = await loginDashboard(username, password, rememberLogin);
     if (!result.ok) {
       const detail = result?.body?.detail || result?.body?.error || "Login failed";
       setAuthError(String(detail));

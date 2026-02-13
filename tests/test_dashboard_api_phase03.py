@@ -1480,6 +1480,7 @@ def test_system_export_endpoint_director_only_and_zip_contents(tmp_path: Path, m
             "data/routing_config.json",
             "data/studio_profile.json",
             "data/senses_config.json",
+            "data/twitch_config.json",
             "data/memory.sqlite",
         ]
     )
@@ -1928,7 +1929,89 @@ def test_twitch_connect_start_reports_config_missing_with_auth(tmp_path: Path, m
     assert code == 200
     assert body["ok"] is False
     assert body["error"] == "CONFIG_MISSING"
-    assert "TWITCH_CLIENT_ID" in body["detail"]
+    missing = set(body.get("missing", []))
+    assert {"TWITCH_CLIENT_ID", "TWITCH_CLIENT_SECRET", "TWITCH_REDIRECT_URI", "PRIMARY_CHANNEL"} <= missing
+
+
+def test_twitch_status_reports_missing_primary_channel_and_disables_connect(tmp_path: Path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.delenv("ROONIE_OPERATOR_KEY", raising=False)
+    monkeypatch.setenv("TWITCH_OAUTH_TOKEN", "oauth:test-bot-token")
+    monkeypatch.setenv("TWITCH_NICK", "RoonieTheCat")
+    monkeypatch.delenv("TWITCH_CHANNEL", raising=False)
+    monkeypatch.setenv("TWITCH_CLIENT_ID", "test-client-id")
+    monkeypatch.setenv("TWITCH_CLIENT_SECRET", "test-client-secret")
+    monkeypatch.setenv("TWITCH_REDIRECT_URI", "http://127.0.0.1/callback")
+
+    server, thread = _start_server(runs_dir)
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        _, status = _request_json(base, "/api/twitch/status")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    assert "PRIMARY_CHANNEL" in status.get("missing_config_fields", [])
+    assert status["accounts"]["bot"]["connected"] is False
+    assert status["accounts"]["bot"]["reason"] == "MISSING_PRIMARY_CHANNEL"
+    assert status["accounts"]["bot"]["connect_available"] is False
+
+
+def test_twitch_connect_start_uses_primary_channel_from_config_file(tmp_path: Path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_DASHBOARD_ART_PASSWORD", "art-pass-123")
+    monkeypatch.setenv("ROONIE_DASHBOARD_JEN_PASSWORD", "jen-pass-123")
+    monkeypatch.delenv("ROONIE_OPERATOR_KEY", raising=False)
+    monkeypatch.setenv("TWITCH_CLIENT_ID", "test-client-id")
+    monkeypatch.setenv("TWITCH_CLIENT_SECRET", "test-client-secret")
+    monkeypatch.setenv("TWITCH_REDIRECT_URI", "http://127.0.0.1/callback")
+    monkeypatch.delenv("TWITCH_CHANNEL", raising=False)
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "twitch_config.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "primary_channel": "ruleofrune",
+                "bot_account_name": "RoonieTheCat",
+                "broadcaster_account_name": "RuleOfRune",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    server, thread = _start_server(runs_dir)
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        _, _, login_headers = _request_json_with_headers(
+            base,
+            "/api/auth/login",
+            method="POST",
+            payload={"username": "art", "password": "art-pass-123"},
+        )
+        cookie = _cookie_from_response_headers(login_headers)
+        headers = {"Cookie": cookie}
+        code, body = _request_json(
+            base,
+            "/api/twitch/connect_start?account=bot",
+            method="POST",
+            payload={},
+            headers=headers,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    assert code == 200
+    assert body["ok"] is True
+    assert str(body.get("auth_url", "")).startswith("https://id.twitch.tv/oauth2/authorize?")
 
 
 def test_twitch_callback_completes_and_sets_connected(tmp_path: Path, monkeypatch) -> None:

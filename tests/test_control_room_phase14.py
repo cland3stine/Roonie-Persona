@@ -9,6 +9,8 @@ from typing import Any, Dict
 
 from roonie.control_room.preflight import resolve_runtime_paths, run_preflight
 from roonie.dashboard_api.app import create_server
+from roonie.dashboard_api.storage import DashboardStorage
+from roonie.run_control_room import _apply_safe_start_defaults
 
 
 def _get_json(base: str, path: str) -> Dict[str, Any]:
@@ -52,6 +54,7 @@ def test_preflight_passes_and_seeds_configs(tmp_path: Path, monkeypatch) -> None
     assert (paths.data_dir / "routing_config.json").exists()
     assert (paths.data_dir / "senses_config.json").exists()
     assert (paths.data_dir / "studio_profile.json").exists()
+    assert (paths.data_dir / "twitch_config.json").exists()
     assert (paths.data_dir / "memory.sqlite").exists()
 
 
@@ -120,3 +123,44 @@ def test_runtime_path_resolver_prefers_localappdata_on_windows(tmp_path: Path, m
     assert str(paths.runtime_root).startswith(str(tmp_path / "localapp"))
     assert paths.data_dir == paths.runtime_root / "data"
     assert paths.logs_dir == paths.runtime_root / "logs"
+
+
+def test_safe_start_defaults_force_disarmed_output_disabled(tmp_path: Path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = tmp_path / "data"
+    logs_dir = tmp_path / "logs"
+    monkeypatch.setenv("ROONIE_DASHBOARD_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("ROONIE_DASHBOARD_LOGS_DIR", str(logs_dir))
+    monkeypatch.setenv("ROONIE_KILL_SWITCH", "0")
+
+    readiness_state = {
+        "ready": True,
+        "checked_at": "2026-02-13T00:00:00+00:00",
+        "items": [{"name": "preflight", "ok": True, "detail": "ok"}],
+        "blocking_reasons": [],
+    }
+    server, thread = _start_server(runs_dir, readiness_state)
+    try:
+        storage = getattr(server, "_roonie_storage")
+        assert isinstance(storage, DashboardStorage)
+        storage.set_armed(True)
+        storage.silence_now(ttl_seconds=120)
+        _apply_safe_start_defaults(storage)
+
+        control_path = data_dir / "control_state.json"
+        assert control_path.exists()
+        payload = json.loads(control_path.read_text(encoding="utf-8"))
+        assert payload.get("armed") is False
+        assert payload.get("output_disabled") is True
+        assert payload.get("silence_until") is None
+
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        status = _get_json(base, "/api/status")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    assert status["armed"] is False
+    assert status["can_post"] is False

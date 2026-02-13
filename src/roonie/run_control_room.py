@@ -47,6 +47,16 @@ def _browser_url(host: str, port: int) -> str:
     return f"http://{show_host}:{int(port)}"
 
 
+def _apply_safe_start_defaults(storage: Any) -> None:
+    if storage is None:
+        return
+    if hasattr(storage, "force_safe_start_defaults"):
+        storage.force_safe_start_defaults()
+        return
+    if hasattr(storage, "set_armed"):
+        storage.set_armed(False)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _arg_parser().parse_args(argv)
     repo_root = Path.cwd()
@@ -79,6 +89,8 @@ def main(argv: list[str] | None = None) -> int:
         readiness_state=preflight,
     )
     storage = getattr(server, "_roonie_storage", None)
+    _apply_safe_start_defaults(storage)
+    _append_log(paths.control_log_path, "SAFE-START: forced disarmed/output-disabled defaults")
     if storage is not None and hasattr(storage, "set_readiness_state"):
         readiness = dict(preflight)
         items = list(readiness.get("items", []))
@@ -118,4 +130,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

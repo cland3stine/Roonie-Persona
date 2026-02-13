@@ -189,6 +189,7 @@ class DashboardStorage:
         self._queue: List[Dict[str, Any]] = []
         self._control_state_path = self.data_dir / "control_state.json"
         self._senses_config_path = self.data_dir / "senses_config.json"
+        self._twitch_config_path = self.data_dir / "twitch_config.json"
         self._studio_profile_path = self.data_dir / "studio_profile.json"
         self._library_dir = self.data_dir / "library"
         self._library_xml_path = self._library_dir / "rekordbox.xml"
@@ -210,6 +211,9 @@ class DashboardStorage:
         self._control_state = self._load_control_state()
         self._init_memory_db()
         self._ensure_senses_config()
+        self._ensure_twitch_config()
+        with self._lock:
+            self._twitch_runtime_config_locked()
         auth_payload = self._read_or_seed_auth_users_locked()
         auth_users = [
             str(item.get("username", "")).strip().lower()
@@ -492,6 +496,7 @@ class DashboardStorage:
     def _load_control_state(self) -> Dict[str, Any]:
         state: Dict[str, Any] = {
             "armed": _env_bool(["ROONIE_ARMED", "ROONIE_ARM", "ARMED"], False),
+            "output_disabled": _env_bool(["ROONIE_OUTPUT_DISABLED"], True),
             "silence_until": None,
         }
         loaded = _safe_read_json(self._control_state_path)
@@ -499,6 +504,10 @@ class DashboardStorage:
             loaded = _safe_read_json(self._legacy_control_state_path)
         if isinstance(loaded, dict):
             state["armed"] = bool(loaded.get("armed", state["armed"]))
+            state["output_disabled"] = _to_bool(
+                loaded.get("output_disabled"),
+                bool(state.get("output_disabled", True)),
+            )
             silence_until = loaded.get("silence_until")
             if isinstance(silence_until, str) and _parse_iso(silence_until):
                 state["silence_until"] = _format_iso(_parse_iso(silence_until))
@@ -511,6 +520,10 @@ class DashboardStorage:
         if not isinstance(loaded, dict):
             return
         self._control_state["armed"] = bool(loaded.get("armed", self._control_state.get("armed", False)))
+        self._control_state["output_disabled"] = _to_bool(
+            loaded.get("output_disabled"),
+            bool(self._control_state.get("output_disabled", True)),
+        )
         silence_until = loaded.get("silence_until")
         if isinstance(silence_until, str):
             parsed = _parse_iso(silence_until)
@@ -522,6 +535,7 @@ class DashboardStorage:
         self._control_state_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "armed": bool(self._control_state.get("armed", False)),
+            "output_disabled": bool(self._control_state.get("output_disabled", True)),
             "silence_until": self._control_state.get("silence_until"),
         }
         tmp_path = self._control_state_path.with_suffix(".tmp")
@@ -554,6 +568,7 @@ class DashboardStorage:
         silenced = self._is_silenced_locked()
         return {
             "armed": bool(self._control_state.get("armed", False)),
+            "output_disabled": bool(self._control_state.get("output_disabled", True)),
             "silenced": silenced,
             "silence_until": self._control_state.get("silence_until") if silenced else None,
         }
@@ -568,9 +583,10 @@ class DashboardStorage:
             silenced=bool(snap["silenced"]),
             cost_cap_on=cost_cap_on,
         )
+        output_disabled = bool(snap.get("output_disabled", True)) or not self.effective_can_post(blocked_by)
         os.environ["ROONIE_ARMED"] = "1" if snap["armed"] else "0"
         os.environ["ROONIE_ARM"] = os.environ["ROONIE_ARMED"]
-        os.environ["ROONIE_OUTPUT_DISABLED"] = "1" if not self.effective_can_post(blocked_by) else "0"
+        os.environ["ROONIE_OUTPUT_DISABLED"] = "1" if output_disabled else "0"
 
     def _sync_env_from_state(self) -> None:
         with self._lock:
@@ -579,9 +595,19 @@ class DashboardStorage:
     def set_armed(self, armed: bool) -> Dict[str, Any]:
         with self._lock:
             self._control_state["armed"] = bool(armed)
+            self._control_state["output_disabled"] = not bool(armed)
             if not armed:
                 # Disarm implies immediate non-speaking state.
                 self._control_state["silence_until"] = None
+            self._save_control_state_locked()
+            self._sync_env_from_state_locked()
+            return self._control_snapshot_locked()
+
+    def force_safe_start_defaults(self) -> Dict[str, Any]:
+        with self._lock:
+            self._control_state["armed"] = False
+            self._control_state["output_disabled"] = True
+            self._control_state["silence_until"] = None
             self._save_control_state_locked()
             self._sync_env_from_state_locked()
             return self._control_snapshot_locked()
@@ -2193,7 +2219,7 @@ class DashboardStorage:
                 silenced=bool(control["silenced"]),
                 cost_cap_on=bool(provider_status.get("cost_cap_blocked", False)),
             )
-            can_post = self.effective_can_post(blocked_by)
+            can_post = self.effective_can_post(blocked_by) and not bool(control.get("output_disabled", True))
             self._sync_env_from_state_locked()
         return kill_switch_on, provider_status, control, blocked_by, can_post
 
@@ -2412,6 +2438,7 @@ class DashboardStorage:
         _ = get_routing_runtime_status()
         _ = self.get_studio_profile()
         _ = self.get_senses_status()
+        _ = self.get_twitch_status()
         self._init_memory_db()
 
         export_files: List[Tuple[Path, str]] = []
@@ -2426,6 +2453,7 @@ class DashboardStorage:
             [
                 (self._studio_profile_path, "data/studio_profile.json"),
                 (self._senses_config_path, "data/senses_config.json"),
+                (self._twitch_config_path, "data/twitch_config.json"),
                 (self._memory_db_path, "data/memory.sqlite"),
             ]
         )
@@ -2494,6 +2522,85 @@ class DashboardStorage:
         return {
             "old": {"caps": old_cfg.get("caps", {})},
             "new": {"caps": new_cfg.get("caps", {})},
+        }
+
+    def _default_twitch_config(self) -> Dict[str, Any]:
+        return {
+            "version": 1,
+            "primary_channel": "",
+            "bot_account_name": self._twitch_account_display("bot"),
+            "broadcaster_account_name": self._twitch_account_display("broadcaster"),
+        }
+
+    def _normalize_twitch_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        raw = payload if isinstance(payload, dict) else {}
+        base = self._default_twitch_config()
+        primary = self._bounded_text(
+            raw.get("primary_channel", base["primary_channel"]),
+            field_name="primary_channel",
+            max_len=80,
+            required=False,
+        ).lstrip("#")
+        bot_name = self._bounded_text(
+            raw.get("bot_account_name", base["bot_account_name"]),
+            field_name="bot_account_name",
+            max_len=80,
+            required=False,
+        ) or base["bot_account_name"]
+        broadcaster_name = self._bounded_text(
+            raw.get("broadcaster_account_name", base["broadcaster_account_name"]),
+            field_name="broadcaster_account_name",
+            max_len=80,
+            required=False,
+        ) or base["broadcaster_account_name"]
+        return {
+            "version": 1,
+            "primary_channel": str(primary).strip().lower(),
+            "bot_account_name": bot_name,
+            "broadcaster_account_name": broadcaster_name,
+        }
+
+    def _read_or_create_twitch_config_locked(self) -> Dict[str, Any]:
+        raw = _safe_read_json(self._twitch_config_path)
+        if isinstance(raw, dict):
+            config = self._normalize_twitch_config(raw)
+        else:
+            config = self._normalize_twitch_config(self._default_twitch_config())
+        self._write_json_atomic(self._twitch_config_path, config)
+        return config
+
+    def _ensure_twitch_config(self) -> None:
+        with self._lock:
+            self._read_or_create_twitch_config_locked()
+
+    def _twitch_runtime_config_locked(self) -> Dict[str, Any]:
+        config = self._read_or_create_twitch_config_locked()
+        client_id = str(os.getenv("TWITCH_CLIENT_ID", "")).strip()
+        client_secret = str(os.getenv("TWITCH_CLIENT_SECRET", "")).strip()
+        redirect_uri = str(os.getenv("TWITCH_REDIRECT_URI", "")).strip()
+        env_primary = self._twitch_env_value(["TWITCH_CHANNEL"])
+        primary_channel = str(env_primary or config.get("primary_channel", "")).strip().lstrip("#").lower()
+        if primary_channel and str(os.getenv("TWITCH_CHANNEL", "")).strip() != primary_channel:
+            os.environ["TWITCH_CHANNEL"] = primary_channel
+        missing: List[str] = []
+        if not client_id:
+            missing.append("TWITCH_CLIENT_ID")
+        if not client_secret:
+            missing.append("TWITCH_CLIENT_SECRET")
+        if not redirect_uri:
+            missing.append("TWITCH_REDIRECT_URI")
+        if not primary_channel:
+            missing.append("PRIMARY_CHANNEL")
+        return {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "redirect_uri": redirect_uri,
+            "primary_channel": primary_channel,
+            "bot_account_name": str(config.get("bot_account_name") or self._twitch_account_display("bot")),
+            "broadcaster_account_name": str(
+                config.get("broadcaster_account_name") or self._twitch_account_display("broadcaster")
+            ),
+            "missing_config_fields": missing,
         }
 
     @staticmethod
@@ -2635,19 +2742,9 @@ class DashboardStorage:
         raw = os.getenv("ROONIE_TWITCH_VALIDATE_REMOTE", "0")
         return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
-    @staticmethod
-    def _twitch_required_config() -> Tuple[str, str, str, List[str]]:
-        client_id = str(os.getenv("TWITCH_CLIENT_ID", "")).strip()
-        client_secret = str(os.getenv("TWITCH_CLIENT_SECRET", "")).strip()
-        redirect_uri = str(os.getenv("TWITCH_REDIRECT_URI", "")).strip()
-        missing: List[str] = []
-        if not client_id:
-            missing.append("TWITCH_CLIENT_ID")
-        if not client_secret:
-            missing.append("TWITCH_CLIENT_SECRET")
-        if not redirect_uri:
-            missing.append("TWITCH_REDIRECT_URI")
-        return client_id, client_secret, redirect_uri, missing
+    def _twitch_required_config(self) -> Dict[str, Any]:
+        with self._lock:
+            return self._twitch_runtime_config_locked()
 
     def _validate_twitch_token_remote(self, token: str) -> Dict[str, Any]:
         access_token = self._token_without_prefix(token)
@@ -2756,7 +2853,14 @@ class DashboardStorage:
             },
         }
 
-    def _twitch_account_status_locked(self, account: str, state: Dict[str, Any], *, checked_at: str) -> Dict[str, Any]:
+    def _twitch_account_status_locked(
+        self,
+        account: str,
+        state: Dict[str, Any],
+        *,
+        checked_at: str,
+        runtime_config: Dict[str, Any],
+    ) -> Dict[str, Any]:
         accounts = state.get("accounts", {}) if isinstance(state, dict) else {}
         row = accounts.get(account, {}) if isinstance(accounts, dict) else {}
         if not isinstance(row, dict):
@@ -2769,14 +2873,26 @@ class DashboardStorage:
         token = "" if disconnected else (local_token or env_token)
         scopes_raw = row.get("scopes", [])
         scopes = [str(item).strip() for item in scopes_raw if str(item).strip()] if isinstance(scopes_raw, list) else []
-        display_name = str(row.get("display_name", "")).strip() or self._twitch_account_display(account)
+        configured_name = (
+            runtime_config.get("bot_account_name")
+            if account == "bot"
+            else runtime_config.get("broadcaster_account_name")
+        )
+        display_name = str(row.get("display_name", "")).strip() or str(configured_name or self._twitch_account_display(account))
+        primary_channel = str(runtime_config.get("primary_channel", "")).strip()
+        missing_fields = list(runtime_config.get("missing_config_fields", []))
+        missing_set = {str(item).strip().upper() for item in missing_fields if str(item).strip()}
 
         reason = "NO_TOKEN"
         connected = False
         token_source = "none"
         reason_detail: Optional[str] = None
 
-        if not token:
+        if "PRIMARY_CHANNEL" in missing_set:
+            reason = "MISSING_PRIMARY_CHANNEL"
+            reason_detail = "Set twitch_config.primary_channel (or TWITCH_CHANNEL) before connecting."
+            token_source = "none" if not token else ("local" if local_token else "env")
+        elif not token:
             reason = "NO_TOKEN"
             token_source = "none"
         elif not self._token_looks_valid(token):
@@ -2787,10 +2903,14 @@ class DashboardStorage:
             reason = ""
             if account == "bot":
                 nick = self._twitch_env_value(["TWITCH_BOT_NICK", "TWITCH_NICK"])
-                channel = self._twitch_env_value(["TWITCH_CHANNEL"])
-                if not nick or not channel:
+                if not nick:
                     reason = "CONFIG_MISSING"
-                    reason_detail = "TWITCH_NICK/TWITCH_CHANNEL required for bot account."
+                    reason_detail = "TWITCH_NICK required for bot account."
+
+            oauth_required = [field for field in missing_fields if field != "PRIMARY_CHANNEL"]
+            if not reason and oauth_required:
+                reason = "CONFIG_MISSING"
+                reason_detail = f"Missing required config: {', '.join(oauth_required)}"
 
             expires_at = _parse_iso(str(row.get("expires_at", "")).strip())
             if not reason and expires_at is not None and expires_at <= datetime.now(timezone.utc):
@@ -2823,8 +2943,9 @@ class DashboardStorage:
             "last_checked_ts": checked_at,
             "last_updated_at": row.get("updated_at"),
             "scopes": scopes,
-            "connect_available": True,
+            "connect_available": len(missing_fields) == 0,
             "disconnect_available": bool(local_token or env_token or disconnected),
+            "primary_channel": primary_channel or None,
         }
 
     def twitch_connect_start(self, account: str) -> Dict[str, Any]:
@@ -2832,7 +2953,10 @@ class DashboardStorage:
         if acc not in self._twitch_account_names():
             raise ValueError("account must be one of: bot, broadcaster")
 
-        client_id, client_secret, redirect_uri, missing = self._twitch_required_config()
+        config = self._twitch_required_config()
+        client_id = str(config.get("client_id", "")).strip()
+        redirect_uri = str(config.get("redirect_uri", "")).strip()
+        missing = list(config.get("missing_config_fields", []))
         if missing:
             return {
                 "ok": False,
@@ -2883,7 +3007,11 @@ class DashboardStorage:
         if not state_text:
             return {"ok": False, "error": "BAD_REQUEST", "detail": "Missing state parameter."}
 
-        client_id, client_secret, redirect_uri, missing = self._twitch_required_config()
+        config = self._twitch_required_config()
+        client_id = str(config.get("client_id", "")).strip()
+        client_secret = str(config.get("client_secret", "")).strip()
+        redirect_uri = str(config.get("redirect_uri", "")).strip()
+        missing = list(config.get("missing_config_fields", []))
         if missing:
             return {
                 "ok": False,
@@ -2973,12 +3101,25 @@ class DashboardStorage:
         scopes_payload = self._twitch_scopes_payload()
         with self._lock:
             state = self._load_twitch_auth_state_locked()
-            bot_status = self._twitch_account_status_locked("bot", state, checked_at=checked_at)
-            broadcaster_status = self._twitch_account_status_locked("broadcaster", state, checked_at=checked_at)
+            runtime_config = self._twitch_runtime_config_locked()
+            bot_status = self._twitch_account_status_locked(
+                "bot",
+                state,
+                checked_at=checked_at,
+                runtime_config=runtime_config,
+            )
+            broadcaster_status = self._twitch_account_status_locked(
+                "broadcaster",
+                state,
+                checked_at=checked_at,
+                runtime_config=runtime_config,
+            )
         accounts = {
             "bot": bot_status,
             "broadcaster": broadcaster_status,
         }
+        missing_fields = list(runtime_config.get("missing_config_fields", []))
+        primary_channel = str(runtime_config.get("primary_channel", "")).strip() or None
         return {
             # Legacy compatibility fields.
             "connected": bool(bot_status.get("connected", False) or broadcaster_status.get("connected", False)),
@@ -2986,6 +3127,9 @@ class DashboardStorage:
             "scopes_present": scopes_payload["scopes_present"],
             "token_expiry": os.getenv("TWITCH_TOKEN_EXPIRES_AT"),
             "last_error": os.getenv("TWITCH_LAST_ERROR"),
+            "primary_channel": primary_channel,
+            "missing_config_fields": missing_fields,
+            "config_ready": len(missing_fields) == 0,
             # D15 truthful account-level status.
             "last_checked_ts": checked_at,
             "accounts": accounts,

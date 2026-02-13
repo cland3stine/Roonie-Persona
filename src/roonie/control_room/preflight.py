@@ -124,9 +124,18 @@ def _default_studio_profile() -> Dict[str, Any]:
         "updated_by": "system",
         "location": {"display": "Washington DC area"},
         "social_links": [],
-        "gear": {"dj": [], "audio": [], "video": [], "software": []},
+        "gear": [],
         "faq": [{"q": "Where are you based?", "a": "Washington DC area."}],
         "approved_emotes": [],
+    }
+
+
+def _default_twitch_config() -> Dict[str, Any]:
+    return {
+        "version": 1,
+        "primary_channel": "",
+        "bot_account_name": "RoonieTheCat",
+        "broadcaster_account_name": "RuleOfRune",
     }
 
 
@@ -238,6 +247,18 @@ def run_preflight(paths: RuntimePaths) -> Dict[str, Any]:
     except Exception as exc:
         add("studio_profile", False, f"seed/read failed: {exc}", blocking=True)
 
+    twitch_config_path = paths.data_dir / "twitch_config.json"
+    try:
+        if not twitch_config_path.exists():
+            _write_json_atomic(twitch_config_path, _default_twitch_config())
+        twitch_cfg = _read_json(twitch_config_path)
+        primary = ""
+        if isinstance(twitch_cfg, dict):
+            primary = str(twitch_cfg.get("primary_channel", "")).strip().lstrip("#")
+        add("twitch_config", True, f"path={twitch_config_path} primary_channel={primary or '<unset>'}")
+    except Exception as exc:
+        add("twitch_config", False, f"seed/read failed: {exc}", blocking=True)
+
     kill_keys = ["ROONIE_KILL_SWITCH", "KILL_SWITCH", "ROONIE_KILL_SWITCH_ON"]
     kill_present = any(name in os.environ for name in kill_keys)
     kill_value = _to_bool(os.getenv("ROONIE_KILL_SWITCH"), True)
@@ -268,4 +289,3 @@ def run_preflight(paths: RuntimePaths) -> Dict[str, Any]:
         "items": items,
         "blocking_reasons": blocking_reasons,
     }
-
