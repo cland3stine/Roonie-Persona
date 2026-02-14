@@ -866,6 +866,19 @@ function useDashboardData() {
     };
   }, []);
 
+  useEffect(() => {
+    const onMessage = async (event) => {
+      const data = event?.data || {};
+      if (data?.type !== "ROONIE_TWITCH_AUTH_COMPLETE") return;
+      await refreshData();
+      const ok = Boolean(data?.ok);
+      const account = String(data?.account || "account");
+      setTwitchNotice(ok ? `${account} connected.` : `${account} connection failed.`);
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, []);
+
   return {
     authData,
     authChecked,
@@ -1420,7 +1433,7 @@ function AuthPage({ twitchStatusData, twitchConnectStart, twitchDisconnect, twit
               const result = await twitchConnectStart(accountId);
               const authUrl = result?.body?.auth_url;
               if (authUrl) {
-                const popup = window.open(authUrl, "_blank", "noopener,noreferrer");
+                const popup = window.open(authUrl, "_blank", "popup,width=560,height=760");
                 if (!popup) {
                   setTwitchNotice(`Popup blocked. Open this URL manually: ${authUrl}`);
                 } else {

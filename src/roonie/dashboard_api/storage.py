@@ -3118,13 +3118,25 @@ class DashboardStorage:
             "bot": bot_status,
             "broadcaster": broadcaster_status,
         }
+        scope_set = set(scopes_payload["scopes"])
+        for account_status in accounts.values():
+            account_scopes = account_status.get("scopes", [])
+            if isinstance(account_scopes, list):
+                for scope in account_scopes:
+                    text = str(scope or "").strip()
+                    if text:
+                        scope_set.add(text)
+        merged_scopes = sorted(scope_set)
         missing_fields = list(runtime_config.get("missing_config_fields", []))
         primary_channel = str(runtime_config.get("primary_channel", "")).strip() or None
         return {
             # Legacy compatibility fields.
             "connected": bool(bot_status.get("connected", False) or broadcaster_status.get("connected", False)),
-            "scopes": scopes_payload["scopes"],
-            "scopes_present": scopes_payload["scopes_present"],
+            "scopes": merged_scopes,
+            "scopes_present": {
+                "chat:read": ("chat:read" in merged_scopes),
+                "chat:edit": ("chat:edit" in merged_scopes),
+            },
             "token_expiry": os.getenv("TWITCH_TOKEN_EXPIRES_AT"),
             "last_error": os.getenv("TWITCH_LAST_ERROR"),
             "primary_channel": primary_channel,

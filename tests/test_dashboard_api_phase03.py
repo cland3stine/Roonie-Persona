@@ -2082,6 +2082,74 @@ def test_twitch_callback_completes_and_sets_connected(tmp_path: Path, monkeypatc
     assert status["accounts"]["bot"]["reason"] is None
 
 
+def test_twitch_callback_returns_html_for_browser_accept(tmp_path: Path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_DASHBOARD_ART_PASSWORD", "art-pass-123")
+    monkeypatch.setenv("ROONIE_DASHBOARD_JEN_PASSWORD", "jen-pass-123")
+    monkeypatch.delenv("ROONIE_OPERATOR_KEY", raising=False)
+    monkeypatch.setenv("TWITCH_CLIENT_ID", "test-client-id")
+    monkeypatch.setenv("TWITCH_CLIENT_SECRET", "test-client-secret")
+    monkeypatch.setenv("TWITCH_REDIRECT_URI", "http://127.0.0.1/callback")
+    monkeypatch.setenv("TWITCH_NICK", "RoonieTheCat")
+    monkeypatch.setenv("TWITCH_CHANNEL", "ruleofrune")
+
+    def _fake_exchange(self, *, code: str, redirect_uri: str, client_id: str, client_secret: str):
+        assert code == "abc123"
+        assert redirect_uri == "http://127.0.0.1/callback"
+        assert client_id == "test-client-id"
+        assert client_secret == "test-client-secret"
+        return {
+            "ok": True,
+            "access_token": "tok_abcdefghijklmnopqrstuvwxyz123456",
+            "refresh_token": "ref_abcdefghijklmnopqrstuvwxyz123456",
+            "scopes": ["chat:read", "chat:edit"],
+            "expires_at": "2027-01-01T00:00:00+00:00",
+        }
+
+    monkeypatch.setattr(
+        "roonie.dashboard_api.storage.DashboardStorage._exchange_twitch_code",
+        _fake_exchange,
+        raising=True,
+    )
+
+    server, thread = _start_server(runs_dir)
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        _, _, login_headers = _request_json_with_headers(
+            base,
+            "/api/auth/login",
+            method="POST",
+            payload={"username": "art", "password": "art-pass-123"},
+        )
+        cookie = _cookie_from_response_headers(login_headers)
+        headers = {"Cookie": cookie}
+        _, start = _request_json(
+            base,
+            "/api/twitch/connect_start?account=bot",
+            method="POST",
+            payload={},
+            headers=headers,
+        )
+        state = str(start.get("state", ""))
+        callback_code, callback_body, callback_headers = _request_bytes_with_headers(
+            base,
+            f"/api/twitch/callback?code=abc123&state={state}",
+            headers={"Accept": "text/html"},
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    assert callback_code == 200
+    assert "text/html" in str(callback_headers.get("Content-Type", "")).lower()
+    html = callback_body.decode("utf-8")
+    assert "Connected." in html
+    assert "Returning to dashboard" in html
+
+
 def test_memory_db_initializes_tables(tmp_path: Path, monkeypatch) -> None:
     runs_dir = tmp_path / "runs"
     _write_sample_run(runs_dir)

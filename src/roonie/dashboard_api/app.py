@@ -73,6 +73,36 @@ def _bytes_response(
     handler.wfile.write(body)
 
 
+def _html_response(
+    handler: BaseHTTPRequestHandler,
+    html: str,
+    *,
+    status: int = 200,
+    extra_headers: Optional[Dict[str, str]] = None,
+) -> None:
+    body = html.encode("utf-8")
+    handler.send_response(status)
+    handler.send_header("Content-Type", "text/html; charset=utf-8")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Access-Control-Allow-Origin", _cors_origin(handler))
+    handler.send_header("Vary", "Origin")
+    handler.send_header("Access-Control-Allow-Credentials", "true")
+    handler.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+    handler.send_header(
+        "Access-Control-Allow-Headers",
+        "Content-Type, X-ROONIE-OP-KEY, X-ROONIE-ACTOR, X-ROONIE-OP-ACTOR",
+    )
+    for key, value in (extra_headers or {}).items():
+        handler.send_header(key, value)
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def _prefers_html(handler: BaseHTTPRequestHandler) -> bool:
+    accept = str(handler.headers.get("Accept", "")).lower()
+    return "text/html" in accept
+
+
 def _resolve_dist_path() -> Path:
     raw = os.getenv("ROONIE_DASHBOARD_DIST_DIR", "dist")
     path = Path(raw)
@@ -425,6 +455,46 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
                     code=str(code or ""),
                     state_token=str(state_token or ""),
                 )
+                if _prefers_html(self):
+                    ok = bool(result.get("ok"))
+                    account = str(result.get("account") or "").strip()
+                    detail = str(result.get("detail") or result.get("error") or "OAuth callback completed.")
+                    app_url = str(
+                        os.getenv("ROONIE_DASHBOARD_APP_URL")
+                        or os.getenv("ROONIE_DASHBOARD_PUBLIC_URL")
+                        or "/"
+                    ).strip() or "/"
+                    if not (app_url.startswith("http://") or app_url.startswith("https://") or app_url.startswith("/")):
+                        app_url = "/"
+                    status_text = "Connected." if ok else "Connection failed."
+                    safe_detail = detail.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    safe_status = status_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    safe_account = account.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") or "twitch"
+                    html = (
+                        "<!doctype html><html><head><meta charset='utf-8'>"
+                        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+                        "<title>Roonie Twitch Auth</title></head>"
+                        "<body style='font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;"
+                        "background:#111;color:#ddd;padding:24px'>"
+                        f"<h2 style='margin:0 0 8px 0'>{safe_status}</h2>"
+                        f"<div style='opacity:0.9'>Account: {safe_account}</div>"
+                        f"<div style='opacity:0.8;margin-top:6px'>{safe_detail}</div>"
+                        f"<div style='opacity:0.7;margin-top:12px'>Returning to dashboard: {app_url}</div>"
+                        "<script>"
+                        "var __hasOpener = false;"
+                        "try { __hasOpener = !!(window.opener && !window.opener.closed); } catch (e) { __hasOpener = false; }"
+                        "if (__hasOpener) {"
+                        f"  try {{ window.opener.postMessage({json.dumps({'type': 'ROONIE_TWITCH_AUTH_COMPLETE', 'ok': ok, 'account': account})}, '*'); }} catch (e) {{}}"
+                        "  try { window.opener.focus(); } catch (e) {}"
+                        "  setTimeout(function(){ try { window.close(); } catch (e) {} }, 250);"
+                        "} else {"
+                        f"  setTimeout(function(){{ window.location.replace({json.dumps(app_url)}); }}, 1200);"
+                        "}"
+                        "</script>"
+                        "</body></html>"
+                    )
+                    _html_response(self, html, status=HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST)
+                    return
                 status = HTTPStatus.OK if bool(result.get("ok")) else HTTPStatus.BAD_REQUEST
                 _json_response(self, result, status=status)
                 return
