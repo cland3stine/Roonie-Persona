@@ -505,6 +505,38 @@ def test_status_blocked_by_precedence_order(tmp_path: Path, monkeypatch) -> None
     assert status["can_post"] is False
 
 
+def test_arm_toggles_implicit_kill_switch_when_not_env_pinned(tmp_path: Path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_OPERATOR_KEY", "op-key-123")
+    monkeypatch.delenv("ROONIE_KILL_SWITCH", raising=False)
+    monkeypatch.delenv("KILL_SWITCH", raising=False)
+    monkeypatch.delenv("ROONIE_KILL_SWITCH_ON", raising=False)
+    headers = {"X-ROONIE-OP-KEY": "op-key-123", "X-ROONIE-ACTOR": "jen"}
+
+    server, thread = _start_server(runs_dir)
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        _, status_before = _request_json(base, "/api/status")
+        _request_json(base, "/api/live/arm", method="POST", payload={}, headers=headers)
+        _, status_after_arm = _request_json(base, "/api/status")
+        _request_json(base, "/api/live/disarm", method="POST", payload={}, headers=headers)
+        _, status_after_disarm = _request_json(base, "/api/status")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    assert status_before["kill_switch_on"] is True
+    assert "KILL_SWITCH" in status_before["blocked_by"]
+    assert status_after_arm["kill_switch_on"] is False
+    assert status_after_arm["can_post"] is True
+    assert status_after_arm["blocked_by"] == []
+    assert status_after_disarm["kill_switch_on"] is True
+    assert "KILL_SWITCH" in status_after_disarm["blocked_by"]
+
+
 def test_studio_profile_get_creates_defaults_when_missing(tmp_path: Path, monkeypatch) -> None:
     runs_dir = tmp_path / "runs"
     _write_sample_run(runs_dir)

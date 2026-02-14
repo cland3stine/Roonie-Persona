@@ -178,6 +178,8 @@ def _default_studio_profile(*, updated_by: str) -> Dict[str, Any]:
 
 
 class DashboardStorage:
+    _KILL_SWITCH_ENV_NAMES = ("ROONIE_KILL_SWITCH", "KILL_SWITCH", "ROONIE_KILL_SWITCH_ON")
+
     def __init__(self, runs_dir: Optional[Path] = None, readiness_state: Optional[Dict[str, Any]] = None) -> None:
         root = _repo_root()
         self.runs_dir = runs_dir or (root / "runs")
@@ -202,6 +204,7 @@ class DashboardStorage:
         self._memory_db_path = self.data_dir / "memory.sqlite"
         self._sessions: Dict[str, Dict[str, Any]] = {}
         self._session_ttl_seconds = self._session_ttl_seconds_from_env()
+        self._kill_switch_env_pinned = any(name in os.environ for name in self._KILL_SWITCH_ENV_NAMES)
         self._readiness_state: Dict[str, Any] = {
             "ready": False,
             "checked_at": datetime.now(timezone.utc).isoformat(),
@@ -575,7 +578,7 @@ class DashboardStorage:
 
     def _sync_env_from_state_locked(self) -> None:
         snap = self._control_snapshot_locked()
-        kill_switch_on = _env_bool(["ROONIE_KILL_SWITCH", "KILL_SWITCH", "ROONIE_KILL_SWITCH_ON"], True)
+        kill_switch_on = _env_bool(list(self._KILL_SWITCH_ENV_NAMES), True)
         cost_cap_on = bool(get_provider_runtime_status().get("cost_cap_blocked", False))
         blocked_by = self.effective_blocks(
             kill_switch_on=kill_switch_on,
@@ -596,6 +599,8 @@ class DashboardStorage:
         with self._lock:
             self._control_state["armed"] = bool(armed)
             self._control_state["output_disabled"] = not bool(armed)
+            if not self._kill_switch_env_pinned:
+                os.environ["ROONIE_KILL_SWITCH"] = "0" if bool(armed) else "1"
             if not armed:
                 # Disarm implies immediate non-speaking state.
                 self._control_state["silence_until"] = None
@@ -607,6 +612,8 @@ class DashboardStorage:
         with self._lock:
             self._control_state["armed"] = False
             self._control_state["output_disabled"] = True
+            if not self._kill_switch_env_pinned:
+                os.environ["ROONIE_KILL_SWITCH"] = "1"
             self._control_state["silence_until"] = None
             self._save_control_state_locked()
             self._sync_env_from_state_locked()
@@ -2208,7 +2215,7 @@ class DashboardStorage:
         return out
 
     def _current_blocks_and_provider(self) -> Tuple[bool, Dict[str, Any], Dict[str, Any], List[str], bool]:
-        kill_switch_on = _env_bool(["ROONIE_KILL_SWITCH", "KILL_SWITCH", "ROONIE_KILL_SWITCH_ON"], True)
+        kill_switch_on = _env_bool(list(self._KILL_SWITCH_ENV_NAMES), True)
         provider_status = get_provider_runtime_status()
         with self._lock:
             self._reload_control_state_from_file_locked()

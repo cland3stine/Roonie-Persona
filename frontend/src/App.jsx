@@ -924,7 +924,7 @@ function useDashboardData() {
 // --- PAGE: LIVE ---
 
 function LivePage({ statusData, eventsData, suppressionsData, performAction }) {
-  const status = (statusData.kill_switch_on || statusData.silenced) ? "SILENCED" : (statusData.armed ? "ACTIVE" : "INACTIVE");
+  const status = statusData.silenced ? "SILENCED" : ((statusData.armed && statusData.can_post) ? "ACTIVE" : "INACTIVE");
   const autoNext = eventsData.length ? buildMessageLine(eventsData[0]) : AWAITING;
   const suppression = suppressionsData.length ? suppressionsData[0] : null;
   const silenceUntilMs = statusData.silence_until ? Date.parse(statusData.silence_until) : NaN;
