@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +29,19 @@ def _git_head_sha() -> str:
         return result.stdout.strip()
     except Exception:
         return "unknown"
+
+
+def _runs_output_dir() -> Path:
+    configured = (
+        (os.getenv("ROONIE_DASHBOARD_RUNS_DIR") or "").strip()
+        or (os.getenv("ROONIE_RUNS_DIR") or "").strip()
+    )
+    if not configured:
+        return Path("runs")
+    path = Path(configured)
+    if not path.is_absolute():
+        path = (ROOT / path).resolve()
+    return path
 
 
 def run_payload(payload: dict, emit_outputs: bool = False) -> Path:
@@ -84,7 +98,9 @@ def run_payload(payload: dict, emit_outputs: bool = False) -> Path:
     if fixture_hint:
         output["fixture_hint"] = fixture_hint
 
-    out_path = Path("runs") / f"{session_id}.json"
+    runs_dir = _runs_output_dir()
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    out_path = runs_dir / f"{session_id}.json"
     out_path.write_text(json.dumps(output, indent=2, sort_keys=False), encoding="utf-8")
     return out_path
 

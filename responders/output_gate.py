@@ -7,6 +7,14 @@ from typing import Any, Dict, List
 _LAST_EMIT_TS = 0.0
 
 
+def _emit_cooldown_seconds() -> float:
+    raw = os.getenv("ROONIE_OUTPUT_RATE_LIMIT_SECONDS", "30")
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return 30.0
+
+
 def maybe_emit(decisions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     global _LAST_EMIT_TS
 
@@ -24,7 +32,7 @@ def maybe_emit(decisions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         return outputs
 
     now = time.time()
-    allow_emit = (now - _LAST_EMIT_TS) >= 30.0
+    allow_emit = (now - _LAST_EMIT_TS) >= _emit_cooldown_seconds()
 
     for d in decisions:
         if d.get("action") != "RESPOND_PUBLIC":

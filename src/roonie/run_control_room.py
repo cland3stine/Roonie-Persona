@@ -37,6 +37,8 @@ def _arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--runs-dir", default="runs")
     p.add_argument("--log-dir", default="logs")
     p.add_argument("--open-browser", action="store_true")
+    p.add_argument("--start-live-chat", action="store_true")
+    p.add_argument("--live-account", default=os.getenv("ROONIE_LIVE_ACCOUNT", "bot"), choices=["bot", "broadcaster"])
     return p
 
 
@@ -112,6 +114,22 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Data dir: {paths.data_dir}")
     print(f"Logs dir: {paths.logs_dir}")
 
+    live_bridge = None
+    if bool(args.start_live_chat) and storage is not None:
+        from roonie.control_room.live_chat import LiveChatBridge
+
+        live_bridge = LiveChatBridge(
+            storage=storage,
+            account=str(args.live_account or "bot"),
+            logger=lambda line: _append_log(paths.control_log_path, line),
+        )
+        live_bridge.start()
+        _append_log(paths.control_log_path, f"LIVE-CHAT: started account={args.live_account}")
+        print(f"Live chat bridge started (account={args.live_account}).")
+    elif bool(args.start_live_chat):
+        _append_log(paths.control_log_path, "LIVE-CHAT: not started (storage unavailable)")
+        print("Live chat bridge not started: storage unavailable.")
+
     if bool(args.open_browser):
         try:
             webbrowser.open(_browser_url(args.host, int(args.port)))
@@ -123,6 +141,9 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        if live_bridge is not None:
+            live_bridge.stop()
+            live_bridge.join(timeout=2.0)
         _append_log(paths.control_log_path, "SHUTDOWN")
         server.server_close()
     return 0

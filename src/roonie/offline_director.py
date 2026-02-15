@@ -43,6 +43,26 @@ _UNDERSPECIFIED_REQUESTS = [r"\bfix it\b", r"\bdo that again\b"]
 
 
 class OfflineDirector:
+    @staticmethod
+    def _is_live_greeting(message_lower: str, event: Event) -> bool:
+        text = str(message_lower or "").strip()
+        if not text:
+            return False
+        mode = str(event.metadata.get("mode", "")).strip().lower()
+        platform = str(event.metadata.get("platform", "")).strip().lower()
+        if mode != "live" and platform != "twitch":
+            return False
+        trimmed = re.sub(r"^@[\w_]+\s*", "", text).strip()
+        normalized = re.sub(r"[^a-z0-9'\s]", " ", trimmed)
+        tokens = [tok for tok in normalized.split() if tok]
+        if not tokens:
+            return False
+        if tokens[0] in {"hey", "heya", "hi", "hello", "yo", "sup"}:
+            return True
+        if len(tokens) >= 2 and tokens[0] in {"what's", "whats"} and tokens[1] == "up":
+            return True
+        return False
+
     def evaluate(self, event: Event, env: Env) -> DecisionRecord:
         message = event.message or ""
         message_stripped = message.strip()
@@ -85,6 +105,7 @@ class OfflineDirector:
             refusal_reason_code = "REF_PRIVATE_INFO_DOXXING"
         elif any(re.search(pat, message_lower) for pat in _SENSITIVE_PATTERNS):
             safety_classification = "sensitive_no_followup"
+        live_greeting = addressed_to_roonie and trigger_type == "banter" and self._is_live_greeting(message_lower, event)
 
         noop_bias_applied = True
         action = "NOOP"
@@ -99,6 +120,7 @@ class OfflineDirector:
             trigger_type in ("direct_question", "direct_request")
             or ambiguity_detected
             or safety_classification in ("refuse", "sensitive_no_followup")
+            or live_greeting
         ):
             noop_bias_applied = False
 
@@ -117,6 +139,11 @@ class OfflineDirector:
                 route = "responder:clarify"
                 selected_responder = route
                 routing_reason_codes.append("ROUTE_CLARIFY_AMBIGUITY")
+            elif live_greeting:
+                action = "RESPOND_PUBLIC"
+                route = "responder:neutral_ack"
+                selected_responder = route
+                routing_reason_codes.append("ROUTE_DIRECT_GREETING")
             elif trigger_type in ("direct_question", "direct_request"):
                 action = "RESPOND_PUBLIC"
                 route = "responder:policy_safe_info"

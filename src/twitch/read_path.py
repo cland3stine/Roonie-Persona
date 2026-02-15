@@ -51,7 +51,11 @@ def iter_twitch_messages(
     send(f"JOIN #{chan}")
 
     while True:
-        raw = f.readline()
+        try:
+            raw = f.readline()
+        except (TimeoutError, socket.timeout, OSError):
+            # Keep the connection alive across idle periods.
+            continue
         if not raw:
             break
         line = raw.decode("utf-8", errors="replace").rstrip("\r\n")

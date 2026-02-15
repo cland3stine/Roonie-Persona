@@ -2182,6 +2182,102 @@ def test_twitch_callback_returns_html_for_browser_accept(tmp_path: Path, monkeyp
     assert "Returning to dashboard" in html
 
 
+def test_live_twitch_credentials_reads_local_bot_token(tmp_path: Path, monkeypatch) -> None:
+    from roonie.dashboard_api.storage import DashboardStorage
+
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("TWITCH_CLIENT_ID", "client-id")
+    monkeypatch.setenv("TWITCH_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("TWITCH_REDIRECT_URI", "http://127.0.0.1/callback")
+    monkeypatch.setenv("TWITCH_CHANNEL", "ruleofrune")
+    monkeypatch.setenv("TWITCH_NICK", "RoonieTheCat")
+    monkeypatch.delenv("ROONIE_TWITCH_VALIDATE_REMOTE", raising=False)
+
+    storage = DashboardStorage(runs_dir=runs_dir)
+    auth_state_path = tmp_path / "data" / "twitch_auth_state.json"
+    auth_state = {
+        "version": 1,
+        "accounts": {
+            "bot": {
+                "token": "abcdefghijklmnopqrstuvwxyz123456",
+                "refresh_token": None,
+                "expires_at": None,
+                "scopes": ["chat:read", "chat:edit"],
+                "display_name": "RoonieTheCat",
+                "pending_state": None,
+                "updated_at": "2026-02-14T00:00:00+00:00",
+                "disconnected": False,
+            },
+            "broadcaster": {
+                "token": None,
+                "refresh_token": None,
+                "expires_at": None,
+                "scopes": [],
+                "display_name": "RuleOfRune",
+                "pending_state": None,
+                "updated_at": None,
+                "disconnected": False,
+            },
+        },
+    }
+    auth_state_path.write_text(json.dumps(auth_state), encoding="utf-8")
+
+    creds = storage.get_live_twitch_credentials("bot")
+    assert creds["ok"] is True
+    assert creds["account"] == "bot"
+    assert creds["channel"] == "ruleofrune"
+    assert creds["nick"] == "RoonieTheCat"
+    assert str(creds["oauth_token"]).startswith("oauth:")
+
+
+def test_live_twitch_credentials_require_primary_channel(tmp_path: Path, monkeypatch) -> None:
+    from roonie.dashboard_api.storage import DashboardStorage
+
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("TWITCH_CLIENT_ID", "client-id")
+    monkeypatch.setenv("TWITCH_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("TWITCH_REDIRECT_URI", "http://127.0.0.1/callback")
+    monkeypatch.setenv("TWITCH_NICK", "RoonieTheCat")
+    monkeypatch.delenv("TWITCH_CHANNEL", raising=False)
+
+    storage = DashboardStorage(runs_dir=runs_dir)
+    auth_state_path = tmp_path / "data" / "twitch_auth_state.json"
+    auth_state = {
+        "version": 1,
+        "accounts": {
+            "bot": {
+                "token": "abcdefghijklmnopqrstuvwxyz123456",
+                "refresh_token": None,
+                "expires_at": None,
+                "scopes": ["chat:read", "chat:edit"],
+                "display_name": "RoonieTheCat",
+                "pending_state": None,
+                "updated_at": "2026-02-14T00:00:00+00:00",
+                "disconnected": False,
+            },
+            "broadcaster": {
+                "token": None,
+                "refresh_token": None,
+                "expires_at": None,
+                "scopes": [],
+                "display_name": "RuleOfRune",
+                "pending_state": None,
+                "updated_at": None,
+                "disconnected": False,
+            },
+        },
+    }
+    auth_state_path.write_text(json.dumps(auth_state), encoding="utf-8")
+
+    creds = storage.get_live_twitch_credentials("bot")
+    assert creds["ok"] is False
+    assert creds["error"] == "MISSING_PRIMARY_CHANNEL"
+
+
 def test_memory_db_initializes_tables(tmp_path: Path, monkeypatch) -> None:
     runs_dir = tmp_path / "runs"
     _write_sample_run(runs_dir)

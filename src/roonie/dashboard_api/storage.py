@@ -3154,6 +3154,89 @@ class DashboardStorage:
             "accounts": accounts,
         }
 
+    def get_live_twitch_credentials(self, account: str = "bot") -> Dict[str, Any]:
+        acc = str(account or "").strip().lower() or "bot"
+        if acc not in self._twitch_account_names():
+            return {
+                "ok": False,
+                "account": acc,
+                "error": "INVALID_ACCOUNT",
+                "detail": "account must be one of: bot, broadcaster",
+            }
+
+        checked_at = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            runtime_config = self._twitch_runtime_config_locked()
+            state = self._load_twitch_auth_state_locked()
+            account_status = self._twitch_account_status_locked(
+                acc,
+                state,
+                checked_at=checked_at,
+                runtime_config=runtime_config,
+            )
+            accounts = state.get("accounts", {}) if isinstance(state, dict) else {}
+            row = accounts.get(acc, {}) if isinstance(accounts, dict) else {}
+            if not isinstance(row, dict):
+                row = {}
+
+            disconnected = bool(row.get("disconnected", False))
+            local_raw = row.get("token")
+            local_token = local_raw.strip() if isinstance(local_raw, str) else ""
+            env_token = self._twitch_env_value(self._twitch_token_env_names(acc))
+            token = "" if disconnected else (local_token or env_token)
+            channel = str(runtime_config.get("primary_channel", "")).strip().lstrip("#").lower()
+            if acc == "bot":
+                nick = self._twitch_env_value(["TWITCH_BOT_NICK", "TWITCH_NICK"]).strip()
+            else:
+                nick = self._twitch_env_value(["TWITCH_BROADCASTER_NICK", "TWITCH_NICK"]).strip()
+            if not nick:
+                nick = str(account_status.get("display_name") or self._twitch_account_display(acc)).strip()
+
+        if not bool(account_status.get("connected", False)):
+            reason = str(account_status.get("reason") or "DISCONNECTED").strip() or "DISCONNECTED"
+            return {
+                "ok": False,
+                "account": acc,
+                "error": reason,
+                "detail": str(account_status.get("reason_detail") or "Twitch account is not connected."),
+                "status": account_status,
+            }
+        if not channel:
+            return {
+                "ok": False,
+                "account": acc,
+                "error": "MISSING_PRIMARY_CHANNEL",
+                "detail": "Set twitch_config.primary_channel (or TWITCH_CHANNEL).",
+                "status": account_status,
+            }
+        if not nick:
+            return {
+                "ok": False,
+                "account": acc,
+                "error": "CONFIG_MISSING",
+                "detail": "Missing Twitch nick for live chat runtime.",
+                "status": account_status,
+            }
+        if not self._token_looks_valid(token):
+            return {
+                "ok": False,
+                "account": acc,
+                "error": "INVALID_TOKEN",
+                "detail": "Twitch token is missing or invalid for live chat runtime.",
+                "status": account_status,
+            }
+
+        oauth_token = token if str(token).lower().startswith("oauth:") else f"oauth:{token}"
+        return {
+            "ok": True,
+            "account": acc,
+            "channel": channel,
+            "nick": nick,
+            "oauth_token": oauth_token,
+            "status": account_status,
+            "checked_at": checked_at,
+        }
+
     @staticmethod
     def _event_decision_bucket(event: EventResponse) -> str:
         text = str(event.decision_type or "").strip().lower()

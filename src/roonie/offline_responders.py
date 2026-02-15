@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -18,6 +18,18 @@ _RESPONSES = {
     "responder:refusal": "Can’t help with that.",
     "responder:policy_safe_info": "Camera: (configured gear).",
 }
+
+
+def _is_greeting_message(message: str) -> bool:
+    text = (message or "").strip().lower()
+    if not text:
+        return False
+    return bool(
+        re.search(
+            r"^(?:@[\w_]+\s*)?(?:hey|heya|hi|hello|yo|sup|what'?s up|whats up)\b",
+            text,
+        )
+    )
 
 
 def _repo_root() -> Path:
@@ -238,6 +250,8 @@ def classify_safe_info_category(message: str, profile: Optional[dict] = None) ->
     text = (message or "").strip().lower()
     if not text:
         return "legacy_safe_info"
+    if any(token in text for token in ("what track is this", "track is this", "id this track", "track id", "song is this")):
+        return "utility_library"
     if (
         ("library" in text and any(token in text for token in ("have", "got", "in there", "in your")))
         or ("do you have" in text and any(token in text for token in ("track", "song", "mix")))
@@ -381,6 +395,8 @@ def _respond_with_emotes(profile: dict) -> str:
 
 
 def respond(route: str, event: Event, decision: Optional[DecisionRecord]) -> Optional[str]:
+    if route == "responder:neutral_ack" and _is_greeting_message(event.message):
+        return "Hey there! Good to see you."
     if route == "responder:policy_safe_info":
         profile = _load_studio_profile()
         category = classify_safe_info_category(event.message, profile)
@@ -401,3 +417,4 @@ def respond(route: str, event: Event, decision: Optional[DecisionRecord]) -> Opt
             return _RESPONSES["responder:policy_safe_info"]
         return _respond_with_gear(event.message, profile)
     return _RESPONSES.get(route)
+
