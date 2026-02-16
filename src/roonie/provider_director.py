@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from pathlib import Path
+import json
 import os
 import re
 from typing import Any, Dict, List, Optional
@@ -44,6 +46,8 @@ _DIRECT_VERBS = (
 
 _TOPIC_ANCHOR_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9]*(?:\s+[A-Za-z0-9]+){0,2}\s+\d{1,3})\b")
 _TOPIC_ANCHOR_TTL_TURNS = 8
+_MUSIC_FACT_RE = re.compile(r"\b(label|release|released|out on|came out|drop|dropped|release date|when)\b", re.IGNORECASE)
+_TOKEN_RE = re.compile(r"[a-z0-9]{3,}", re.IGNORECASE)
 
 
 def _repo_root() -> Path:
@@ -68,6 +72,72 @@ def _memory_db_path() -> Path:
     if dashboard_data_dir:
         return (Path(dashboard_data_dir) / "memory.sqlite").resolve()
     return _repo_root() / "data" / "memory.sqlite"
+
+
+def _library_index_path() -> Path:
+    configured = str(os.getenv("ROONIE_LIBRARY_INDEX_PATH", "")).strip()
+    if configured:
+        path = Path(configured)
+        if not path.is_absolute():
+            path = (_repo_root() / configured).resolve()
+        return path
+    dashboard_data_dir = str(os.getenv("ROONIE_DASHBOARD_DATA_DIR", "")).strip()
+    if dashboard_data_dir:
+        return (Path(dashboard_data_dir) / "library" / "library_index.json").resolve()
+    return _repo_root() / "data" / "library" / "library_index.json"
+
+
+def _normalize_text(value: str) -> str:
+    text = str(value or "").lower().strip()
+    text = re.sub(r"[^\w\s]+", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _score(query: str, candidate: str) -> float:
+    if not query or not candidate:
+        return 0.0
+    if query == candidate:
+        return 1.0
+    ratio = float(SequenceMatcher(None, query, candidate).ratio())
+    if query in candidate or candidate in query:
+        ratio = max(ratio, 0.9)
+    return ratio
+
+
+def _format_library_block(matches: List[Dict[str, Any]], confidence: str) -> str:
+    if not matches:
+        return "Library grounding (local): no close matches."
+    lines: List[str] = []
+    for row in matches[:5]:
+        artist = str(row.get("artist", "")).strip()
+        title = str(row.get("title", "")).strip()
+        mix = str(row.get("mix", "")).strip()
+        label = f"{artist} - {title}".strip(" -")
+        if mix:
+            label = f"{label} ({mix})"
+        if label:
+            lines.append(f"- {label}")
+    if not lines:
+        return "Library grounding (local): no close matches."
+    head = "Library grounding (local):"
+    conf = str(confidence or "").strip().upper()
+    if conf == "EXACT":
+        head = "Library grounding (local): exact match:"
+    elif conf == "CLOSE":
+        head = "Library grounding (local): possible matches:"
+    return head + "\n" + "\n".join(lines)
+
+
+def _is_music_fact_question(message: str, *, topic_anchor: str = "") -> bool:
+    text = str(message or "").strip()
+    if not text:
+        return False
+    if _MUSIC_FACT_RE.search(text):
+        return True
+    if topic_anchor and text.strip().lower() in {"when", "when?"}:
+        return True
+    return False
 
 
 def _load_persona_policy_text() -> str:
@@ -116,9 +186,102 @@ class ProviderDirector:
     _turn_counter: int = field(default=0, init=False, repr=False)
     _topic_anchor: str = field(default="", init=False, repr=False)
     _topic_anchor_turn: int = field(default=0, init=False, repr=False)
+    _library_cache_mtime_ns: int = field(default=0, init=False, repr=False)
+    _library_cache_tracks: List[Dict[str, Any]] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._persona_policy_text = _load_persona_policy_text()
+
+    def _load_library_tracks_cached(self) -> List[Dict[str, Any]]:
+        path = _library_index_path()
+        try:
+            mtime_ns = int(path.stat().st_mtime_ns)
+        except OSError:
+            self._library_cache_mtime_ns = 0
+            self._library_cache_tracks = []
+            return []
+        if self._library_cache_tracks and self._library_cache_mtime_ns == mtime_ns:
+            return self._library_cache_tracks
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+            self._library_cache_mtime_ns = mtime_ns
+            self._library_cache_tracks = []
+            return []
+        tracks_raw = raw.get("tracks", []) if isinstance(raw, dict) else []
+        tracks: List[Dict[str, Any]] = []
+        if isinstance(tracks_raw, list):
+            for item in tracks_raw:
+                if not isinstance(item, dict):
+                    continue
+                tracks.append(
+                    {
+                        "artist": str(item.get("artist", "")).strip(),
+                        "title": str(item.get("title", "")).strip(),
+                        "mix": str(item.get("mix", "")).strip(),
+                        "search_key": str(item.get("search_key", "")).strip(),
+                    }
+                )
+        self._library_cache_mtime_ns = mtime_ns
+        self._library_cache_tracks = tracks
+        return tracks
+
+    def _library_grounding(self, *, message: str, topic_anchor: str) -> Dict[str, Any]:
+        tracks = self._load_library_tracks_cached()
+        if not tracks:
+            return {"confidence": "NONE", "matches": [], "block": _format_library_block([], "NONE")}
+
+        msg_norm = _normalize_text(message)
+        anchor_norm = _normalize_text(topic_anchor)
+        # Prefer anchoring on known topic (e.g. artist name) if present.
+        query_norm = anchor_norm or msg_norm
+        tokens = [m.group(0) for m in _TOKEN_RE.finditer(msg_norm)][:4]
+
+        candidates: List[Dict[str, Any]] = []
+        for row in tracks[:5000]:
+            key = str(row.get("search_key", "")).strip().lower()
+            if not key:
+                key = _normalize_text(f"{row.get('artist','')} - {row.get('title','')}")
+            if anchor_norm and anchor_norm not in key:
+                continue
+            if tokens and not any(tok in key for tok in tokens):
+                # allow pure-anchor searches (artist only)
+                if not anchor_norm:
+                    continue
+            candidates.append({**row, "search_key": key})
+            if len(candidates) >= 600:
+                break
+
+        if not candidates and anchor_norm:
+            # Fallback: anchor-only scan if message tokens don't help.
+            for row in tracks[:5000]:
+                key = str(row.get("search_key", "")).strip().lower()
+                if not key:
+                    key = _normalize_text(f"{row.get('artist','')} - {row.get('title','')}")
+                if anchor_norm and anchor_norm in key:
+                    candidates.append({**row, "search_key": key})
+                    if len(candidates) >= 200:
+                        break
+
+        if not candidates:
+            return {"confidence": "NONE", "matches": [], "block": _format_library_block([], "NONE")}
+
+        scored: List[tuple[float, Dict[str, Any]]] = []
+        for row in candidates:
+            s = _score(query_norm, str(row.get("search_key", "")))
+            if s <= 0.0:
+                continue
+            scored.append((s, row))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        best = [row for _, row in scored[:5]]
+
+        conf = "NONE"
+        if scored and scored[0][0] >= 0.98:
+            conf = "EXACT"
+        elif scored and scored[0][0] >= 0.82:
+            conf = "CLOSE"
+
+        return {"confidence": conf, "matches": best, "block": _format_library_block(best, conf)}
 
     @staticmethod
     def _is_direct_address(event: Event) -> bool:
@@ -228,6 +391,8 @@ class ProviderDirector:
         now_playing_available: bool,
         memory_hints: str,
         topic_anchor: str,
+        library_block: str,
+        music_fact_question: bool,
     ) -> str:
         base_prompt = build_roonie_prompt(
             message=event.message,
@@ -254,6 +419,22 @@ class ProviderDirector:
                 "- If the viewer says 'it/that/this' or gives a partial title, resolve it against this topic first.\n"
                 "- Do not invent new artist or track names when uncertain; ask one short clarification."
             )
+        grounding_block = ""
+        if library_block:
+            grounding_block = (
+                "\n\n"
+                f"{library_block}\n"
+                "- Use the library match list to resolve ambiguous references.\n"
+                "- If there are multiple matches, ask one short clarifying question."
+            )
+        music_fact_block = ""
+        if music_fact_question:
+            music_fact_block = (
+                "\n\n"
+                "Music facts policy:\n"
+                "- If asked for label/release date and you cannot verify, answer best-effort but hedge clearly.\n"
+                "- Prefer: 'not 100% without the exact title/link' and ask for the title/link to confirm."
+            )
         memory_block = ""
         if memory_hints:
             memory_block = (
@@ -262,10 +443,10 @@ class ProviderDirector:
                 f"{memory_hints}"
             )
         if not self._persona_policy_text:
-            return f"{base_prompt}\n\n{behavior_block}{continuity_block}{memory_block}\n"
+            return f"{base_prompt}\n\n{behavior_block}{continuity_block}{grounding_block}{music_fact_block}{memory_block}\n"
         return (
             f"{base_prompt}\n\n"
-            f"{behavior_block}{continuity_block}{memory_block}\n\n"
+            f"{behavior_block}{continuity_block}{grounding_block}{music_fact_block}{memory_block}\n\n"
             "Canonical Persona Policy (do not violate):\n"
             f"{self._persona_policy_text}\n"
         )
@@ -303,6 +484,11 @@ class ProviderDirector:
             else:
                 self._topic_anchor = ""
                 self._topic_anchor_turn = 0
+
+        grounding = self._library_grounding(message=event.message, topic_anchor=topic_anchor)
+        library_block = str(grounding.get("block", "")).strip()
+        library_confidence = str(grounding.get("confidence", "NONE")).strip().upper() or "NONE"
+        music_fact_question = _is_music_fact_question(event.message, topic_anchor=topic_anchor)
 
         stored_user_turn = self.context_buffer.add_turn(
             speaker="user",
@@ -344,6 +530,7 @@ class ProviderDirector:
                         "category": category,
                         "approved_emotes": approved_emotes,
                         "topic_anchor": topic_anchor,
+                        "library_confidence": library_confidence,
                     },
                     "memory": {
                         "keys_used": memory_result.keys_used,
@@ -386,6 +573,7 @@ class ProviderDirector:
                     "approved_emotes": approved_emotes,
                     "now_playing_available": now_playing_available,
                     "topic_anchor": topic_anchor,
+                    "library_confidence": library_confidence,
                 },
                 "memory": {
                     "keys_used": memory_result.keys_used,
@@ -431,6 +619,7 @@ class ProviderDirector:
                     "approved_emotes": approved_emotes,
                     "now_playing_available": now_playing_available,
                     "topic_anchor": topic_anchor,
+                    "library_confidence": library_confidence,
                 },
                 "memory": {
                     "keys_used": memory_result.keys_used,
@@ -470,6 +659,8 @@ class ProviderDirector:
             now_playing_available=now_playing_available,
             memory_hints=memory_result.text_snippet,
             topic_anchor=topic_anchor,
+            library_block=library_block,
+            music_fact_question=bool(music_fact_question),
         )
         context: Dict[str, Any] = {
             "use_provider_config": True,
@@ -546,6 +737,7 @@ class ProviderDirector:
                 "approved_emotes": approved_emotes,
                 "now_playing_available": now_playing_available,
                 "topic_anchor": topic_anchor,
+                "library_confidence": library_confidence,
             },
             "memory": {
                 "keys_used": memory_result.keys_used,
