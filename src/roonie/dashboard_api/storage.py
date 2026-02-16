@@ -24,6 +24,7 @@ from urllib.parse import urlparse, urlencode, quote_plus
 from uuid import uuid4
 
 from providers.router import (
+    get_resolved_model_config,
     get_provider_runtime_metrics,
     get_runtime_config_paths,
     get_provider_runtime_status,
@@ -658,6 +659,9 @@ class DashboardStorage:
         os.environ["ROONIE_ARMED"] = "1" if snap["armed"] else "0"
         os.environ["ROONIE_ARM"] = os.environ["ROONIE_ARMED"]
         os.environ["ROONIE_OUTPUT_DISABLED"] = "1" if output_disabled else "0"
+        # Keep Twitch output gate aligned with dashboard active/silence state so
+        # /api/status can_post and adapter eligibility stay consistent.
+        os.environ["TWITCH_OUTPUT_ENABLED"] = "0" if output_disabled else "1"
         os.environ["ROONIE_ACTIVE_DIRECTOR"] = self.normalize_active_director(snap.get("active_director"))
         if not self._kill_switch_env_pinned:
             os.environ["ROONIE_KILL_SWITCH"] = "0"
@@ -2882,6 +2886,10 @@ class DashboardStorage:
         routing_status = get_routing_runtime_status()
         step_ms["routing"] = (time.perf_counter() - t1) * 1000.0
 
+        t1b = time.perf_counter()
+        model_cfg = get_resolved_model_config()
+        step_ms["models"] = (time.perf_counter() - t1b) * 1000.0
+
         t2 = time.perf_counter()
         runtime_snapshot = self._status_runtime_snapshot()
         step_ms["runtime_snapshot"] = (time.perf_counter() - t2) * 1000.0
@@ -2899,6 +2907,9 @@ class DashboardStorage:
             active_provider = str(runtime_snapshot.get("active_provider", "none") or "none")
         if active_provider == "none":
             active_provider = str(os.getenv("ROONIE_ACTIVE_PROVIDER", "none") or "none")
+        provider_models_raw = model_cfg.get("provider_models", {})
+        provider_models = dict(provider_models_raw) if isinstance(provider_models_raw, dict) else {}
+        active_model = str(provider_models.get(active_provider, "")).strip() or None
         version = str(runtime_snapshot.get("version") or os.getenv("ROONIE_VERSION", "unknown"))
         mode = str(runtime_snapshot.get("mode") or os.getenv("ROONIE_MODE", "offline"))
         last_heartbeat_at = runtime_snapshot.get("last_heartbeat_at")
@@ -2942,6 +2953,24 @@ class DashboardStorage:
             eventsub_last_message_ts=(eventsub_last_ts or None),
             eventsub_reconnect_count=int(eventsub_state.get("reconnect_count", 0) or 0),
             eventsub_last_error=(eventsub_last_error or None),
+            active_model=active_model,
+            provider_models=provider_models,
+            resolved_models={
+                "openai_model": str(model_cfg.get("openai_model", "")),
+                "director_model": str(model_cfg.get("director_model", "")),
+                "grok_model": str(model_cfg.get("grok_model", "")),
+            },
+            routing_info={
+                "enabled": bool(routing_status.get("enabled", True)),
+                "default_provider": str(routing_status.get("default_provider", "openai") or "openai"),
+                "music_route_provider": str(routing_status.get("music_route_provider", "grok") or "grok"),
+                "manual_override": str(routing_status.get("manual_override", "default") or "default"),
+                "provider_models": provider_models,
+                "music_route_model": str(
+                    provider_models.get(str(routing_status.get("music_route_provider", "grok") or "grok"), "")
+                ).strip()
+                or None,
+            },
         )
         step_ms["compose"] = (time.perf_counter() - t5) * 1000.0
 
@@ -2952,6 +2981,7 @@ class DashboardStorage:
                 f"total_ms={total_ms:.1f} "
                 f"blocks_provider={step_ms.get('blocks_provider', 0.0):.1f} "
                 f"routing={step_ms.get('routing', 0.0):.1f} "
+                f"models={step_ms.get('models', 0.0):.1f} "
                 f"runtime_snapshot={step_ms.get('runtime_snapshot', 0.0):.1f} "
                 f"twitch_cached={step_ms.get('twitch_cached', 0.0):.1f} "
                 f"eventsub={step_ms.get('eventsub', 0.0):.1f} "
@@ -2964,13 +2994,18 @@ class DashboardStorage:
         _, provider_status, _, blocked_by, can_post = self._current_blocks_and_provider(
             reload_control_from_disk=False
         )
+        model_cfg = get_resolved_model_config()
+        provider_models_raw = model_cfg.get("provider_models", {})
+        provider_models = dict(provider_models_raw) if isinstance(provider_models_raw, dict) else {}
+        active_provider = str(provider_status.get("active_provider", "openai") or "openai")
         with self._lock:
             active_director = self.normalize_active_director(self._control_state.get("active_director"))
         routing_cfg = get_routing_runtime_status()
         runtime_metrics = get_provider_runtime_metrics()
         providers_metrics = runtime_metrics.get("providers", {}) if isinstance(runtime_metrics, dict) else {}
         return {
-            "active_provider": str(provider_status.get("active_provider", "openai") or "openai"),
+            "active_provider": active_provider,
+            "active_model": str(provider_models.get(active_provider, "")).strip() or None,
             "approved_providers": list(provider_status.get("approved_providers", [])),
             "caps": dict(provider_status.get("caps", {})),
             "usage": dict(provider_status.get("usage", {})),
@@ -2979,6 +3014,15 @@ class DashboardStorage:
             "blocked_by": blocked_by,
             "routing_enabled": bool(routing_cfg.get("enabled", True)),
             "active_director": active_director,
+            "provider_models": provider_models,
+            "resolved_models": {
+                "openai_model": str(model_cfg.get("openai_model", "")),
+                "director_model": str(model_cfg.get("director_model", "")),
+                "grok_model": str(model_cfg.get("grok_model", "")),
+                "anthropic_model": str(model_cfg.get("anthropic_model", "")),
+            },
+            "model_sources": dict(model_cfg.get("sources", {})) if isinstance(model_cfg.get("sources"), dict) else {},
+            "model_fallback_defaults": list(model_cfg.get("fallback_defaults", [])),
         }
 
     def _latest_routing_decision(self, run_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -2986,6 +3030,7 @@ class DashboardStorage:
             "ts": None,
             "routing_class": "general",
             "provider_selected": "openai",
+            "provider_model": None,
             "moderation_provider_used": None,
             "moderation_result": None,
             "override_mode": "default",
@@ -3036,6 +3081,11 @@ class DashboardStorage:
                 "ts": ts,
                 "routing_class": str(routing.get("routing_class", "general") or "general"),
                 "provider_selected": provider_selected,
+                "provider_model": (
+                    str(routing.get("model_selected")).strip()
+                    if routing.get("model_selected") is not None
+                    else None
+                ),
                 "moderation_provider_used": (
                     str(routing.get("moderation_provider_used")).strip().lower()
                     if routing.get("moderation_provider_used") is not None
@@ -3056,6 +3106,9 @@ class DashboardStorage:
         _, _, _, blocked_by, can_post = self._current_blocks_and_provider(
             reload_control_from_disk=False
         )
+        model_cfg = get_resolved_model_config()
+        provider_models_raw = model_cfg.get("provider_models", {})
+        provider_models = dict(provider_models_raw) if isinstance(provider_models_raw, dict) else {}
         with self._lock:
             active_director = self.normalize_active_director(self._control_state.get("active_director"))
         _, run_data = self._load_latest_run()
@@ -3069,6 +3122,15 @@ class DashboardStorage:
             "can_post": can_post,
             "blocked_by": blocked_by,
             "active_director": active_director,
+            "provider_models": provider_models,
+            "music_route_model": str(
+                provider_models.get(str(routing_status.get("music_route_provider", "grok") or "grok"), "")
+            ).strip()
+            or None,
+            "default_model": str(
+                provider_models.get(str(routing_status.get("default_provider", "openai") or "openai"), "")
+            ).strip()
+            or None,
             "last_decision": self._latest_routing_decision(run_data),
         }
 

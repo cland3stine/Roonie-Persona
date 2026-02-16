@@ -12,6 +12,7 @@ from typing import Any, Dict
 
 from roonie.control_room.preflight import resolve_runtime_paths, run_preflight
 from roonie.dashboard_api.app import create_server
+from providers.router import get_resolved_model_config
 
 
 def _utc_now_iso() -> str:
@@ -30,6 +31,56 @@ def _write_json(path: Path, payload: Dict[str, Any]) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(path)
+
+
+def _load_secrets_env_into_process(
+    path: Path,
+    *,
+    override_existing: bool = False,
+    force_keys: set[str] | None = None,
+) -> Dict[str, Any]:
+    stats = {
+        "path": str(path),
+        "exists": bool(path.exists()),
+        "loaded": 0,
+        "set": 0,
+        "skipped_existing": 0,
+        "forced_override": 0,
+        "ignored": 0,
+    }
+    if not path.exists():
+        return stats
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return stats
+
+    for raw in lines:
+        line = str(raw or "").strip()
+        if not line or line.startswith("#") or "=" not in line:
+            stats["ignored"] += 1
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            stats["ignored"] += 1
+            continue
+        if len(value) >= 2 and (
+            (value[0] == '"' and value[-1] == '"')
+            or (value[0] == "'" and value[-1] == "'")
+        ):
+            value = value[1:-1]
+        stats["loaded"] += 1
+        force_this_key = bool(force_keys and key in force_keys)
+        if (not force_this_key) and (not override_existing) and key in os.environ:
+            stats["skipped_existing"] += 1
+            continue
+        if force_this_key and key in os.environ:
+            stats["forced_override"] += 1
+        os.environ[key] = value
+        stats["set"] += 1
+    return stats
 
 
 def _arg_parser() -> argparse.ArgumentParser:
@@ -85,6 +136,16 @@ def _port_is_in_use(host: str, port: int) -> bool:
 def main(argv: list[str] | None = None) -> int:
     args = _arg_parser().parse_args(argv)
     repo_root = Path.cwd()
+    secrets_stats = _load_secrets_env_into_process(
+        repo_root / "config" / "secrets.env",
+        override_existing=False,
+        force_keys={
+            "OPENAI_MODEL",
+            "ROONIE_DIRECTOR_MODEL",
+            "GROK_MODEL",
+            "ANTHROPIC_MODEL",
+        },
+    )
 
     paths = resolve_runtime_paths(
         repo_root=repo_root,
@@ -95,6 +156,32 @@ def main(argv: list[str] | None = None) -> int:
     os.environ["ROONIE_DASHBOARD_LOGS_DIR"] = str(paths.logs_dir)
     os.environ["ROONIE_DASHBOARD_RUNS_DIR"] = str(paths.runs_dir)
     os.environ["ROONIE_DASHBOARD_PORT"] = str(int(args.port))
+    _append_log(
+        paths.control_log_path,
+        "SECRETS_ENV: "
+        f"path={secrets_stats.get('path')} "
+        f"exists={secrets_stats.get('exists')} "
+        f"loaded={secrets_stats.get('loaded')} "
+        f"set={secrets_stats.get('set')} "
+        f"skipped_existing={secrets_stats.get('skipped_existing')} "
+        f"forced_override={secrets_stats.get('forced_override')}",
+    )
+
+    model_cfg = get_resolved_model_config(ensure_env=True)
+    _append_log(
+        paths.control_log_path,
+        "MODELS: "
+        f"openai={model_cfg.get('openai_model')} "
+        f"director={model_cfg.get('director_model')} "
+        f"grok={model_cfg.get('grok_model')} "
+        f"sources={model_cfg.get('sources')}",
+    )
+    fallback_defaults = model_cfg.get("fallback_defaults", [])
+    if isinstance(fallback_defaults, list) and fallback_defaults:
+        _append_log(
+            paths.control_log_path,
+            f"MODELS_FALLBACK: using defaults for {', '.join(str(item) for item in fallback_defaults)}",
+        )
 
     _append_log(paths.control_log_path, "PRE-FLIGHT: starting")
     preflight = run_preflight(paths)

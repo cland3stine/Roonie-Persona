@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 import os
+import re
 from typing import Any, Dict, List, Optional
 
 from memory.injection import SafeInjectionResult, get_safe_injection
@@ -40,6 +41,9 @@ _DIRECT_VERBS = (
     "restart",
     "help",
 )
+
+_TOPIC_ANCHOR_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9]*(?:\s+[A-Za-z0-9]+){0,2}\s+\d{1,3})\b")
+_TOPIC_ANCHOR_TTL_TURNS = 8
 
 
 def _repo_root() -> Path:
@@ -109,6 +113,9 @@ class ProviderDirector:
     context_buffer: ContextBuffer = field(default_factory=lambda: ContextBuffer(max_turns=3))
     _session_id: str = field(default="", init=False, repr=False)
     _persona_policy_text: str = field(default="", init=False, repr=False)
+    _turn_counter: int = field(default=0, init=False, repr=False)
+    _topic_anchor: str = field(default="", init=False, repr=False)
+    _topic_anchor_turn: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._persona_policy_text = _load_persona_policy_text()
@@ -164,6 +171,22 @@ class ProviderDirector:
         return ""
 
     @staticmethod
+    def _extract_topic_anchor(message: str) -> str:
+        text = str(message or "").strip()
+        if not text:
+            return ""
+        text = re.sub(r"^@\w+\s*", "", text).strip()
+        m = _TOPIC_ANCHOR_RE.search(text)
+        if not m:
+            return ""
+        anchor = " ".join(str(m.group(1)).split())
+        tokens = anchor.split()
+        while tokens and tokens[0].lower() in {"the", "latest", "this", "that", "a", "an"}:
+            tokens.pop(0)
+        normalized = " ".join(tokens).strip()
+        return normalized or anchor
+
+    @staticmethod
     def _sanitize_stub_output(text: str, *, category: str, user_message: str = "") -> str:
         raw = str(text or "").strip()
         if not raw:
@@ -204,6 +227,7 @@ class ProviderDirector:
         approved_emotes: List[str],
         now_playing_available: bool,
         memory_hints: str,
+        topic_anchor: str,
     ) -> str:
         base_prompt = build_roonie_prompt(
             message=event.message,
@@ -219,7 +243,17 @@ class ProviderDirector:
             category=category,
             approved_emotes=approved_emotes,
             now_playing_available=now_playing_available,
+            topic_anchor=topic_anchor,
         )
+        continuity_block = ""
+        if topic_anchor:
+            continuity_block = (
+                "\n\n"
+                "Conversation continuity hint:\n"
+                f"- Active topic from recent chat: {topic_anchor}\n"
+                "- If the viewer says 'it/that/this' or gives a partial title, resolve it against this topic first.\n"
+                "- Do not invent new artist or track names when uncertain; ask one short clarification."
+            )
         memory_block = ""
         if memory_hints:
             memory_block = (
@@ -228,10 +262,10 @@ class ProviderDirector:
                 f"{memory_hints}"
             )
         if not self._persona_policy_text:
-            return f"{base_prompt}\n\n{behavior_block}{memory_block}\n"
+            return f"{base_prompt}\n\n{behavior_block}{continuity_block}{memory_block}\n"
         return (
             f"{base_prompt}\n\n"
-            f"{behavior_block}{memory_block}\n\n"
+            f"{behavior_block}{continuity_block}{memory_block}\n\n"
             "Canonical Persona Policy (do not violate):\n"
             f"{self._persona_policy_text}\n"
         )
@@ -241,6 +275,9 @@ class ProviderDirector:
         if session_id and session_id != self._session_id:
             self.context_buffer.clear()
             self._session_id = session_id
+            self._turn_counter = 0
+            self._topic_anchor = ""
+            self._topic_anchor_turn = 0
 
         metadata = event.metadata if isinstance(event.metadata, dict) else {}
         addressed = self._is_direct_address(event)
@@ -253,12 +290,27 @@ class ProviderDirector:
         context_turns_used = len(context_turns)
         context_active = context_turns_used > 0
 
+        self._turn_counter += 1
+        maybe_anchor = self._extract_topic_anchor(event.message)
+        if maybe_anchor:
+            self._topic_anchor = maybe_anchor
+            self._topic_anchor_turn = self._turn_counter
+        topic_anchor = ""
+        if self._topic_anchor:
+            age = self._turn_counter - self._topic_anchor_turn
+            if age <= _TOPIC_ANCHOR_TTL_TURNS:
+                topic_anchor = self._topic_anchor
+            else:
+                self._topic_anchor = ""
+                self._topic_anchor_turn = 0
+
         stored_user_turn = self.context_buffer.add_turn(
             speaker="user",
             text=event.message,
             tags={
                 "direct_address": addressed,
                 "category": str(event.metadata.get("category", "")).strip().lower(),
+                "user": str(event.metadata.get("user", "")).strip().lower(),
             },
         )
         memory_result = SafeInjectionResult(
@@ -291,6 +343,7 @@ class ProviderDirector:
                     "behavior": {
                         "category": category,
                         "approved_emotes": approved_emotes,
+                        "topic_anchor": topic_anchor,
                     },
                     "memory": {
                         "keys_used": memory_result.keys_used,
@@ -332,6 +385,7 @@ class ProviderDirector:
                     "category": category,
                     "approved_emotes": approved_emotes,
                     "now_playing_available": now_playing_available,
+                    "topic_anchor": topic_anchor,
                 },
                 "memory": {
                     "keys_used": memory_result.keys_used,
@@ -376,6 +430,7 @@ class ProviderDirector:
                     "category": category,
                     "approved_emotes": approved_emotes,
                     "now_playing_available": now_playing_available,
+                    "topic_anchor": topic_anchor,
                 },
                 "memory": {
                     "keys_used": memory_result.keys_used,
@@ -414,6 +469,7 @@ class ProviderDirector:
             approved_emotes=approved_emotes,
             now_playing_available=now_playing_available,
             memory_hints=memory_result.text_snippet,
+            topic_anchor=topic_anchor,
         )
         context: Dict[str, Any] = {
             "use_provider_config": True,
@@ -447,6 +503,11 @@ class ProviderDirector:
             or registry.get_default().name
             or "openai"
         ).strip().lower() or "openai"
+        provider_model = str(
+            context.get("model")
+            or context.get("active_model")
+            or ""
+        ).strip() or None
         moderation_status = str(context.get("moderation_result", "not_applicable") or "not_applicable")
         suppression_reason = str(context.get("suppression_reason", "")).strip() or None
 
@@ -484,6 +545,7 @@ class ProviderDirector:
                 "category": category,
                 "approved_emotes": approved_emotes,
                 "now_playing_available": now_playing_available,
+                "topic_anchor": topic_anchor,
             },
             "memory": {
                 "keys_used": memory_result.keys_used,
@@ -495,6 +557,7 @@ class ProviderDirector:
                 "routing_enabled": bool(context.get("routing_enabled", False)),
                 "routing_class": str(context.get("routing_class", "general")),
                 "provider_selected": provider_used,
+                "model_selected": provider_model,
                 "moderation_provider_used": context.get("moderation_provider_used"),
                 "moderation_result": moderation_status,
                 "override_mode": str(context.get("override_mode", "default")),
@@ -502,6 +565,7 @@ class ProviderDirector:
             "proposal": {
                 "text": response_text,
                 "provider_used": provider_used,
+                "model_used": provider_model,
                 "route_used": route,
                 "moderation_status": moderation_status,
                 "session_id": session_id or None,

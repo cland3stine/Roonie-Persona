@@ -31,6 +31,10 @@ class StatusResponse:
     eventsub_last_message_ts: Optional[str] = None
     eventsub_reconnect_count: int = 0
     eventsub_last_error: Optional[str] = None
+    active_model: Optional[str] = None
+    provider_models: Dict[str, str] = field(default_factory=dict)
+    resolved_models: Dict[str, str] = field(default_factory=dict)
+    routing_info: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

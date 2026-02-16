@@ -11,7 +11,11 @@ from typing import Any, Dict
 from roonie.control_room.preflight import resolve_runtime_paths, run_preflight
 from roonie.dashboard_api.app import create_server
 from roonie.dashboard_api.storage import DashboardStorage
-from roonie.run_control_room import _apply_safe_start_defaults, main as run_control_room_main
+from roonie.run_control_room import (
+    _apply_safe_start_defaults,
+    _load_secrets_env_into_process,
+    main as run_control_room_main,
+)
 
 
 def _get_json(base: str, path: str) -> Dict[str, Any]:
@@ -188,6 +192,39 @@ def test_safe_start_defaults_force_disarmed_output_disabled(tmp_path: Path, monk
     assert status["can_post"] is False
 
 
+def test_twitch_output_enabled_tracks_active_state(tmp_path: Path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = tmp_path / "data"
+    logs_dir = tmp_path / "logs"
+    monkeypatch.setenv("ROONIE_DASHBOARD_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("ROONIE_DASHBOARD_LOGS_DIR", str(logs_dir))
+    monkeypatch.setenv("ROONIE_KILL_SWITCH", "0")
+
+    readiness_state = {
+        "ready": True,
+        "checked_at": "2026-02-13T00:00:00+00:00",
+        "items": [{"name": "preflight", "ok": True, "detail": "ok"}],
+        "blocking_reasons": [],
+    }
+    server, thread = _start_server(runs_dir, readiness_state)
+    try:
+        storage = getattr(server, "_roonie_storage")
+        assert isinstance(storage, DashboardStorage)
+        _apply_safe_start_defaults(storage)
+        assert os.getenv("TWITCH_OUTPUT_ENABLED") == "0"
+        state_armed = storage.set_armed(True)
+        assert state_armed["armed"] is True
+        assert os.getenv("TWITCH_OUTPUT_ENABLED") == "1"
+        state_disarmed = storage.set_armed(False)
+        assert state_disarmed["armed"] is False
+        assert os.getenv("TWITCH_OUTPUT_ENABLED") == "0"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+
 def test_run_control_room_refuses_start_when_port_already_in_use(tmp_path: Path, monkeypatch) -> None:
     repo_root = tmp_path / "repo"
     repo_root.mkdir(parents=True, exist_ok=True)
@@ -224,6 +261,84 @@ def test_run_control_room_refuses_start_when_port_already_in_use(tmp_path: Path,
     finally:
         listener.close()
     assert rc == 3
+
+
+def test_load_secrets_env_into_process_sets_missing_values(tmp_path: Path, monkeypatch) -> None:
+    env_file = tmp_path / "secrets.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "# comment",
+                "OPENAI_MODEL=gpt-5.2",
+                'ROONIE_DIRECTOR_MODEL="gpt-5.2"',
+                "GROK_MODEL='grok-4-1-fast-reasoning'",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+    monkeypatch.delenv("ROONIE_DIRECTOR_MODEL", raising=False)
+    monkeypatch.delenv("GROK_MODEL", raising=False)
+
+    stats = _load_secrets_env_into_process(env_file, override_existing=False)
+
+    assert stats["exists"] is True
+    assert stats["loaded"] == 3
+    assert stats["set"] == 3
+    assert os.getenv("OPENAI_MODEL") == "gpt-5.2"
+    assert os.getenv("ROONIE_DIRECTOR_MODEL") == "gpt-5.2"
+    assert os.getenv("GROK_MODEL") == "grok-4-1-fast-reasoning"
+
+
+def test_load_secrets_env_into_process_does_not_override_existing(tmp_path: Path, monkeypatch) -> None:
+    env_file = tmp_path / "secrets.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "OPENAI_MODEL=gpt-5.2",
+                "ROONIE_DIRECTOR_MODEL=gpt-5.2",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENAI_MODEL", "custom-openai-model")
+    monkeypatch.delenv("ROONIE_DIRECTOR_MODEL", raising=False)
+
+    stats = _load_secrets_env_into_process(env_file, override_existing=False)
+
+    assert stats["loaded"] == 2
+    assert stats["set"] == 1
+    assert stats["skipped_existing"] == 1
+    assert os.getenv("OPENAI_MODEL") == "custom-openai-model"
+    assert os.getenv("ROONIE_DIRECTOR_MODEL") == "gpt-5.2"
+
+
+def test_load_secrets_env_force_keys_override_existing(tmp_path: Path, monkeypatch) -> None:
+    env_file = tmp_path / "secrets.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "GROK_MODEL=grok-4-1-fast-reasoning",
+                "OPENAI_MODEL=gpt-5.2",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GROK_MODEL", "grok-4-1-fast-non-reasoning")
+    monkeypatch.setenv("OPENAI_MODEL", "other-model")
+
+    stats = _load_secrets_env_into_process(
+        env_file,
+        override_existing=False,
+        force_keys={"GROK_MODEL"},
+    )
+
+    assert stats["loaded"] == 2
+    assert stats["set"] == 1
+    assert stats["forced_override"] == 1
+    assert stats["skipped_existing"] == 1
+    assert os.getenv("GROK_MODEL") == "grok-4-1-fast-reasoning"
+    assert os.getenv("OPENAI_MODEL") == "other-model"
 
 
 def test_no_bare_python_run_control_room_spawn_in_source() -> None:

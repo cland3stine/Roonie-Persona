@@ -17,6 +17,12 @@ from providers.registry import ProviderRegistry
 _SUPPORTED_PROVIDERS = ("openai", "grok", "anthropic")
 _DEFAULT_APPROVED_PROVIDERS = ("openai", "grok")
 _ROUTING_OVERRIDE_MODES = ("default", "force_openai", "force_grok")
+_MODEL_DEFAULTS = {
+    "OPENAI_MODEL": "gpt-5.2",
+    "ROONIE_DIRECTOR_MODEL": "gpt-5.2",
+    "GROK_MODEL": "grok-4-1-fast-reasoning",
+    "ANTHROPIC_MODEL": "claude-3-5-sonnet",
+}
 _ROUTING_MUSIC_KEYWORDS = (
     "track",
     "id",
@@ -72,6 +78,7 @@ def _new_provider_metrics() -> Dict[str, Any]:
         "moderation_blocks": 0,
         "avg_latency_ms": 0,
         "last_error": None,
+        "last_model": None,
     }
 
 
@@ -388,12 +395,26 @@ def get_provider_runtime_status() -> Dict[str, Any]:
         cfg = _load_config_locked(path)
         # Persist day rollover deterministically.
         cfg = _save_config_locked(path, cfg)
+    model_cfg = get_resolved_model_config()
+    provider_models_raw = model_cfg.get("provider_models", {})
+    provider_models = dict(provider_models_raw) if isinstance(provider_models_raw, dict) else {}
+    active_provider = cfg["active_provider"]
     return {
-        "active_provider": cfg["active_provider"],
+        "active_provider": active_provider,
+        "active_model": str(provider_models.get(active_provider, "")).strip() or None,
         "approved_providers": list(cfg["approved_providers"]),
         "caps": deepcopy(cfg["caps"]),
         "usage": deepcopy(cfg["usage"]),
         "cost_cap_blocked": _is_cost_cap_blocked(cfg),
+        "provider_models": provider_models,
+        "resolved_models": {
+            "openai_model": str(model_cfg.get("openai_model", "")),
+            "director_model": str(model_cfg.get("director_model", "")),
+            "grok_model": str(model_cfg.get("grok_model", "")),
+            "anthropic_model": str(model_cfg.get("anthropic_model", "")),
+        },
+        "model_sources": dict(model_cfg.get("sources", {})) if isinstance(model_cfg.get("sources"), dict) else {},
+        "model_fallback_defaults": list(model_cfg.get("fallback_defaults", [])),
     }
 
 
@@ -499,6 +520,15 @@ def _record_provider_request_start(provider_name: str) -> None:
         metric["requests"] = int(metric.get("requests", 0)) + 1
 
 
+def _record_provider_model(provider_name: str, model: Optional[str]) -> None:
+    model_text = str(model or "").strip()
+    if not model_text:
+        return
+    with _METRICS_LOCK:
+        metric = _ensure_provider_metrics_locked(provider_name)
+        metric["last_model"] = model_text
+
+
 def _record_provider_result(
     provider_name: str,
     *,
@@ -563,6 +593,7 @@ def get_provider_runtime_metrics() -> Dict[str, Any]:
                     "moderation_blocks": int(item.get("moderation_blocks", 0)),
                     "avg_latency_ms": int(item.get("avg_latency_ms", 0)),
                     "last_error": (str(item.get("last_error")).strip() if item.get("last_error") is not None else None),
+                    "last_model": (str(item.get("last_model")).strip() if item.get("last_model") is not None else None),
                 }
         routing_out = {
             "music_culture_hits": int(routing_src.get("music_culture_hits", 0)) if isinstance(routing_src, dict) else 0,
@@ -667,6 +698,94 @@ def _resolve_secret_or_env(name: str) -> str:
     return str(_read_secrets_env().get(name, "")).strip()
 
 
+def _resolve_value_and_source(name: str) -> Tuple[str, str]:
+    direct = str(os.getenv(name, "")).strip()
+    if direct:
+        return direct, "env"
+    from_secrets = str(_read_secrets_env().get(name, "")).strip()
+    if from_secrets:
+        return from_secrets, "secrets"
+    return "", "unset"
+
+
+def get_resolved_model_config(*, ensure_env: bool = False) -> Dict[str, Any]:
+    openai_raw, openai_source = _resolve_value_and_source("OPENAI_MODEL")
+    openai_model = openai_raw or _MODEL_DEFAULTS["OPENAI_MODEL"]
+    openai_used_default = not bool(openai_raw)
+    if ensure_env and not os.getenv("OPENAI_MODEL") and openai_raw:
+        os.environ["OPENAI_MODEL"] = openai_raw
+
+    director_raw, director_source = _resolve_value_and_source("ROONIE_DIRECTOR_MODEL")
+    director_used_default = False
+    if director_raw:
+        director_model = director_raw
+    elif openai_raw:
+        director_model = openai_raw
+        director_source = "OPENAI_MODEL"
+    else:
+        director_model = _MODEL_DEFAULTS["ROONIE_DIRECTOR_MODEL"]
+        director_source = "default"
+        director_used_default = True
+    if ensure_env and not os.getenv("ROONIE_DIRECTOR_MODEL") and director_model:
+        os.environ["ROONIE_DIRECTOR_MODEL"] = director_model
+
+    grok_raw, grok_source = _resolve_value_and_source("GROK_MODEL")
+    grok_model = grok_raw or _MODEL_DEFAULTS["GROK_MODEL"]
+    grok_used_default = not bool(grok_raw)
+    if ensure_env and not os.getenv("GROK_MODEL") and grok_raw:
+        os.environ["GROK_MODEL"] = grok_raw
+
+    anthropic_raw, anthropic_source = _resolve_value_and_source("ANTHROPIC_MODEL")
+    anthropic_model = anthropic_raw or _MODEL_DEFAULTS["ANTHROPIC_MODEL"]
+    anthropic_used_default = not bool(anthropic_raw)
+    if ensure_env and not os.getenv("ANTHROPIC_MODEL") and anthropic_raw:
+        os.environ["ANTHROPIC_MODEL"] = anthropic_raw
+
+    fallback_defaults: list[str] = []
+    if openai_used_default:
+        fallback_defaults.append("OPENAI_MODEL")
+    if director_used_default:
+        fallback_defaults.append("ROONIE_DIRECTOR_MODEL")
+    if grok_used_default:
+        fallback_defaults.append("GROK_MODEL")
+    if anthropic_used_default:
+        fallback_defaults.append("ANTHROPIC_MODEL")
+
+    provider_models = {
+        "openai": director_model,
+        "grok": grok_model,
+        "anthropic": anthropic_model,
+    }
+    return {
+        "openai_model": openai_model,
+        "director_model": director_model,
+        "grok_model": grok_model,
+        "anthropic_model": anthropic_model,
+        "provider_models": provider_models,
+        "sources": {
+            "OPENAI_MODEL": openai_source if not openai_used_default else "default",
+            "ROONIE_DIRECTOR_MODEL": director_source,
+            "GROK_MODEL": grok_source if not grok_used_default else "default",
+            "ANTHROPIC_MODEL": anthropic_source if not anthropic_used_default else "default",
+        },
+        "fallback_defaults": fallback_defaults,
+    }
+
+
+def _resolved_model_for_provider(provider_name: str, model_config: Dict[str, Any]) -> str:
+    provider_models = model_config.get("provider_models", {})
+    if isinstance(provider_models, dict):
+        model = str(provider_models.get(str(provider_name).strip().lower(), "")).strip()
+        if model:
+            return model
+    defaults = {
+        "openai": _MODEL_DEFAULTS["ROONIE_DIRECTOR_MODEL"],
+        "grok": _MODEL_DEFAULTS["GROK_MODEL"],
+        "anthropic": _MODEL_DEFAULTS["ANTHROPIC_MODEL"],
+    }
+    return defaults.get(str(provider_name).strip().lower(), _MODEL_DEFAULTS["OPENAI_MODEL"])
+
+
 def _provider_api_key(provider_name: str) -> str:
     selected = str(provider_name or "").strip().lower()
     if selected == "openai":
@@ -705,14 +824,18 @@ def _provider_for_name(
     context: Optional[Dict[str, Any]] = None,
 ) -> Provider:
     selected = str(name or "").strip().lower()
+    model_config = get_resolved_model_config()
+    resolved_model = _resolved_model_for_provider(selected, model_config)
+    if context is not None:
+        if not context.get("model"):
+            context["model"] = resolved_model
+        context["resolved_model"] = str(context.get("model") or resolved_model)
     if selected == "openai":
         if _real_provider_network_enabled(context):
             api_key = _provider_api_key("openai")
             if api_key:
                 from providers.openai_real import OpenAIProvider
 
-                if context is not None and not context.get("model"):
-                    context["model"] = str(os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
                 return OpenAIProvider(
                     enabled=True,
                     transport=_real_provider_transport(),
@@ -725,10 +848,6 @@ def _provider_for_name(
             if api_key:
                 from providers.grok_real import GrokProvider
 
-                if context is not None and not context.get("model"):
-                    context["model"] = str(
-                        os.getenv("GROK_MODEL", "grok-4-1-fast-non-reasoning")
-                    )
                 return GrokProvider(
                     enabled=True,
                     transport=_real_provider_transport(),
@@ -741,8 +860,6 @@ def _provider_for_name(
             if api_key:
                 from providers.anthropic_real import AnthropicProvider
 
-                if context is not None and not context.get("model"):
-                    context["model"] = str(os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet"))
                 return AnthropicProvider(
                     enabled=True,
                     transport=_real_provider_transport(),
@@ -844,6 +961,8 @@ def route_generate(
     override_mode = "default"
     use_provider_config = bool((context or {}).get("use_provider_config", False))
     if use_provider_config:
+        model_cfg = get_resolved_model_config()
+        context["provider_models"] = dict(model_cfg.get("provider_models", {}))
         provider_runtime_status = get_provider_runtime_status()
         routing_runtime_cfg = get_routing_runtime_status()
         approved = set(str(item).strip().lower() for item in provider_runtime_status.get("approved_providers", []))
@@ -870,6 +989,7 @@ def route_generate(
         context["routing_enabled"] = bool(routing_runtime_cfg.get("enabled", False))
         context["routing_class"] = routing_class
         context["provider_selected"] = active_provider_name
+        context["active_model"] = _resolved_model_for_provider(active_provider_name, model_cfg)
         context["moderation_provider_used"] = "openai" if active_provider_name == "grok" else None
         context["moderation_result"] = "not_applicable"
         context["override_mode"] = override_mode
@@ -895,6 +1015,7 @@ def route_generate(
     result_recorded = False
     if provider_call_tracked:
         _record_provider_request_start(provider_name)
+        _record_provider_model(provider_name, str(context.get("model", "")).strip() or None)
 
     try:
         if test_overrides and test_overrides.get("primary_behavior") == "throw":

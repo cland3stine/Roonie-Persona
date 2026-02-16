@@ -341,11 +341,45 @@ def test_dashboard_api_status_structure(tmp_path: Path, monkeypatch) -> None:
         "policy_version",
         "context_last_active",
         "context_last_turns_used",
+        "active_model",
+        "provider_models",
+        "resolved_models",
+        "routing_info",
     }
     assert expected.issubset(set(data.keys()))
     assert data["active_provider"] == "openai"
     assert data["context_last_active"] is True
     assert data["context_last_turns_used"] == 2
+    assert isinstance(data["provider_models"], dict)
+    assert isinstance(data["resolved_models"], dict)
+    assert isinstance(data["routing_info"], dict)
+
+
+def test_status_and_provider_status_expose_effective_models(tmp_path: Path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-5.2")
+    monkeypatch.setenv("ROONIE_DIRECTOR_MODEL", "gpt-5.2")
+    monkeypatch.setenv("GROK_MODEL", "grok-4-1-fast-reasoning")
+
+    server, thread = _start_server(runs_dir)
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        status = _get_json(base, "/api/status")
+        providers = _get_json(base, "/api/providers/status")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    assert status["active_provider"] == "openai"
+    assert status["active_model"] == "gpt-5.2"
+    assert status["provider_models"]["openai"] == "gpt-5.2"
+    assert status["provider_models"]["grok"] == "grok-4-1-fast-reasoning"
+    assert providers["active_model"] == "gpt-5.2"
+    assert providers["resolved_models"]["director_model"] == "gpt-5.2"
+    assert providers["resolved_models"]["grok_model"] == "grok-4-1-fast-reasoning"
 
 
 def test_dashboard_api_events_and_suppressions(tmp_path: Path, monkeypatch) -> None:

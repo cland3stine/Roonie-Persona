@@ -37,6 +37,25 @@ _TRACK_ID_RE = re.compile(
     re.IGNORECASE,
 )
 _QUESTION_RE = re.compile(r"\?")
+_FOLLOWUP_RE = re.compile(
+    r"\b(how|what|why|when|where|which|who|can|do|does|did|is|are)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_pure_greeting(text: str) -> bool:
+    m = _GREETING_RE.search(text)
+    if not m:
+        return False
+    tail = text[m.end() :].strip(" \t\r\n,!.?-")
+    if not tail:
+        return True
+    if _QUESTION_RE.search(tail):
+        return False
+    if _FOLLOWUP_RE.search(tail):
+        return False
+    # Keep one-word tails ("hey there") in greeting bucket.
+    return len(tail.split()) <= 2
 
 
 def classify_behavior_category(*, message: str, metadata: Dict[str, Any]) -> str:
@@ -49,7 +68,7 @@ def classify_behavior_category(*, message: str, metadata: Dict[str, Any]) -> str
         return CATEGORY_OTHER
     if _TRACK_ID_RE.search(text):
         return CATEGORY_TRACK_ID
-    if _GREETING_RE.search(text):
+    if _looks_like_pure_greeting(text):
         return CATEGORY_GREETING
     if _QUESTION_RE.search(text) or len(text) <= 80:
         return CATEGORY_BANTER
@@ -61,12 +80,15 @@ def behavior_guidance(
     category: str,
     approved_emotes: List[str],
     now_playing_available: bool,
+    topic_anchor: str = "",
 ) -> str:
     base = [
         "Behavior policy:",
         "- Keep reply short and warm (1-2 sentences).",
+        "- Prefer clean, clear language; keep slang occasional.",
         "- Do not repeat usernames excessively.",
         "- Do not add unsolicited commentary.",
+        "- Maintain continuity with recent chat context.",
     ]
     if approved_emotes:
         base.append(
@@ -87,6 +109,10 @@ def behavior_guidance(
         base.append("- Greeting mode: friendly, restrained, brief.")
     elif category == CATEGORY_BANTER:
         base.append("- Banter mode: answer naturally and briefly.")
+        base.append("- If the viewer references earlier chat, continue that thread.")
+        base.append("- Do not invent artist or track names; ask a short clarifying question if unsure.")
+    if topic_anchor:
+        base.append(f"- Active topic anchor: {topic_anchor}. Use this before introducing new names.")
     return "\n".join(base)
 
 
@@ -97,4 +123,3 @@ def cooldown_for_category(category: str) -> Tuple[Optional[str], float, Optional
     if cat == CATEGORY_GREETING:
         return cat, float(GREETING_COOLDOWN_SECONDS), "GREETING_COOLDOWN"
     return None, 0.0, None
-

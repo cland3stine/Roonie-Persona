@@ -1474,10 +1474,16 @@ function LogsPage({ eventsData, suppressionsData, operatorLogData }) {
 }
 function ProvidersPage({ statusData, providersStatusData, routingStatusData, systemHealthData, readinessData, setProviderActive, setProviderCaps, setRoutingEnabled, setActiveDirector, setDryRunEnabled }) {
   const providerMeta = {
-    openai: { name: "OpenAI", model: "gpt-4o" },
-    grok: { name: "Grok", model: "grok-3" },
-    anthropic: { name: "Anthropic", model: "claude-sonnet-4-5-20250929" },
+    openai: { name: "OpenAI" },
+    grok: { name: "Grok" },
+    anthropic: { name: "Anthropic" },
   };
+  const providerModels = (providersStatusData && typeof providersStatusData.provider_models === "object" && providersStatusData.provider_models)
+    || (statusData && typeof statusData.provider_models === "object" && statusData.provider_models)
+    || {};
+  const resolvedModels = (providersStatusData && typeof providersStatusData.resolved_models === "object" && providersStatusData.resolved_models)
+    || (statusData && typeof statusData.resolved_models === "object" && statusData.resolved_models)
+    || {};
   const approved = Array.isArray(providersStatusData?.approved_providers) && providersStatusData.approved_providers.length
     ? providersStatusData.approved_providers
     : [];
@@ -1492,7 +1498,7 @@ function ProvidersPage({ statusData, providersStatusData, routingStatusData, sys
     return {
       id,
       name: providerMeta[id]?.name || String(id || "").toUpperCase(),
-      model: providerMeta[id]?.model || "configured",
+      model: String(providerModels[id] || "").trim() || AWAITING,
       latency,
       requests: readNumericField(source, "requests"),
       failures: readNumericField(source, "failures"),
@@ -1501,6 +1507,27 @@ function ProvidersPage({ statusData, providersStatusData, routingStatusData, sys
   });
   const ap = String(providersStatusData?.active_provider || "");
   const a = providers.find((p) => p.id === ap) || null;
+  const activeModel = String(
+    providersStatusData?.active_model
+    || statusData?.active_model
+    || (a && a.model)
+    || ""
+  ).trim();
+  const openaiModel = String(
+    providerModels.openai
+    || resolvedModels.openai_model
+    || ""
+  ).trim() || AWAITING;
+  const directorModel = String(
+    resolvedModels.director_model
+    || providerModels.openai
+    || ""
+  ).trim() || AWAITING;
+  const grokModel = String(
+    providerModels.grok
+    || resolvedModels.grok_model
+    || ""
+  ).trim() || AWAITING;
   const usage = providersStatusData?.usage || {};
   const caps = providersStatusData?.caps || {};
   const requestsUsed = hasNumericField(usage, "requests") ? Number(usage.requests) : null;
@@ -1529,13 +1556,13 @@ function ProvidersPage({ statusData, providersStatusData, routingStatusData, sys
   const generalHits = readNumericField(healthRouting, "general_hits");
   const overrideHits = readNumericField(healthRouting, "override_hits");
   const routingClass = String(routingLast.routing_class || "").trim();
-  const routingModelLine = `${a?.model || AWAITING} | Routing ${routingEnabled ? "ON" : "OFF"} (${routingOverride}) | Last ${(routingClass ? routingClass.toUpperCase() : AWAITING)} | Lat O:${openaiLatency !== null ? `${Math.round(openaiLatency)}ms` : AWAITING} G:${grokLatency !== null ? `${Math.round(grokLatency)}ms` : AWAITING} | ModBlock O:${countText(openaiBlocks)} G:${countText(grokBlocks)} | Hits M:${countText(musicHits)} G:${countText(generalHits)} O:${countText(overrideHits)} | Memory ${memoryReachable === true ? "OK" : (memoryReachable === false ? "ERR" : AWAITING)} | ${readinessText}`;
+  const routingModelLine = `${activeModel || AWAITING} | Routing ${routingEnabled ? "ON" : "OFF"} (${routingOverride}) | Last ${(routingClass ? routingClass.toUpperCase() : AWAITING)} | Lat O:${openaiLatency !== null ? `${Math.round(openaiLatency)}ms` : AWAITING} G:${grokLatency !== null ? `${Math.round(grokLatency)}ms` : AWAITING} | ModBlock O:${countText(openaiBlocks)} G:${countText(grokBlocks)} | Hits M:${countText(musicHits)} G:${countText(generalHits)} O:${countText(overrideHits)} | Memory ${memoryReachable === true ? "OK" : (memoryReachable === false ? "ERR" : AWAITING)} | ${readinessText}`;
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
       <RackPanel><RackLabel>Active Provider</RackLabel><div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}><Led color="#2ecc40" size={10} pulse={Boolean(a)} label="ACTIVE" /><div><div style={{ fontSize: 18, fontWeight: 700, color: "#ccc", fontFamily: "'JetBrains Mono', monospace" }}>{a?.name || AWAITING}</div><div style={{ fontSize: 11, color: "#666", fontFamily: "'JetBrains Mono', monospace", lineHeight: 1.4, wordBreak: "break-word" }}>{routingModelLine}</div></div></div><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}><div><RackLabel>Latency (avg)</RackLabel><div style={{ fontSize: 20, fontWeight: 700, color: "#ccc", fontFamily: "'JetBrains Mono', monospace" }}>{a?.latency !== null && Number.isFinite(a?.latency) ? `${a.latency}ms` : AWAITING}</div></div><div><RackLabel>Failures</RackLabel><div style={{ fontSize: 20, fontWeight: 700, color: "#ccc", fontFamily: "'JetBrains Mono', monospace" }}>{a?.failures !== null && Number.isFinite(a?.failures) ? `${a.failures}` : AWAITING}</div></div></div>{a?.latency !== null && Number.isFinite(a?.latency) && <div style={{ marginTop: 16 }}><MeterBar value={a.latency} max={1000} color={a.latency < 500 ? "#2ecc40" : "#ff851b"} label="Response latency" /></div>}<div style={{ marginTop: 10, fontSize: 10, color: "#555", fontFamily: "'JetBrains Mono', monospace" }}>Requests: {a?.requests !== null && Number.isFinite(a?.requests) ? a.requests : AWAITING} | Moderation blocks: {a?.moderationBlocks !== null && Number.isFinite(a?.moderationBlocks) ? a.moderationBlocks : AWAITING}</div></RackPanel>
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         <RackPanel><RackLabel>Usage - Today</RackLabel><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}><div><div style={{ fontSize: 28, fontWeight: 800, color: "#ccc", fontFamily: "'JetBrains Mono', monospace", lineHeight: 1 }}>{dailyCostText}</div><div style={{ fontSize: 10, color: "#555", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", marginTop: 4 }}>COST TODAY</div></div><div><div style={{ fontSize: 28, fontWeight: 800, color: "#ccc", fontFamily: "'JetBrains Mono', monospace", lineHeight: 1 }}>{requestsUsed !== null && Number.isFinite(requestsUsed) ? requestsUsed : AWAITING}</div><div style={{ fontSize: 10, color: "#555", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", marginTop: 4 }}>API CALLS</div></div></div>{requestsMax > 0 && requestsUsed !== null && Number.isFinite(requestsUsed) && <MeterBar value={Math.min(requestsUsed, requestsMax)} max={requestsMax} color="#7faacc" label={`Daily request cap (${requestsMax})`} />}</RackPanel>
-        <RackPanel><RackLabel>Provider Switch - Pre-Approved Only</RackLabel>{providers.map((p) => (<button key={p.id} onClick={() => setProviderActive(p.id)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: ap === p.id ? "#2a2a2e" : "transparent", border: `1px solid ${ap === p.id ? "#7faacc44" : "#252528"}`, borderRadius: 3, padding: "10px 14px", marginBottom: 6, cursor: "pointer", boxSizing: "border-box" }}><div style={{ display: "flex", alignItems: "center", gap: 8 }}><Led color={ap === p.id ? "#2ecc40" : "#555"} size={6} /><span style={{ fontSize: 12, color: ap === p.id ? "#ccc" : "#666", fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>{p.name}</span></div><span style={{ fontSize: 9, letterSpacing: 1.5, color: ap === p.id ? "#2ecc40" : "#555", fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>{ap === p.id ? "ACTIVE" : "STANDBY"}</span></button>))}{!providers.length && <AwaitingBlock style={{ padding: "6px 0" }} />}<div style={{ marginTop: 8, display: "flex", gap: 8 }}><RackButton label={`ROUTING ${routingEnabled ? "ON" : "OFF"}`} color={routingEnabled ? "#2ecc40" : "#ff851b"} onClick={() => setRoutingEnabled(!routingEnabled)} /><RackButton label={`DIRECTOR ${activeDirector === "OfflineDirector" ? "OFFLINE" : "PROVIDER"}`} color="#7faacc" onClick={() => setActiveDirector(activeDirector === "OfflineDirector" ? "ProviderDirector" : "OfflineDirector")} /><RackButton label={`DRY_RUN ${dryRunEnabled ? "ON" : "OFF"}`} color={dryRunEnabled ? "#ff4136" : "#2ecc40"} onClick={() => setDryRunEnabled(!dryRunEnabled)} /></div></RackPanel>
+        <RackPanel><RackLabel>Provider Switch - Pre-Approved Only</RackLabel>{providers.map((p) => (<button key={p.id} onClick={() => setProviderActive(p.id)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: ap === p.id ? "#2a2a2e" : "transparent", border: `1px solid ${ap === p.id ? "#7faacc44" : "#252528"}`, borderRadius: 3, padding: "10px 14px", marginBottom: 6, cursor: "pointer", boxSizing: "border-box" }}><div style={{ display: "flex", alignItems: "center", gap: 8 }}><Led color={ap === p.id ? "#2ecc40" : "#555"} size={6} /><span style={{ fontSize: 12, color: ap === p.id ? "#ccc" : "#666", fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>{p.name}</span></div><span style={{ fontSize: 9, letterSpacing: 1.5, color: ap === p.id ? "#2ecc40" : "#555", fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>{ap === p.id ? "ACTIVE" : "STANDBY"}</span></button>))}{!providers.length && <AwaitingBlock style={{ padding: "6px 0" }} />}<div style={{ marginTop: 8, fontSize: 10, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.5 }}><div>OpenAI (model: {openaiModel})</div><div>Director model: {directorModel}</div><div>Grok (model: {grokModel}) - {routingEnabled ? "Conditional route (music/culture) when Routing is ON" : "Route disabled (Routing OFF)"}</div></div><div style={{ marginTop: 8, display: "flex", gap: 8 }}><RackButton label={`ROUTING ${routingEnabled ? "ON" : "OFF"}`} color={routingEnabled ? "#2ecc40" : "#ff851b"} onClick={() => setRoutingEnabled(!routingEnabled)} /><RackButton label={`DIRECTOR ${activeDirector === "OfflineDirector" ? "OFFLINE" : "PROVIDER"}`} color="#7faacc" onClick={() => setActiveDirector(activeDirector === "OfflineDirector" ? "ProviderDirector" : "OfflineDirector")} /><RackButton label={`DRY_RUN ${dryRunEnabled ? "ON" : "OFF"}`} color={dryRunEnabled ? "#ff4136" : "#2ecc40"} onClick={() => setDryRunEnabled(!dryRunEnabled)} /></div></RackPanel>
       </div>
     </div>
   );
