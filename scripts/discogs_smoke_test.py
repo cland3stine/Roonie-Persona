@@ -1,9 +1,9 @@
-from pathlib import Path
+﻿from pathlib import Path
 
-from src.roonie.config import load_config
-from src.roonie.network import NetworkClient
-from src.roonie.network.transports_urllib import UrllibJsonTransport
-from src.metadata.discogs_client import DiscogsClient
+from roonie.config import load_config
+from roonie.network import NetworkClient
+from roonie.network.transports_urllib import UrllibJsonTransport
+from metadata.discogs_client import DiscogsClient
 
 def main():
     base_dir = Path(".").resolve()

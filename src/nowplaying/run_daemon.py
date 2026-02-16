@@ -1,14 +1,14 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 from pathlib import Path
 from typing import Optional
 
-from src.metadata.discogs import DiscogsEnricher
-from src.nowplaying.daemon import run_nowplaying_daemon
-from src.roonie.config import load_config
-from src.roonie.network import NetworkClient
-from src.roonie.network.transports import FakeTransport, UrllibTransport
+from metadata.discogs import DiscogsEnricher
+from nowplaying.daemon import run_nowplaying_daemon
+from roonie.config import load_config
+from roonie.network import NetworkClient
+from roonie.network.transports import FakeTransport, UrllibTransport
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:

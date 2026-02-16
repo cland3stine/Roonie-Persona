@@ -12,7 +12,7 @@ def _load_fixture(name: str) -> dict:
 
 
 def test_all_providers_disabled_defaults_to_none_and_is_silent():
-    from src.providers.registry import ProviderRegistry
+    from providers.registry import ProviderRegistry
 
     cfg = _load_fixture("providers_all_disabled.json")
     reg = ProviderRegistry.from_dict(cfg)
@@ -28,7 +28,7 @@ def test_all_providers_disabled_defaults_to_none_and_is_silent():
 
 
 def test_one_provider_enabled_openai_registry_selects_it():
-    from src.providers.registry import ProviderRegistry
+    from providers.registry import ProviderRegistry
 
     cfg = _load_fixture("providers_one_enabled_openai.json")
     reg = ProviderRegistry.from_dict(cfg)
@@ -43,7 +43,7 @@ def test_one_provider_enabled_openai_registry_selects_it():
 
 
 def test_invalid_default_provider_rejected():
-    from src.providers.registry import ProviderRegistry
+    from providers.registry import ProviderRegistry
 
     cfg = _load_fixture("providers_invalid_default.json")
 
@@ -51,3 +51,22 @@ def test_invalid_default_provider_rejected():
         ProviderRegistry.from_dict(cfg)
 
     assert "default_provider" in str(e.value).lower()
+
+
+def test_live_mode_can_select_real_openai_provider_without_stub(monkeypatch):
+    from providers.router import _mk_openai_provider, _provider_for_name
+
+    monkeypatch.setenv("ROONIE_ENABLE_LIVE_PROVIDER_NETWORK", "1")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "providers.openai_real.OpenAIProvider.generate",
+        lambda self, *, prompt, context: "real-openai-output",
+    )
+
+    provider = _provider_for_name(
+        "openai",
+        _mk_openai_provider(enabled=True),
+        context={"allow_live_provider_network": True},
+    )
+    out = provider.generate(prompt="hello", context={})
+    assert out == "real-openai-output"

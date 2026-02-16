@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -12,8 +12,8 @@ def _load(name: str) -> dict:
 
 
 def test_default_none_is_silent():
-    from src.providers.registry import ProviderRegistry
-    from src.providers.router import route_generate
+    from providers.registry import ProviderRegistry
+    from providers.router import route_generate
 
     cfg = _load("case_default_none.json")
     reg = ProviderRegistry.from_dict(cfg)
@@ -28,8 +28,8 @@ def test_default_none_is_silent():
 
 
 def test_primary_only_returns_primary_output():
-    from src.providers.registry import ProviderRegistry
-    from src.providers.router import route_generate
+    from providers.registry import ProviderRegistry
+    from providers.router import route_generate
 
     cfg = _load("case_primary_only.json")
     reg = ProviderRegistry.from_dict(cfg)
@@ -44,8 +44,8 @@ def test_primary_only_returns_primary_output():
 
 
 def test_shadow_enabled_executes_shadow_but_returns_primary():
-    from src.providers.registry import ProviderRegistry
-    from src.providers.router import route_generate
+    from providers.registry import ProviderRegistry
+    from providers.router import route_generate
 
     cfg = _load("case_shadow_enabled.json")
     reg = ProviderRegistry.from_dict(cfg)
@@ -61,8 +61,8 @@ def test_shadow_enabled_executes_shadow_but_returns_primary():
 
 
 def test_shadow_disabled_provider_is_contained():
-    from src.providers.registry import ProviderRegistry
-    from src.providers.router import route_generate
+    from providers.registry import ProviderRegistry
+    from providers.router import route_generate
 
     cfg = _load("case_shadow_disabled_provider.json")
     reg = ProviderRegistry.from_dict(cfg)
@@ -78,8 +78,8 @@ def test_shadow_disabled_provider_is_contained():
 
 
 def test_primary_throw_is_contained_and_returns_none():
-    from src.providers.registry import ProviderRegistry
-    from src.providers.router import route_generate
+    from providers.registry import ProviderRegistry
+    from providers.router import route_generate
 
     cfg = _load("case_primary_throws.json")
     reg = ProviderRegistry.from_dict(cfg)

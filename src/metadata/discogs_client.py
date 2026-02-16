@@ -1,10 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 from urllib.parse import urlencode, quote
 
-from src.roonie.network import NetworkClient
+from roonie.network import NetworkClient
 
 
 def build_search_url(*, query: str, token: Optional[str], per_page: int = 5, page: int = 1) -> str:

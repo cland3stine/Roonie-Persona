@@ -1,4 +1,4 @@
-﻿import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 
 // NAV
 const PAGES_TOP = [
@@ -58,7 +58,9 @@ const EMPTY_STATUS = {
   context_last_turns_used: 0,
   silenced: false,
   silence_until: null,
-  read_only_mode: true,
+  read_only_mode: false,
+  active_director: "ProviderDirector",
+  routing_enabled: true,
 };
 
 const AWAITING = "Awaiting data...";
@@ -341,12 +343,29 @@ function useDashboardData() {
   const [sensesStatusData, setSensesStatusData] = useState(null);
   const [culturalNotesData, setCulturalNotesData] = useState([]);
   const [viewerNotesData, setViewerNotesData] = useState([]);
+  const [memoryPendingData, setMemoryPendingData] = useState([]);
   const [twitchStatusData, setTwitchStatusData] = useState(null);
   const [twitchNotice, setTwitchNotice] = useState("");
+  const refreshDataInFlightRef = useRef(false);
+
+  const refreshTwitchStatus = async () => {
+    try {
+      const twitchStatusRes = await apiFetch(`${API_BASE}/api/twitch/status`);
+      if (twitchStatusRes.ok) {
+        setTwitchStatusData(await twitchStatusRes.json());
+      }
+    } catch (_err) {
+      // Keep prior Twitch status on failure.
+    }
+  };
 
   const refreshData = async () => {
+    if (refreshDataInFlightRef.current) {
+      return;
+    }
+    refreshDataInFlightRef.current = true;
     try {
-      const [authRes, statusRes, eventsRes, suppressionsRes, operatorRes, queueRes, studioProfileRes, libraryStatusRes, logsEventsRes, logsSuppressionsRes, logsOperatorRes, providersStatusRes, routingStatusRes, sensesStatusRes, memoryCulturalRes, memoryViewersRes, twitchStatusRes] = await Promise.all([
+      const [authRes, statusRes, eventsRes, suppressionsRes, operatorRes, queueRes, studioProfileRes, libraryStatusRes, logsEventsRes, logsSuppressionsRes, logsOperatorRes, providersStatusRes, routingStatusRes, sensesStatusRes, memoryCulturalRes, memoryViewersRes, memoryPendingRes, twitchStatusRes] = await Promise.all([
         apiFetch(`${API_BASE}/api/auth/me`),
         apiFetch(`${API_BASE}/api/status`),
         apiFetch(`${API_BASE}/api/events?limit=5`),
@@ -363,6 +382,7 @@ function useDashboardData() {
         apiFetch(`${API_BASE}/api/senses/status`),
         apiFetch(`${API_BASE}/api/memory/cultural?limit=100&offset=0&active_only=0`),
         apiFetch(`${API_BASE}/api/memory/viewers?limit=100&offset=0&active_only=0`),
+        apiFetch(`${API_BASE}/api/memory/pending?limit=100&offset=0`),
         apiFetch(`${API_BASE}/api/twitch/status`),
       ]);
       if (authRes.ok) {
@@ -401,11 +421,39 @@ function useDashboardData() {
         const body = await memoryViewersRes.json();
         setViewerNotesData(Array.isArray(body?.items) ? body.items : []);
       }
+      if (memoryPendingRes.ok) {
+        const body = await memoryPendingRes.json();
+        setMemoryPendingData(Array.isArray(body?.items) ? body.items : []);
+      }
       if (twitchStatusRes.ok) {
         setTwitchStatusData(await twitchStatusRes.json());
       }
     } catch (_err) {
       // Polling errors keep prior data.
+      setAuthChecked(true);
+    } finally {
+      refreshDataInFlightRef.current = false;
+    }
+  };
+
+  const refreshCoreData = async () => {
+    try {
+      const [authRes, statusRes, providersStatusRes, twitchStatusRes] = await Promise.all([
+        apiFetch(`${API_BASE}/api/auth/me`),
+        apiFetch(`${API_BASE}/api/status`),
+        apiFetch(`${API_BASE}/api/providers/status`),
+        apiFetch(`${API_BASE}/api/twitch/status`),
+      ]);
+      if (authRes.ok) {
+        setAuthData(await authRes.json());
+      } else {
+        setAuthData({ authenticated: false, username: null, role: null });
+      }
+      setAuthChecked(true);
+      if (statusRes.ok) setStatusData(await statusRes.json());
+      if (providersStatusRes.ok) setProvidersStatusData(await providersStatusRes.json());
+      if (twitchStatusRes.ok) setTwitchStatusData(await twitchStatusRes.json());
+    } catch (_err) {
       setAuthChecked(true);
     }
   };
@@ -620,6 +668,82 @@ function useDashboardData() {
     }
   };
 
+  const setRoutingEnabled = async (enabled) => {
+    const headers = buildOperatorHeaders({ json: true });
+    try {
+      const response = await apiFetch(`${API_BASE}/control/routing`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ enabled: Boolean(enabled) }),
+      });
+      if (!response.ok) {
+        let detail = response.statusText;
+        try {
+          const body = await response.json();
+          detail = body.detail || body.error || detail;
+        } catch (_err) {
+          // Keep status text fallback.
+        }
+        console.error(`[Dashboard P16] routing toggle failed (${response.status}) ${detail}`);
+      }
+    } catch (err) {
+      console.error("[Dashboard P16] routing toggle error", err);
+    } finally {
+      await refreshData();
+      await refreshSystemHealth();
+    }
+  };
+
+  const setActiveDirector = async (active) => {
+    const headers = buildOperatorHeaders({ json: true });
+    try {
+      const response = await apiFetch(`${API_BASE}/control/director`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ active }),
+      });
+      if (!response.ok) {
+        let detail = response.statusText;
+        try {
+          const body = await response.json();
+          detail = body.detail || body.error || detail;
+        } catch (_err) {
+          // Keep status text fallback.
+        }
+        console.error(`[Dashboard P16] director set failed (${response.status}) ${detail}`);
+      }
+    } catch (err) {
+      console.error("[Dashboard P16] director set error", err);
+    } finally {
+      await refreshData();
+    }
+  };
+
+  const setDryRunEnabled = async (enabled) => {
+    const headers = buildOperatorHeaders({ json: true });
+    try {
+      const response = await apiFetch(`${API_BASE}/control/dry_run`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ enabled: Boolean(enabled) }),
+      });
+      if (!response.ok) {
+        let detail = response.statusText;
+        try {
+          const body = await response.json();
+          detail = body.detail || body.error || detail;
+        } catch (_err) {
+          // Keep status text fallback.
+        }
+        console.error(`[Dashboard P21] dry_run toggle failed (${response.status}) ${detail}`);
+      }
+    } catch (err) {
+      console.error("[Dashboard P21] dry_run toggle error", err);
+    } finally {
+      await refreshData();
+    }
+  };
+
   const saveCulturalNote = async (note, opts = {}) => {
     const method = (opts.method || "POST").toUpperCase();
     const noteId = opts.id || "";
@@ -749,6 +873,36 @@ function useDashboardData() {
     }
   };
 
+  const reviewMemoryPending = async (id, decision, reason = "") => {
+    const candidateId = String(id || "").trim();
+    const action = String(decision || "").trim().toLowerCase();
+    if (!candidateId || !["approve", "deny"].includes(action)) return;
+    const headers = buildOperatorHeaders({ json: true });
+    const endpoint = `${API_BASE}/api/memory/pending/${encodeURIComponent(candidateId)}/${action}`;
+    const payload = action === "deny" ? { reason: String(reason || "").trim() } : {};
+    try {
+      const response = await apiFetch(endpoint, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        let detail = response.statusText;
+        try {
+          const body = await response.json();
+          detail = body.detail || body.error || detail;
+        } catch (_err) {
+          // keep status fallback
+        }
+        console.error(`[Dashboard D7] memory pending ${action} failed (${response.status}) ${detail}`);
+      }
+    } catch (err) {
+      console.error(`[Dashboard D7] memory pending ${action} error`, err);
+    } finally {
+      await refreshData();
+    }
+  };
+
   const loginDashboard = async (username, password, rememberLogin = false) => {
     try {
       const response = await apiFetch(`${API_BASE}/api/auth/login`, {
@@ -816,11 +970,11 @@ function useDashboardData() {
       if (!success) {
         setTwitchNotice(String(body?.detail || body?.error || "Unable to start Twitch auth."));
       }
-      await refreshData();
+      await refreshTwitchStatus();
       return { ok: success, body };
     } catch (err) {
       setTwitchNotice(String(err || "Unable to start Twitch auth."));
-      await refreshData();
+      await refreshTwitchStatus();
       return { ok: false, body: { detail: String(err || "connect error") } };
     }
   };
@@ -846,11 +1000,11 @@ function useDashboardData() {
       } else {
         setTwitchNotice("Account disconnected.");
       }
-      await refreshData();
+      await refreshTwitchStatus();
       return { ok: success, body };
     } catch (err) {
       setTwitchNotice(String(err || "Unable to disconnect account."));
-      await refreshData();
+      await refreshTwitchStatus();
       return { ok: false, body: { detail: String(err || "disconnect error") } };
     }
   };
@@ -858,10 +1012,12 @@ function useDashboardData() {
   useEffect(() => {
     refreshData();
     refreshSystemHealth();
-    const interval = setInterval(refreshData, 2000);
-    const healthInterval = setInterval(refreshSystemHealth, 5000);
+    const coreInterval = setInterval(refreshCoreData, 2500);
+    const fullInterval = setInterval(refreshData, 15000);
+    const healthInterval = setInterval(refreshSystemHealth, 8000);
     return () => {
-      clearInterval(interval);
+      clearInterval(coreInterval);
+      clearInterval(fullInterval);
       clearInterval(healthInterval);
     };
   }, []);
@@ -870,7 +1026,7 @@ function useDashboardData() {
     const onMessage = async (event) => {
       const data = event?.data || {};
       if (data?.type !== "ROONIE_TWITCH_AUTH_COMPLETE") return;
-      await refreshData();
+      await refreshTwitchStatus();
       const ok = Boolean(data?.ok);
       const account = String(data?.account || "account");
       setTwitchNotice(ok ? `${account} connected.` : `${account} connection failed.`);
@@ -900,6 +1056,7 @@ function useDashboardData() {
     sensesStatusData,
     culturalNotesData,
     viewerNotesData,
+    memoryPendingData,
     twitchStatusData,
     twitchNotice,
     setTwitchNotice,
@@ -910,10 +1067,14 @@ function useDashboardData() {
     rebuildLibraryIndex,
     setProviderActive,
     setProviderCaps,
+    setRoutingEnabled,
+    setActiveDirector,
+    setDryRunEnabled,
     saveCulturalNote,
     deleteCulturalNote,
     saveViewerNote,
     deleteViewerNote,
+    reviewMemoryPending,
     loginDashboard,
     logoutDashboard,
     twitchConnectStart,
@@ -924,7 +1085,7 @@ function useDashboardData() {
 // --- PAGE: LIVE ---
 
 function LivePage({ statusData, eventsData, suppressionsData, performAction }) {
-  const status = statusData.silenced ? "SILENCED" : ((statusData.armed && statusData.can_post) ? "ACTIVE" : "INACTIVE");
+  const status = statusData.silenced ? "SILENCED" : (statusData.armed ? "ACTIVE" : "INACTIVE");
   const autoNext = eventsData.length ? buildMessageLine(eventsData[0]) : AWAITING;
   const suppression = suppressionsData.length ? suppressionsData[0] : null;
   const silenceUntilMs = statusData.silence_until ? Date.parse(statusData.silence_until) : NaN;
@@ -1311,7 +1472,7 @@ function LogsPage({ eventsData, suppressionsData, operatorLogData }) {
     </div>
   );
 }
-function ProvidersPage({ providersStatusData, routingStatusData, systemHealthData, readinessData, setProviderActive, setProviderCaps }) {
+function ProvidersPage({ statusData, providersStatusData, routingStatusData, systemHealthData, readinessData, setProviderActive, setProviderCaps, setRoutingEnabled, setActiveDirector, setDryRunEnabled }) {
   const providerMeta = {
     openai: { name: "OpenAI", model: "gpt-4o" },
     grok: { name: "Grok", model: "grok-3" },
@@ -1347,9 +1508,11 @@ function ProvidersPage({ providersStatusData, routingStatusData, systemHealthDat
   const tokensUsed = hasNumericField(usage, "tokens") ? Number(usage.tokens) : null;
   const dailyCostText = tokensUsed !== null && tokensUsed > 0 ? `${tokensUsed}` : AWAITING;
   const routing = routingStatusData || {};
-  const routingEnabled = Boolean(routing.enabled);
+  const routingEnabled = typeof routing.enabled === "boolean" ? routing.enabled : Boolean(statusData?.routing_enabled);
   const routingOverride = String(routing.manual_override || "default");
   const routingLast = routing.last_decision || {};
+  const activeDirector = String(statusData?.active_director || providersStatusData?.active_director || "ProviderDirector");
+  const dryRunEnabled = Boolean(statusData?.read_only_mode);
   const openaiHealth = healthMetrics.openai || {};
   const grokHealth = healthMetrics.grok || {};
   const healthRouting = systemHealthData?.routing || {};
@@ -1372,7 +1535,7 @@ function ProvidersPage({ providersStatusData, routingStatusData, systemHealthDat
       <RackPanel><RackLabel>Active Provider</RackLabel><div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}><Led color="#2ecc40" size={10} pulse={Boolean(a)} label="ACTIVE" /><div><div style={{ fontSize: 18, fontWeight: 700, color: "#ccc", fontFamily: "'JetBrains Mono', monospace" }}>{a?.name || AWAITING}</div><div style={{ fontSize: 11, color: "#666", fontFamily: "'JetBrains Mono', monospace", lineHeight: 1.4, wordBreak: "break-word" }}>{routingModelLine}</div></div></div><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}><div><RackLabel>Latency (avg)</RackLabel><div style={{ fontSize: 20, fontWeight: 700, color: "#ccc", fontFamily: "'JetBrains Mono', monospace" }}>{a?.latency !== null && Number.isFinite(a?.latency) ? `${a.latency}ms` : AWAITING}</div></div><div><RackLabel>Failures</RackLabel><div style={{ fontSize: 20, fontWeight: 700, color: "#ccc", fontFamily: "'JetBrains Mono', monospace" }}>{a?.failures !== null && Number.isFinite(a?.failures) ? `${a.failures}` : AWAITING}</div></div></div>{a?.latency !== null && Number.isFinite(a?.latency) && <div style={{ marginTop: 16 }}><MeterBar value={a.latency} max={1000} color={a.latency < 500 ? "#2ecc40" : "#ff851b"} label="Response latency" /></div>}<div style={{ marginTop: 10, fontSize: 10, color: "#555", fontFamily: "'JetBrains Mono', monospace" }}>Requests: {a?.requests !== null && Number.isFinite(a?.requests) ? a.requests : AWAITING} | Moderation blocks: {a?.moderationBlocks !== null && Number.isFinite(a?.moderationBlocks) ? a.moderationBlocks : AWAITING}</div></RackPanel>
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         <RackPanel><RackLabel>Usage - Today</RackLabel><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}><div><div style={{ fontSize: 28, fontWeight: 800, color: "#ccc", fontFamily: "'JetBrains Mono', monospace", lineHeight: 1 }}>{dailyCostText}</div><div style={{ fontSize: 10, color: "#555", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", marginTop: 4 }}>COST TODAY</div></div><div><div style={{ fontSize: 28, fontWeight: 800, color: "#ccc", fontFamily: "'JetBrains Mono', monospace", lineHeight: 1 }}>{requestsUsed !== null && Number.isFinite(requestsUsed) ? requestsUsed : AWAITING}</div><div style={{ fontSize: 10, color: "#555", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", marginTop: 4 }}>API CALLS</div></div></div>{requestsMax > 0 && requestsUsed !== null && Number.isFinite(requestsUsed) && <MeterBar value={Math.min(requestsUsed, requestsMax)} max={requestsMax} color="#7faacc" label={`Daily request cap (${requestsMax})`} />}</RackPanel>
-        <RackPanel><RackLabel>Provider Switch - Pre-Approved Only</RackLabel>{providers.map((p) => (<button key={p.id} onClick={() => setProviderActive(p.id)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: ap === p.id ? "#2a2a2e" : "transparent", border: `1px solid ${ap === p.id ? "#7faacc44" : "#252528"}`, borderRadius: 3, padding: "10px 14px", marginBottom: 6, cursor: "pointer", boxSizing: "border-box" }}><div style={{ display: "flex", alignItems: "center", gap: 8 }}><Led color={ap === p.id ? "#2ecc40" : "#555"} size={6} /><span style={{ fontSize: 12, color: ap === p.id ? "#ccc" : "#666", fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>{p.name}</span></div><span style={{ fontSize: 9, letterSpacing: 1.5, color: ap === p.id ? "#2ecc40" : "#555", fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>{ap === p.id ? "ACTIVE" : "STANDBY"}</span></button>))}{!providers.length && <AwaitingBlock style={{ padding: "6px 0" }} />}<div style={{ marginTop: 8 }}><RackButton label="NOT AVAILABLE" color="#7faacc" disabled /></div></RackPanel>
+        <RackPanel><RackLabel>Provider Switch - Pre-Approved Only</RackLabel>{providers.map((p) => (<button key={p.id} onClick={() => setProviderActive(p.id)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: ap === p.id ? "#2a2a2e" : "transparent", border: `1px solid ${ap === p.id ? "#7faacc44" : "#252528"}`, borderRadius: 3, padding: "10px 14px", marginBottom: 6, cursor: "pointer", boxSizing: "border-box" }}><div style={{ display: "flex", alignItems: "center", gap: 8 }}><Led color={ap === p.id ? "#2ecc40" : "#555"} size={6} /><span style={{ fontSize: 12, color: ap === p.id ? "#ccc" : "#666", fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>{p.name}</span></div><span style={{ fontSize: 9, letterSpacing: 1.5, color: ap === p.id ? "#2ecc40" : "#555", fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>{ap === p.id ? "ACTIVE" : "STANDBY"}</span></button>))}{!providers.length && <AwaitingBlock style={{ padding: "6px 0" }} />}<div style={{ marginTop: 8, display: "flex", gap: 8 }}><RackButton label={`ROUTING ${routingEnabled ? "ON" : "OFF"}`} color={routingEnabled ? "#2ecc40" : "#ff851b"} onClick={() => setRoutingEnabled(!routingEnabled)} /><RackButton label={`DIRECTOR ${activeDirector === "OfflineDirector" ? "OFFLINE" : "PROVIDER"}`} color="#7faacc" onClick={() => setActiveDirector(activeDirector === "OfflineDirector" ? "ProviderDirector" : "OfflineDirector")} /><RackButton label={`DRY_RUN ${dryRunEnabled ? "ON" : "OFF"}`} color={dryRunEnabled ? "#ff4136" : "#2ecc40"} onClick={() => setDryRunEnabled(!dryRunEnabled)} /></div></RackPanel>
       </div>
     </div>
   );
@@ -1501,9 +1664,19 @@ function AuthPage({ twitchStatusData, twitchConnectStart, twitchDisconnect, twit
 
 // --- PAGE: CULTURAL NOTES ---
 
-function CulturePage({ culturalNotesData = [], viewerNotesData = [], saveCulturalNote, deleteCulturalNote, saveViewerNote, deleteViewerNote }) {
+function CulturePage({
+  culturalNotesData = [],
+  viewerNotesData = [],
+  memoryPendingData = [],
+  saveCulturalNote,
+  deleteCulturalNote,
+  saveViewerNote,
+  deleteViewerNote,
+  reviewMemoryPending,
+}) {
   const culturalNotes = Array.isArray(culturalNotesData) ? culturalNotesData : [];
   const viewerNotes = Array.isArray(viewerNotesData) ? viewerNotesData : [];
+  const pendingNotes = Array.isArray(memoryPendingData) ? memoryPendingData : [];
 
   const addCulturalNote = async () => {
     const note = window.prompt("Add cultural note");
@@ -1556,9 +1729,52 @@ function CulturePage({ culturalNotesData = [], viewerNotesData = [], saveCultura
     );
   };
 
+  const approvePending = async (item) => {
+    if (!item?.id) return;
+    await reviewMemoryPending(item.id, "approve");
+  };
+
+  const denyPending = async (item) => {
+    if (!item?.id) return;
+    const reasonRaw = window.prompt("Optional deny reason");
+    if (reasonRaw == null) return;
+    await reviewMemoryPending(item.id, "deny", String(reasonRaw || "").trim());
+  };
+
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-      <RackPanel><RackLabel>Cultural Notes - Room Level</RackLabel><div style={{ fontSize: 10, color: "#555", fontFamily: "'IBM Plex Sans', sans-serif", marginBottom: 12 }}>These shape how Roonie reads the room and responds. Apply to all interactions.</div>{culturalNotes.map((item) => (<div key={item.id} onClick={() => editCulturalNote(item)} style={{ padding: "10px 12px", borderLeft: "2px solid #7faacc44", marginBottom: 6, background: "#15151a", borderRadius: "0 2px 2px 0", cursor: "pointer" }}><div style={{ fontSize: 12, color: "#aaa", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.5 }}>{item.note}</div></div>))}{!culturalNotes.length ? <div style={{ padding: "6px 0", fontSize: 11, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif" }}>{AWAITING}</div> : null}<button onClick={addCulturalNote} style={{ marginTop: 8, background: "transparent", border: "1px dashed #333", color: "#555", padding: "8px 16px", fontSize: 10, letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", cursor: "pointer", borderRadius: 2, width: "100%" }}>+ ADD CULTURAL NOTE</button></RackPanel>
+      <RackPanel>
+        <RackLabel>Roonie Proposed Notes - Review</RackLabel>
+        <div style={{ fontSize: 10, color: "#555", fontFamily: "'IBM Plex Sans', sans-serif", marginBottom: 10 }}>
+          Review each candidate and approve or deny before it becomes memory.
+        </div>
+        {pendingNotes.map((item) => (
+          <div key={item.id} style={{ padding: "10px 12px", marginBottom: 6, background: "#15151a", border: "1px solid #222", borderRadius: 2 }}>
+            <div style={{ fontSize: 11, color: "#7faacc", fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, marginBottom: 4 }}>
+              @{item.viewer_handle || AWAITING}
+            </div>
+            <div style={{ fontSize: 12, color: "#999", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.4, marginBottom: 8 }}>
+              {item.proposed_note || AWAITING}
+            </div>
+            <div style={{ display: "flex", gap: 6 }}>
+              <button onClick={() => approvePending(item)} style={{ background: "none", border: "1px solid #2ecc4044", borderRadius: 2, color: "#2ecc40", padding: "2px 8px", fontSize: 10, cursor: "pointer", fontFamily: "'JetBrains Mono', monospace" }}>APPROVE</button>
+              <button onClick={() => denyPending(item)} style={{ background: "none", border: "1px solid #ff851b44", borderRadius: 2, color: "#ff851b", padding: "2px 8px", fontSize: 10, cursor: "pointer", fontFamily: "'JetBrains Mono', monospace" }}>DENY</button>
+            </div>
+          </div>
+        ))}
+        {!pendingNotes.length ? <div style={{ padding: "6px 0", fontSize: 11, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif" }}>{AWAITING}</div> : null}
+
+        <div style={{ borderTop: "1px solid #1f1f22", margin: "10px 0" }} />
+        <RackLabel>Cultural Notes - Room Level</RackLabel>
+        <div style={{ fontSize: 10, color: "#555", fontFamily: "'IBM Plex Sans', sans-serif", marginBottom: 12 }}>These shape how Roonie reads the room and responds. Apply to all interactions.</div>
+        {culturalNotes.map((item) => (
+          <div key={item.id} onClick={() => editCulturalNote(item)} style={{ padding: "10px 12px", borderLeft: "2px solid #7faacc44", marginBottom: 6, background: "#15151a", borderRadius: "0 2px 2px 0", cursor: "pointer" }}>
+            <div style={{ fontSize: 12, color: "#aaa", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.5 }}>{item.note}</div>
+          </div>
+        ))}
+        {!culturalNotes.length ? <div style={{ padding: "6px 0", fontSize: 11, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif" }}>{AWAITING}</div> : null}
+        <button onClick={addCulturalNote} style={{ marginTop: 8, background: "transparent", border: "1px dashed #333", color: "#555", padding: "8px 16px", fontSize: 10, letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", cursor: "pointer", borderRadius: 2, width: "100%" }}>+ ADD CULTURAL NOTE</button>
+      </RackPanel>
       <RackPanel><RackLabel>Viewer Notes - Individual</RackLabel><div style={{ fontSize: 10, color: "#555", fontFamily: "'IBM Plex Sans', sans-serif", marginBottom: 12 }}>Observable behavior only. No subjective labels or inferred traits.</div>{viewerNotes.map((v) => (<div key={v.id} style={{ padding: "10px 12px", marginBottom: 6, background: "#15151a", border: "1px solid #222", borderRadius: 2, display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}><div style={{ flex: 1 }}><div style={{ fontSize: 11, color: "#7faacc", fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, marginBottom: 4 }}>@{v.viewer_handle}</div><div style={{ fontSize: 12, color: "#999", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.4 }}>{v.note}</div></div><div style={{ display: "flex", gap: 4, flexShrink: 0 }}><button onClick={() => editViewerNote(v)} style={{ background: "none", border: "1px solid #333", borderRadius: 2, color: "#666", padding: "2px 6px", fontSize: 10, cursor: "pointer", fontFamily: "'JetBrains Mono', monospace" }}>EDIT</button><button onClick={() => deleteViewerNote(v.id)} style={{ background: "none", border: "1px solid #ff413633", borderRadius: 2, color: "#ff4136", padding: "2px 6px", fontSize: 10, cursor: "pointer", fontFamily: "'JetBrains Mono', monospace" }}>X</button></div></div>))}{!viewerNotes.length ? <div style={{ padding: "6px 0", fontSize: 11, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif" }}>{AWAITING}</div> : null}<button onClick={addViewerNote} style={{ marginTop: 8, background: "transparent", border: "1px dashed #333", color: "#555", padding: "8px 16px", fontSize: 10, letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", cursor: "pointer", borderRadius: 2, width: "100%" }}>+ ADD VIEWER NOTE</button></RackPanel>
     </div>
   );
@@ -1729,6 +1945,7 @@ export default function RoonieControlRoom() {
     sensesStatusData,
     culturalNotesData,
     viewerNotesData,
+    memoryPendingData,
     twitchStatusData,
     twitchNotice,
     setTwitchNotice,
@@ -1738,10 +1955,14 @@ export default function RoonieControlRoom() {
     uploadLibraryXml,
     setProviderActive,
     setProviderCaps,
+    setRoutingEnabled,
+    setActiveDirector,
+    setDryRunEnabled,
     saveCulturalNote,
     deleteCulturalNote,
     saveViewerNote,
     deleteViewerNote,
+    reviewMemoryPending,
     loginDashboard,
     logoutDashboard,
     twitchConnectStart,
@@ -1781,9 +2002,9 @@ export default function RoonieControlRoom() {
       case "announcements": return <AnnouncementsPage queueData={queueData} performAction={performAction} />;
       case "nowplaying": return <NowPlayingPage />;
       case "logs": return <LogsPage eventsData={logsEventsData} suppressionsData={logsSuppressionsData} operatorLogData={logsOperatorData} />;
-      case "providers": return <ProvidersPage providersStatusData={providersStatusData} routingStatusData={routingStatusData} systemHealthData={systemHealthData} readinessData={readinessData} setProviderActive={setProviderActive} setProviderCaps={setProviderCaps} />;
+      case "providers": return <ProvidersPage statusData={statusData} providersStatusData={providersStatusData} routingStatusData={routingStatusData} systemHealthData={systemHealthData} readinessData={readinessData} setProviderActive={setProviderActive} setProviderCaps={setProviderCaps} setRoutingEnabled={setRoutingEnabled} setActiveDirector={setActiveDirector} setDryRunEnabled={setDryRunEnabled} />;
       case "auth": return <AuthPage twitchStatusData={twitchStatusData} twitchConnectStart={twitchConnectStart} twitchDisconnect={twitchDisconnect} twitchNotice={twitchNotice} setTwitchNotice={setTwitchNotice} />;
-      case "culture": return <CulturePage culturalNotesData={culturalNotesData} viewerNotesData={viewerNotesData} saveCulturalNote={saveCulturalNote} deleteCulturalNote={deleteCulturalNote} saveViewerNote={saveViewerNote} deleteViewerNote={deleteViewerNote} />;
+      case "culture": return <CulturePage culturalNotesData={culturalNotesData} viewerNotesData={viewerNotesData} memoryPendingData={memoryPendingData} saveCulturalNote={saveCulturalNote} deleteCulturalNote={deleteCulturalNote} saveViewerNote={saveViewerNote} deleteViewerNote={deleteViewerNote} reviewMemoryPending={reviewMemoryPending} />;
       case "snapshot": return <CulturalSnapshotPage logsEventsData={logsEventsData} logsSuppressionsData={logsSuppressionsData} statusData={statusData} />;
       case "senses": return <SensesPage sensesStatusData={sensesStatusData} />;
       case "governance": return <GovernancePage />;
@@ -1877,6 +2098,8 @@ export default function RoonieControlRoom() {
               <div>STREAM: {String(statusData.mode || "offline").toUpperCase()}</div>
               <div>TWITCH: {statusData.twitch_connected ? "CONNECTED" : "DISCONNECTED"}</div>
               <div>PROVIDER: {(statusData.active_provider ? String(statusData.active_provider).toUpperCase() : AWAITING.toUpperCase())}</div>
+              <div>DIRECTOR: {String(statusData.active_director || "ProviderDirector").toUpperCase()}</div>
+              <div>ROUTING: {statusData.routing_enabled ? "ON" : "OFF"}</div>
               <div
                 style={{
                   maxWidth: "100%",

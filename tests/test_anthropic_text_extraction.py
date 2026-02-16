@@ -1,8 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 
 def test_extract_messages_api_single_text_block() -> None:
-    from src.providers.anthropic_real import _extract_anthropic_text
+    from providers.anthropic_real import _extract_anthropic_text
 
     resp = {
         "id": "msg_123",
@@ -17,7 +17,7 @@ def test_extract_messages_api_single_text_block() -> None:
 
 
 def test_extract_messages_api_multiple_blocks_text_only() -> None:
-    from src.providers.anthropic_real import _extract_anthropic_text
+    from providers.anthropic_real import _extract_anthropic_text
 
     resp = {
         "content": [
@@ -31,7 +31,7 @@ def test_extract_messages_api_multiple_blocks_text_only() -> None:
 
 
 def test_extract_legacy_completion_fallback() -> None:
-    from src.providers.anthropic_real import _extract_anthropic_text
+    from providers.anthropic_real import _extract_anthropic_text
 
     resp = {"completion": "Legacy completion text"}
 

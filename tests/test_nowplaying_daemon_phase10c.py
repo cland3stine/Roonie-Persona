@@ -1,17 +1,17 @@
-from pathlib import Path
+﻿from pathlib import Path
 
 def _cfg_network_enabled(tmp_path):
-    from src.roonie.config import load_config
+    from roonie.config import load_config
     cfg_dir = tmp_path / "config"
     cfg_dir.mkdir(parents=True, exist_ok=True)
     (cfg_dir / "roonie.toml").write_text("[network]\nenabled=true\n", encoding="utf-8")
     return load_config(base_dir=tmp_path)
 
 def test_nowplaying_daemon_processes_change_once_and_writes_chat_files(tmp_path):
-    from src.roonie.network import NetworkClient
-    from src.roonie.network.transports import FakeTransport
-    from src.metadata.discogs import DiscogsEnricher
-    from src.nowplaying.daemon import run_nowplaying_daemon
+    from roonie.network import NetworkClient
+    from roonie.network.transports import FakeTransport
+    from metadata.discogs import DiscogsEnricher
+    from nowplaying.daemon import run_nowplaying_daemon
 
     overlay_dir = tmp_path / "overlay"
     overlay_dir.mkdir(parents=True, exist_ok=True)

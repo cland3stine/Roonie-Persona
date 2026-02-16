@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import io
@@ -11,6 +11,7 @@ import secrets
 import base64
 import unicodedata
 import zipfile
+import time
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -22,7 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, urlencode, quote_plus
 from uuid import uuid4
 
-from src.providers.router import (
+from providers.router import (
     get_provider_runtime_metrics,
     get_runtime_config_paths,
     get_provider_runtime_status,
@@ -179,6 +180,7 @@ def _default_studio_profile(*, updated_by: str) -> Dict[str, Any]:
 
 class DashboardStorage:
     _KILL_SWITCH_ENV_NAMES = ("ROONIE_KILL_SWITCH", "KILL_SWITCH", "ROONIE_KILL_SWITCH_ON")
+    _DRY_RUN_ENV_NAMES = ("ROONIE_DRY_RUN", "ROONIE_READ_ONLY_MODE")
 
     def __init__(self, runs_dir: Optional[Path] = None, readiness_state: Optional[Dict[str, Any]] = None) -> None:
         root = _repo_root()
@@ -199,17 +201,37 @@ class DashboardStorage:
         self._library_meta_path = self._library_dir / "library_meta.json"
         self._legacy_control_state_path = self.logs_dir / "dashboard_control_state.json"
         self._audit_log_path = self.logs_dir / "operator_audit.jsonl"
+        self._eventsub_events_log_path = self.logs_dir / "eventsub_events.jsonl"
         self.auth_users_path = Path(os.path.join(str(self.data_dir), "auth_users.json")).resolve()
         self._twitch_auth_state_path = self.data_dir / "twitch_auth_state.json"
         self._memory_db_path = self.data_dir / "memory.sqlite"
         self._sessions: Dict[str, Dict[str, Any]] = {}
         self._session_ttl_seconds = self._session_ttl_seconds_from_env()
         self._kill_switch_env_pinned = any(name in os.environ for name in self._KILL_SWITCH_ENV_NAMES)
+        self._dry_run_env_pinned = any(name in os.environ for name in self._DRY_RUN_ENV_NAMES)
         self._readiness_state: Dict[str, Any] = {
             "ready": False,
             "checked_at": datetime.now(timezone.utc).isoformat(),
             "items": [],
             "blocking_reasons": ["preflight_not_run"],
+        }
+        self._eventsub_runtime_state: Dict[str, Any] = {
+            "eventsub_connected": False,
+            "eventsub_session_id": None,
+            "last_eventsub_message_ts": None,
+            "reconnect_count": 0,
+            "eventsub_last_error": None,
+        }
+        self._twitch_status_cache: Optional[Dict[str, Any]] = None
+        self._twitch_status_cache_expiry_ts: float = 0.0
+        self._status_runtime: Dict[str, Any] = {
+            "last_heartbeat_at": None,
+            "active_provider": "none",
+            "version": os.getenv("ROONIE_VERSION", "unknown"),
+            "mode": os.getenv("ROONIE_MODE", "offline"),
+            "context_last_active": False,
+            "context_last_turns_used": 0,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         self._control_state = self._load_control_state()
         self._init_memory_db()
@@ -229,13 +251,36 @@ class DashboardStorage:
             f"auth_users_path={self.auth_users_path} "
             f"usernames={auth_users}"
         )
+        self._prime_status_runtime_from_runs()
         self._sync_env_from_state()
         if isinstance(readiness_state, dict):
             self.set_readiness_state(readiness_state)
 
-    @staticmethod
-    def is_read_only_mode() -> bool:
-        return not bool((os.getenv("ROONIE_OPERATOR_KEY") or "").strip())
+    def is_read_only_mode(self) -> bool:
+        """DRY_RUN flag (suppresses outbound posting attempts).
+
+        This is intentionally NOT tied to dashboard auth. Session-auth can be enabled
+        without ROONIE_OPERATOR_KEY, so we treat read_only_mode as an explicit runtime
+        control instead.
+        """
+        return bool(self._dry_run_from_env_or_state())
+
+    def _dry_run_from_env_or_state(self) -> bool:
+        # Explicit env override, if provided.
+        for name in self._DRY_RUN_ENV_NAMES:
+            if name in os.environ:
+                return _to_bool(os.getenv(name), False)
+        with self._lock:
+            return bool(self._control_state.get("dry_run", False))
+
+    def set_dry_run(self, enabled: bool) -> Dict[str, Any]:
+        enabled_bool = bool(enabled)
+        with self._lock:
+            prev = bool(self._control_state.get("dry_run", False))
+            self._control_state["dry_run"] = enabled_bool
+            self._save_control_state_locked()
+            self._sync_env_from_state_locked()
+        return {"old": prev, "new": enabled_bool}
 
     @staticmethod
     def validate_operator_key(header_value: Optional[str]) -> Tuple[bool, str]:
@@ -259,6 +304,15 @@ class DashboardStorage:
         if value in {"operator", "director"}:
             return value
         return "operator"
+
+    @staticmethod
+    def normalize_active_director(value: Optional[str]) -> str:
+        raw = str(value or "").strip().lower()
+        if raw in {"providerdirector", "provider", "live"}:
+            return "ProviderDirector"
+        if raw in {"offlinedirector", "offline"}:
+            return "OfflineDirector"
+        return "ProviderDirector"
 
     @staticmethod
     def _session_ttl_seconds_from_env() -> int:
@@ -471,17 +525,16 @@ class DashboardStorage:
         kill_switch_on: bool,
         armed: bool,
         silenced: bool,
+        dry_run: bool = False,
         cost_cap_on: bool = False,
     ) -> List[str]:
         blocks: List[str] = []
-        if bool(kill_switch_on):
-            blocks.append("KILL_SWITCH")
         if not bool(armed):
             blocks.append("DISARMED")
+        if bool(dry_run):
+            blocks.append("DRY_RUN")
         if bool(silenced):
             blocks.append("SILENCE_TTL")
-        if bool(cost_cap_on):
-            blocks.append("COST_CAP")
         return blocks
 
     @staticmethod
@@ -498,22 +551,28 @@ class DashboardStorage:
 
     def _load_control_state(self) -> Dict[str, Any]:
         state: Dict[str, Any] = {
-            "armed": _env_bool(["ROONIE_ARMED", "ROONIE_ARM", "ARMED"], False),
-            "output_disabled": _env_bool(["ROONIE_OUTPUT_DISABLED"], True),
+            # Canon invariant: process starts disarmed every launch.
+            "armed": False,
+            "output_disabled": True,
+            # DRY_RUN/read-only suppresses outbound posting attempts even if armed.
+            # Defaults OFF unless explicitly enabled.
+            "dry_run": False,
             "silence_until": None,
+            "session_id": None,
+            "active_director": "ProviderDirector",
         }
         loaded = _safe_read_json(self._control_state_path)
         if not isinstance(loaded, dict):
             loaded = _safe_read_json(self._legacy_control_state_path)
         if isinstance(loaded, dict):
-            state["armed"] = bool(loaded.get("armed", state["armed"]))
-            state["output_disabled"] = _to_bool(
-                loaded.get("output_disabled"),
-                bool(state.get("output_disabled", True)),
+            state["active_director"] = self.normalize_active_director(
+                loaded.get("active_director", state.get("active_director"))
             )
-            silence_until = loaded.get("silence_until")
-            if isinstance(silence_until, str) and _parse_iso(silence_until):
-                state["silence_until"] = _format_iso(_parse_iso(silence_until))
+            # dry_run is safe to rehydrate from disk.
+            if "dry_run" in loaded:
+                state["dry_run"] = bool(loaded.get("dry_run", False))
+            elif "read_only_mode" in loaded:
+                state["dry_run"] = bool(loaded.get("read_only_mode", False))
         return state
 
     def _reload_control_state_from_file_locked(self) -> None:
@@ -522,24 +581,23 @@ class DashboardStorage:
             loaded = _safe_read_json(self._legacy_control_state_path)
         if not isinstance(loaded, dict):
             return
-        self._control_state["armed"] = bool(loaded.get("armed", self._control_state.get("armed", False)))
-        self._control_state["output_disabled"] = _to_bool(
-            loaded.get("output_disabled"),
-            bool(self._control_state.get("output_disabled", True)),
+        # Arm/disarm state is runtime-owned and intentionally not rehydrated from disk.
+        self._control_state["active_director"] = self.normalize_active_director(
+            loaded.get("active_director", self._control_state.get("active_director"))
         )
-        silence_until = loaded.get("silence_until")
-        if isinstance(silence_until, str):
-            parsed = _parse_iso(silence_until)
-            self._control_state["silence_until"] = (_format_iso(parsed) if parsed is not None else None)
-        elif silence_until is None:
-            self._control_state["silence_until"] = None
+        if "dry_run" in loaded:
+            self._control_state["dry_run"] = bool(loaded.get("dry_run", False))
+        elif "read_only_mode" in loaded:
+            self._control_state["dry_run"] = bool(loaded.get("read_only_mode", False))
 
     def _save_control_state_locked(self) -> None:
         self._control_state_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "armed": bool(self._control_state.get("armed", False)),
             "output_disabled": bool(self._control_state.get("output_disabled", True)),
+            "dry_run": bool(self._control_state.get("dry_run", False)),
             "silence_until": self._control_state.get("silence_until"),
+            "active_director": self.normalize_active_director(self._control_state.get("active_director")),
         }
         tmp_path = self._control_state_path.with_suffix(".tmp")
         try:
@@ -569,27 +627,42 @@ class DashboardStorage:
     def _control_snapshot_locked(self) -> Dict[str, Any]:
         self._refresh_silence_locked()
         silenced = self._is_silenced_locked()
+        session_raw = self._control_state.get("session_id")
+        session_id = session_raw.strip() if isinstance(session_raw, str) else ""
         return {
             "armed": bool(self._control_state.get("armed", False)),
             "output_disabled": bool(self._control_state.get("output_disabled", True)),
+            "dry_run": bool(self._control_state.get("dry_run", False)),
             "silenced": silenced,
             "silence_until": self._control_state.get("silence_until") if silenced else None,
+            "session_id": (session_id or None),
+            "active_director": self.normalize_active_director(self._control_state.get("active_director")),
         }
 
     def _sync_env_from_state_locked(self) -> None:
         snap = self._control_snapshot_locked()
-        kill_switch_on = _env_bool(list(self._KILL_SWITCH_ENV_NAMES), True)
+        kill_switch_on = _env_bool(list(self._KILL_SWITCH_ENV_NAMES), False)
         cost_cap_on = bool(get_provider_runtime_status().get("cost_cap_blocked", False))
+        dry_run = bool(snap.get("dry_run", False))
         blocked_by = self.effective_blocks(
             kill_switch_on=kill_switch_on,
             armed=bool(snap["armed"]),
             silenced=bool(snap["silenced"]),
             cost_cap_on=cost_cap_on,
+            dry_run=dry_run,
         )
-        output_disabled = bool(snap.get("output_disabled", True)) or not self.effective_can_post(blocked_by)
+        # Posting disabled state is controlled by active switch (armed) and silence latch.
+        # DRY_RUN is intentionally enforced at OutputGate to keep test visibility.
+        output_disabled = (not bool(snap["armed"])) or bool(snap["silenced"])
+        self._control_state["output_disabled"] = bool(output_disabled)
         os.environ["ROONIE_ARMED"] = "1" if snap["armed"] else "0"
         os.environ["ROONIE_ARM"] = os.environ["ROONIE_ARMED"]
         os.environ["ROONIE_OUTPUT_DISABLED"] = "1" if output_disabled else "0"
+        os.environ["ROONIE_ACTIVE_DIRECTOR"] = self.normalize_active_director(snap.get("active_director"))
+        if not self._kill_switch_env_pinned:
+            os.environ["ROONIE_KILL_SWITCH"] = "0"
+        if not self._dry_run_env_pinned:
+            os.environ["ROONIE_DRY_RUN"] = "1" if dry_run else "0"
 
     def _sync_env_from_state(self) -> None:
         with self._lock:
@@ -597,27 +670,46 @@ class DashboardStorage:
 
     def set_armed(self, armed: bool) -> Dict[str, Any]:
         with self._lock:
+            previous_armed = bool(self._control_state.get("armed", False))
             self._control_state["armed"] = bool(armed)
             self._control_state["output_disabled"] = not bool(armed)
-            if not self._kill_switch_env_pinned:
-                os.environ["ROONIE_KILL_SWITCH"] = "0" if bool(armed) else "1"
+            if bool(armed):
+                # Every ARM transition creates a new active session id.
+                self._control_state["session_id"] = str(uuid4())
             if not armed:
                 # Disarm implies immediate non-speaking state.
                 self._control_state["silence_until"] = None
             self._save_control_state_locked()
             self._sync_env_from_state_locked()
-            return self._control_snapshot_locked()
+            snap = self._control_snapshot_locked()
+            snap["previous_armed"] = previous_armed
+            return snap
 
     def force_safe_start_defaults(self) -> Dict[str, Any]:
         with self._lock:
             self._control_state["armed"] = False
             self._control_state["output_disabled"] = True
+            if not self._dry_run_env_pinned:
+                self._control_state["dry_run"] = False
             if not self._kill_switch_env_pinned:
-                os.environ["ROONIE_KILL_SWITCH"] = "1"
+                os.environ["ROONIE_KILL_SWITCH"] = "0"
             self._control_state["silence_until"] = None
+            self._control_state["session_id"] = None
+            self._control_state["active_director"] = self.normalize_active_director(
+                self._control_state.get("active_director")
+            )
             self._save_control_state_locked()
             self._sync_env_from_state_locked()
             return self._control_snapshot_locked()
+
+    def set_active_director(self, active: str) -> Dict[str, str]:
+        selected = self.normalize_active_director(active)
+        with self._lock:
+            previous = self.normalize_active_director(self._control_state.get("active_director"))
+            self._control_state["active_director"] = selected
+            self._save_control_state_locked()
+            self._sync_env_from_state_locked()
+        return {"old": previous, "new": selected}
 
     def silence_now(self, ttl_seconds: Optional[int] = None) -> Dict[str, Any]:
         ttl = ttl_seconds if ttl_seconds is not None else self._default_silence_ttl_seconds()
@@ -844,6 +936,28 @@ class DashboardStorage:
                 """
             )
             conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_pending (
+                    id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    source_event_id TEXT,
+                    session_id TEXT,
+                    viewer_handle TEXT NOT NULL,
+                    memory_key TEXT NOT NULL,
+                    preference TEXT NOT NULL,
+                    proposed_note TEXT NOT NULL,
+                    proposed_tags TEXT NOT NULL,
+                    intent_hash TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    reviewed_by TEXT,
+                    reviewed_at TEXT,
+                    review_reason TEXT,
+                    source TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_cultural_notes_updated ON cultural_notes(updated_at DESC)"
             )
             conn.execute(
@@ -851,6 +965,12 @@ class DashboardStorage:
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_memory_audit_ts ON memory_audit(ts DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memory_pending_status_updated ON memory_pending(status, updated_at DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memory_pending_intent_hash ON memory_pending(intent_hash)"
             )
             conn.commit()
 
@@ -1507,6 +1627,416 @@ class DashboardStorage:
         )
         return [str(item.get("note", "")).strip() for item in rows if str(item.get("note", "")).strip()]
 
+    def _memory_pending_row_public(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": str(row.get("id", "")).strip(),
+            "created_at": str(row.get("created_at", "")).strip(),
+            "updated_at": str(row.get("updated_at", "")).strip(),
+            "source_event_id": str(row.get("source_event_id", "")).strip() or None,
+            "session_id": str(row.get("session_id", "")).strip() or None,
+            "viewer_handle": self.normalize_viewer_handle(row.get("viewer_handle"), required=False),
+            "memory_key": str(row.get("memory_key", "")).strip(),
+            "preference": str(row.get("preference", "")).strip().lower(),
+            "proposed_note": str(row.get("proposed_note", "")).strip(),
+            "proposed_tags": self._decode_tags(row.get("proposed_tags")),
+            "status": str(row.get("status", "pending")).strip().lower() or "pending",
+            "reviewed_by": str(row.get("reviewed_by", "")).strip() or None,
+            "reviewed_at": str(row.get("reviewed_at", "")).strip() or None,
+            "review_reason": str(row.get("review_reason", "")).strip() or None,
+            "source": str(row.get("source", "roonie_candidate")).strip() or "roonie_candidate",
+        }
+
+    @staticmethod
+    def _memory_preference_label(value: str) -> str:
+        pref = str(value or "").strip().lower()
+        if pref == "dislike":
+            return "dislike"
+        return "like"
+
+    def _build_memory_candidate_note(self, *, preference: str, memory_object: str) -> str:
+        pref = self._memory_preference_label(preference)
+        object_text = self._bounded_text(
+            memory_object,
+            field_name="memory_object",
+            max_len=180,
+            required=True,
+        )
+        return self._validate_memory_note(f"Viewer said they {pref} {object_text}.")
+
+    def _memory_intent_hash(
+        self,
+        *,
+        viewer_handle: str,
+        preference: str,
+        memory_key: str,
+    ) -> str:
+        return _json_sha256(
+            {
+                "viewer_handle": self.normalize_viewer_handle(viewer_handle, required=True),
+                "preference": self._memory_preference_label(preference),
+                "memory_key": _normalize_text(memory_key),
+            }
+        )
+
+    def ingest_memory_candidates_from_run(self, run_data: Dict[str, Any]) -> Dict[str, int]:
+        if not isinstance(run_data, dict):
+            return {"seen": 0, "inserted": 0, "skipped_invalid": 0, "skipped_duplicate": 0, "skipped_learned": 0}
+
+        decisions = run_data.get("decisions", [])
+        if not isinstance(decisions, list):
+            decisions = []
+
+        session_id = str(run_data.get("session_id", "")).strip()
+        seen = 0
+        inserted = 0
+        skipped_invalid = 0
+        skipped_duplicate = 0
+        skipped_learned = 0
+
+        with self._lock:
+            with sqlite3.connect(str(self._memory_db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                for decision in decisions:
+                    if not isinstance(decision, dict):
+                        continue
+                    if str(decision.get("action", "")).strip().upper() != "MEMORY_WRITE_INTENT":
+                        continue
+                    seen += 1
+                    trace = decision.get("trace", {})
+                    if not isinstance(trace, dict):
+                        trace = {}
+                    mi = trace.get("memory_intent", {})
+                    if not isinstance(mi, dict):
+                        mi = {}
+                    try:
+                        viewer_handle = self.normalize_viewer_handle(mi.get("user"), required=True)
+                        preference = self._memory_preference_label(str(mi.get("preference", "")).strip())
+                        memory_object = self._bounded_text(
+                            mi.get("object"),
+                            field_name="memory_intent.object",
+                            max_len=180,
+                            required=True,
+                        )
+                        memory_key = _normalize_text(memory_object)
+                        if not memory_key:
+                            raise ValueError("empty memory key")
+                        proposed_note = self._build_memory_candidate_note(
+                            preference=preference,
+                            memory_object=memory_object,
+                        )
+                        proposed_tags = ["candidate", "preference", preference]
+                        intent_hash = self._memory_intent_hash(
+                            viewer_handle=viewer_handle,
+                            preference=preference,
+                            memory_key=memory_key,
+                        )
+                    except Exception:
+                        skipped_invalid += 1
+                        continue
+
+                    existing_row = conn.execute(
+                        """
+                        SELECT id, status
+                        FROM memory_pending
+                        WHERE intent_hash = ?
+                        ORDER BY updated_at DESC
+                        LIMIT 1
+                        """,
+                        (intent_hash,),
+                    ).fetchone()
+                    if existing_row is not None:
+                        status = str(existing_row["status"] or "").strip().lower()
+                        if status in {"approved", "denied"}:
+                            skipped_learned += 1
+                            continue
+                        if status == "pending":
+                            skipped_duplicate += 1
+                            continue
+
+                    now = datetime.now(timezone.utc).isoformat()
+                    row_id = str(uuid4())
+                    event_id = str(decision.get("event_id", "")).strip() or None
+                    row_public = {
+                        "id": row_id,
+                        "created_at": now,
+                        "updated_at": now,
+                        "source_event_id": event_id,
+                        "session_id": session_id or None,
+                        "viewer_handle": viewer_handle,
+                        "memory_key": memory_key,
+                        "preference": preference,
+                        "proposed_note": proposed_note,
+                        "proposed_tags": proposed_tags,
+                        "status": "pending",
+                        "reviewed_by": None,
+                        "reviewed_at": None,
+                        "review_reason": None,
+                        "source": "roonie_candidate",
+                    }
+                    conn.execute(
+                        """
+                        INSERT INTO memory_pending (
+                            id, created_at, updated_at, source_event_id, session_id, viewer_handle,
+                            memory_key, preference, proposed_note, proposed_tags, intent_hash,
+                            status, reviewed_by, reviewed_at, review_reason, source
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            row_id,
+                            now,
+                            now,
+                            event_id,
+                            session_id or None,
+                            viewer_handle,
+                            memory_key,
+                            preference,
+                            proposed_note,
+                            self._encode_tags(proposed_tags),
+                            intent_hash,
+                            "pending",
+                            None,
+                            None,
+                            None,
+                            "roonie_candidate",
+                        ),
+                    )
+                    self._record_memory_audit_locked(
+                        conn,
+                        username="system",
+                        role="operator",
+                        auth_mode="legacy_key",
+                        action="CREATE",
+                        table_name="memory_pending",
+                        row_id=row_id,
+                        before_snapshot=None,
+                        after_snapshot=row_public,
+                        diff_summary="candidate created from MEMORY_WRITE_INTENT",
+                    )
+                    inserted += 1
+                conn.commit()
+
+        return {
+            "seen": seen,
+            "inserted": inserted,
+            "skipped_invalid": skipped_invalid,
+            "skipped_duplicate": skipped_duplicate,
+            "skipped_learned": skipped_learned,
+        }
+
+    def query_memory_pending(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        q: Optional[str] = None,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        lim = max(1, min(int(limit), 500))
+        off = max(0, int(offset))
+        q_text = str(q or "").strip().lower()
+        params: List[Any] = ["pending"]
+        where = ["status = ?"]
+        if q_text:
+            where.append("(LOWER(viewer_handle) LIKE ? OR LOWER(proposed_note) LIKE ?)")
+            like = f"%{q_text}%"
+            params.extend([like, like])
+        where_sql = f"WHERE {' AND '.join(where)}"
+        with self._lock:
+            with sqlite3.connect(str(self._memory_db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                total = int(
+                    conn.execute(
+                        f"SELECT COUNT(*) AS c FROM memory_pending {where_sql}",
+                        params,
+                    ).fetchone()["c"]
+                )
+                rows = conn.execute(
+                    f"""
+                    SELECT id, created_at, updated_at, source_event_id, session_id, viewer_handle, memory_key, preference,
+                           proposed_note, proposed_tags, status, reviewed_by, reviewed_at, review_reason, source
+                    FROM memory_pending
+                    {where_sql}
+                    ORDER BY updated_at DESC, created_at DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    [*params, lim, off],
+                ).fetchall()
+        return [self._memory_pending_row_public(self._row_from_sql(row)) for row in rows], total
+
+    def approve_memory_pending(
+        self,
+        candidate_id: str,
+        *,
+        username: Optional[str],
+        role: Optional[str],
+        auth_mode: Optional[str],
+    ) -> Dict[str, Any]:
+        row_id = str(candidate_id or "").strip()
+        if not row_id:
+            raise ValueError("Missing pending memory id.")
+        actor = str(username or "unknown").strip().lower() or "unknown"
+        with self._lock:
+            with sqlite3.connect(str(self._memory_db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    """
+                    SELECT id, created_at, updated_at, source_event_id, session_id, viewer_handle, memory_key, preference,
+                           proposed_note, proposed_tags, intent_hash, status, reviewed_by, reviewed_at, review_reason, source
+                    FROM memory_pending
+                    WHERE id = ?
+                    """,
+                    (row_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError("pending memory candidate not found")
+
+                before = self._memory_pending_row_public(self._row_from_sql(row))
+                status = str(before.get("status", "")).strip().lower()
+                if status != "pending":
+                    raise ValueError("Memory candidate is already reviewed.")
+
+                now = datetime.now(timezone.utc).isoformat()
+                viewer_note = {
+                    "id": str(uuid4()),
+                    "viewer_handle": before["viewer_handle"],
+                    "created_at": now,
+                    "updated_at": now,
+                    "created_by": actor,
+                    "updated_by": actor,
+                    "note": self._validate_memory_note(before["proposed_note"]),
+                    "tags": self._normalize_tags(before["proposed_tags"]),
+                    "source": "operator_manual",
+                    "is_active": True,
+                }
+                conn.execute(
+                    """
+                    INSERT INTO viewer_notes (
+                        id, viewer_handle, created_at, updated_at, created_by, updated_by, note, tags, source, is_active
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        viewer_note["id"],
+                        viewer_note["viewer_handle"],
+                        viewer_note["created_at"],
+                        viewer_note["updated_at"],
+                        viewer_note["created_by"],
+                        viewer_note["updated_by"],
+                        viewer_note["note"],
+                        self._encode_tags(viewer_note["tags"]),
+                        viewer_note["source"],
+                        1,
+                    ),
+                )
+                self._record_memory_audit_locked(
+                    conn,
+                    username=actor,
+                    role=self.normalize_role(role),
+                    auth_mode=self._memory_auth_mode(auth_mode),
+                    action="CREATE",
+                    table_name="viewer_notes",
+                    row_id=viewer_note["id"],
+                    before_snapshot=None,
+                    after_snapshot=viewer_note,
+                    diff_summary=f"approved candidate {row_id}",
+                )
+
+                conn.execute(
+                    """
+                    UPDATE memory_pending
+                    SET status = ?, reviewed_by = ?, reviewed_at = ?, review_reason = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    ("approved", actor, now, "approved", now, row_id),
+                )
+                reviewed = dict(before)
+                reviewed["status"] = "approved"
+                reviewed["reviewed_by"] = actor
+                reviewed["reviewed_at"] = now
+                reviewed["review_reason"] = "approved"
+                reviewed["updated_at"] = now
+                self._record_memory_audit_locked(
+                    conn,
+                    username=actor,
+                    role=self.normalize_role(role),
+                    auth_mode=self._memory_auth_mode(auth_mode),
+                    action="UPDATE",
+                    table_name="memory_pending",
+                    row_id=row_id,
+                    before_snapshot=before,
+                    after_snapshot=reviewed,
+                    diff_summary=f"approved -> viewer_note:{viewer_note['id']}",
+                )
+                conn.commit()
+
+        return {"candidate": reviewed, "created_note": viewer_note}
+
+    def deny_memory_pending(
+        self,
+        candidate_id: str,
+        *,
+        username: Optional[str],
+        role: Optional[str],
+        auth_mode: Optional[str],
+        reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        row_id = str(candidate_id or "").strip()
+        if not row_id:
+            raise ValueError("Missing pending memory id.")
+        actor = str(username or "unknown").strip().lower() or "unknown"
+        review_reason = self._bounded_text(
+            reason,
+            field_name="reason",
+            max_len=200,
+            required=False,
+        ) or "denied"
+        with self._lock:
+            with sqlite3.connect(str(self._memory_db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    """
+                    SELECT id, created_at, updated_at, source_event_id, session_id, viewer_handle, memory_key, preference,
+                           proposed_note, proposed_tags, status, reviewed_by, reviewed_at, review_reason, source
+                    FROM memory_pending
+                    WHERE id = ?
+                    """,
+                    (row_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError("pending memory candidate not found")
+                before = self._memory_pending_row_public(self._row_from_sql(row))
+                status = str(before.get("status", "")).strip().lower()
+                if status != "pending":
+                    raise ValueError("Memory candidate is already reviewed.")
+
+                now = datetime.now(timezone.utc).isoformat()
+                conn.execute(
+                    """
+                    UPDATE memory_pending
+                    SET status = ?, reviewed_by = ?, reviewed_at = ?, review_reason = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    ("denied", actor, now, review_reason, now, row_id),
+                )
+                reviewed = dict(before)
+                reviewed["status"] = "denied"
+                reviewed["reviewed_by"] = actor
+                reviewed["reviewed_at"] = now
+                reviewed["review_reason"] = review_reason
+                reviewed["updated_at"] = now
+                self._record_memory_audit_locked(
+                    conn,
+                    username=actor,
+                    role=self.normalize_role(role),
+                    auth_mode=self._memory_auth_mode(auth_mode),
+                    action="UPDATE",
+                    table_name="memory_pending",
+                    row_id=row_id,
+                    before_snapshot=before,
+                    after_snapshot=reviewed,
+                    diff_summary="candidate denied",
+                )
+                conn.commit()
+        return reviewed
+
     def _coerce_studio_profile_fields(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(payload, dict):
             raise ValueError("studio profile payload must be an object.")
@@ -2036,15 +2566,23 @@ class DashboardStorage:
                 continue
             parsed = _safe_read_json(run_path)
             if parsed is not None:
+                self._update_status_runtime_from_run_data(run_path, parsed)
                 return run_path, parsed
 
         # Fall back: if everything was skipped (e.g., only very-recent files), try parse in order anyway.
         for run_path in candidates:
             parsed = _safe_read_json(run_path)
             if parsed is not None:
+                self._update_status_runtime_from_run_data(run_path, parsed)
                 return run_path, parsed
 
         return newest_seen, None
+
+    def _prime_status_runtime_from_runs(self) -> None:
+        try:
+            self._load_latest_run()
+        except Exception:
+            return
 
     @staticmethod
     def _max_log_run_files() -> int:
@@ -2113,6 +2651,7 @@ class DashboardStorage:
         inputs = run_data.get("inputs", [])
         decisions = run_data.get("decisions", [])
         outputs = run_data.get("outputs", [])
+        run_session_id = str(run_data.get("session_id", "")).strip() or None
 
         inputs_by_id: Dict[str, Dict[str, Any]] = {}
         for item in inputs if isinstance(inputs, list) else []:
@@ -2148,6 +2687,9 @@ class DashboardStorage:
             trace = decision.get("trace", {})
             if not isinstance(trace, dict):
                 trace = {}
+            proposal = trace.get("proposal", {})
+            if not isinstance(proposal, dict):
+                proposal = {}
             gates = trace.get("gates", {})
             if not isinstance(gates, dict):
                 gates = {}
@@ -2196,6 +2738,11 @@ class DashboardStorage:
             out.append(
                 EventResponse(
                     ts=derived_ts,
+                    session_id=(
+                        str(output.get("session_id", "")).strip()
+                        or str(proposal.get("session_id", "")).strip()
+                        or run_session_id
+                    ),
                     user_handle=str(metadata.get("user", source.get("actor", "viewer"))),
                     message_text=str(source.get("message", "")),
                     direct_address=bool(
@@ -2214,83 +2761,212 @@ class DashboardStorage:
         out.reverse()
         return out
 
-    def _current_blocks_and_provider(self) -> Tuple[bool, Dict[str, Any], Dict[str, Any], List[str], bool]:
-        kill_switch_on = _env_bool(list(self._KILL_SWITCH_ENV_NAMES), True)
+    def _current_blocks_and_provider(
+        self,
+        *,
+        reload_control_from_disk: bool = False,
+    ) -> Tuple[bool, Dict[str, Any], Dict[str, Any], List[str], bool]:
+        kill_switch_on = _env_bool(list(self._KILL_SWITCH_ENV_NAMES), False)
         provider_status = get_provider_runtime_status()
         with self._lock:
-            self._reload_control_state_from_file_locked()
+            if reload_control_from_disk:
+                self._reload_control_state_from_file_locked()
             control = self._control_snapshot_locked()
             blocked_by = self.effective_blocks(
                 kill_switch_on=kill_switch_on,
                 armed=bool(control["armed"]),
                 silenced=bool(control["silenced"]),
                 cost_cap_on=bool(provider_status.get("cost_cap_blocked", False)),
+                dry_run=bool(control.get("dry_run", False)),
             )
             can_post = self.effective_can_post(blocked_by) and not bool(control.get("output_disabled", True))
             self._sync_env_from_state_locked()
         return kill_switch_on, provider_status, control, blocked_by, can_post
 
-    def get_status(self) -> StatusResponse:
-        run_path, run_data = self._load_latest_run()
-        events = self._events_from_run(run_data) if run_data else []
-        latest_event = events[0] if events else None
-        kill_switch_on, provider_status, control, blocked_by, can_post = self._current_blocks_and_provider()
+    @staticmethod
+    def _status_slow_log_threshold_ms() -> float:
+        raw = os.getenv("ROONIE_STATUS_SLOW_LOG_MS", "250")
+        try:
+            return max(0.0, float(raw))
+        except (TypeError, ValueError):
+            return 250.0
 
-        active_provider = str(provider_status.get("active_provider", "none") or "none")
-        version = os.getenv("ROONIE_VERSION", "unknown")
-        mode = os.getenv("ROONIE_MODE", "offline")
-        last_heartbeat_at: Optional[str] = None
+    def _update_status_runtime_from_run_data(self, run_path: Optional[Path], run_data: Optional[Dict[str, Any]]) -> None:
+        if not isinstance(run_data, dict):
+            return
+        mode = str(os.getenv("ROONIE_MODE", "offline") or "offline")
+        version = str(run_data.get("director_commit") or os.getenv("ROONIE_VERSION", "unknown"))
+        active_provider = "none"
+        context_active = False
+        context_turns_used = 0
+        last_heartbeat_at = str(run_data.get("started_at") or "").strip() or None
 
-        if run_data:
-            decisions = run_data.get("decisions", [])
-            if active_provider == "none" and isinstance(decisions, list) and decisions:
-                last_decision = decisions[-1] if isinstance(decisions[-1], dict) else {}
-                active_provider = self._active_provider_from_route(last_decision.get("route", ""))
-            if active_provider == "none":
-                active_provider = os.getenv("ROONIE_ACTIVE_PROVIDER", "none")
-            version = str(run_data.get("director_commit", version) or version)
-            inputs = run_data.get("inputs", [])
-            if isinstance(inputs, list) and inputs:
-                first = inputs[0] if isinstance(inputs[0], dict) else {}
-                md = first.get("metadata", {}) if isinstance(first, dict) else {}
-                if isinstance(md, dict):
-                    mode = str(md.get("mode", mode) or mode)
-            last_heartbeat_at = str(run_data.get("started_at") or "") or None
+        inputs = run_data.get("inputs", [])
+        if isinstance(inputs, list) and inputs:
+            first = inputs[0] if isinstance(inputs[0], dict) else {}
+            md = first.get("metadata", {}) if isinstance(first, dict) else {}
+            if isinstance(md, dict):
+                mode = str(md.get("mode", mode) or mode)
 
-        if last_heartbeat_at is None and run_path is not None:
+        decisions = run_data.get("decisions", [])
+        if isinstance(decisions, list):
+            for candidate in reversed(decisions):
+                if not isinstance(candidate, dict):
+                    continue
+                trace = candidate.get("trace", {})
+                if not isinstance(trace, dict):
+                    trace = {}
+                proposal = trace.get("proposal", {})
+                if not isinstance(proposal, dict):
+                    proposal = {}
+                provider_from_proposal = str(proposal.get("provider_used", "")).strip().lower()
+                provider_from_route = self._active_provider_from_route(str(candidate.get("route", ""))).strip().lower()
+                if provider_from_proposal and provider_from_proposal != "none":
+                    active_provider = provider_from_proposal
+                elif provider_from_route and provider_from_route != "none":
+                    active_provider = provider_from_route
+                context_active = bool(candidate.get("context_active", trace.get("context_active", False)))
+                turns_raw = candidate.get("context_turns_used", trace.get("context_turns_used", 0))
+                try:
+                    context_turns_used = int(turns_raw or 0)
+                except (TypeError, ValueError):
+                    context_turns_used = 0
+                break
+
+        if not last_heartbeat_at and run_path is not None:
             try:
                 last_heartbeat_at = _format_iso(datetime.fromtimestamp(run_path.stat().st_mtime, timezone.utc))
             except OSError:
                 last_heartbeat_at = None
-        if last_heartbeat_at is None and latest_event is not None:
-            last_heartbeat_at = latest_event.ts
+
+        with self._lock:
+            self._status_runtime.update(
+                {
+                    "last_heartbeat_at": last_heartbeat_at,
+                    "active_provider": active_provider or "none",
+                    "version": version,
+                    "mode": mode,
+                    "context_last_active": context_active,
+                    "context_last_turns_used": context_turns_used,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+
+    def _status_runtime_snapshot(self) -> Dict[str, Any]:
+        with self._lock:
+            return dict(self._status_runtime)
+
+    def _twitch_connected_cached_fast(self) -> bool:
+        with self._lock:
+            cache = self._twitch_status_cache
+            if isinstance(cache, dict):
+                return bool(cache.get("connected", False))
+        # Cheap env fallback only; avoids disk/network in /api/status path.
+        for name in ("TWITCH_OAUTH_TOKEN", "TWITCH_OAUTH", "TWITCH_BROADCASTER_OAUTH_TOKEN", "TWITCH_BROADCASTER_TOKEN"):
+            token = str(os.getenv(name, "")).strip()
+            if self._token_looks_valid(token):
+                return True
+        return False
+
+    def get_status(self) -> StatusResponse:
+        total_start = time.perf_counter()
+        step_ms: Dict[str, float] = {}
+
+        t0 = time.perf_counter()
+        kill_switch_on, provider_status, control, blocked_by, can_post = self._current_blocks_and_provider(
+            reload_control_from_disk=False
+        )
+        step_ms["blocks_provider"] = (time.perf_counter() - t0) * 1000.0
+
+        t1 = time.perf_counter()
+        routing_status = get_routing_runtime_status()
+        step_ms["routing"] = (time.perf_counter() - t1) * 1000.0
+
+        t2 = time.perf_counter()
+        runtime_snapshot = self._status_runtime_snapshot()
+        step_ms["runtime_snapshot"] = (time.perf_counter() - t2) * 1000.0
+
+        t3 = time.perf_counter()
+        twitch_connected = self._twitch_connected_cached_fast()
+        step_ms["twitch_cached"] = (time.perf_counter() - t3) * 1000.0
+
+        t4 = time.perf_counter()
+        eventsub_state = self.get_eventsub_runtime_state()
+        step_ms["eventsub"] = (time.perf_counter() - t4) * 1000.0
+
+        active_provider = str(provider_status.get("active_provider", "none") or "none")
+        if active_provider == "none":
+            active_provider = str(runtime_snapshot.get("active_provider", "none") or "none")
+        if active_provider == "none":
+            active_provider = str(os.getenv("ROONIE_ACTIVE_PROVIDER", "none") or "none")
+        version = str(runtime_snapshot.get("version") or os.getenv("ROONIE_VERSION", "unknown"))
+        mode = str(runtime_snapshot.get("mode") or os.getenv("ROONIE_MODE", "offline"))
+        last_heartbeat_at = runtime_snapshot.get("last_heartbeat_at")
 
         shadow_enabled = _env_bool(["ROONIE_SHADOW_ENABLED", "SHADOW_ENABLED"], False)
-        if shadow_enabled and "shadow" not in mode.lower():
+        if shadow_enabled and "shadow" not in str(mode).lower():
             mode = f"{mode}/shadow"
 
-        twitch_status = self.get_twitch_status()
-        return StatusResponse(
+        control_session_raw = control.get("session_id")
+        control_session_id = control_session_raw.strip() if isinstance(control_session_raw, str) else ""
+        eventsub_session_raw = eventsub_state.get("eventsub_session_id")
+        eventsub_session_id = eventsub_session_raw.strip() if isinstance(eventsub_session_raw, str) else ""
+        eventsub_last_ts_raw = eventsub_state.get("last_eventsub_message_ts")
+        eventsub_last_ts = eventsub_last_ts_raw.strip() if isinstance(eventsub_last_ts_raw, str) else ""
+        eventsub_last_error_raw = eventsub_state.get("eventsub_last_error")
+        eventsub_last_error = eventsub_last_error_raw.strip() if isinstance(eventsub_last_error_raw, str) else ""
+
+        t5 = time.perf_counter()
+        response = StatusResponse(
             kill_switch_on=kill_switch_on,
             armed=bool(control["armed"]),
+            session_id=(control_session_id or None),
             mode=mode,
-            twitch_connected=bool(twitch_status.get("connected", False)),
+            twitch_connected=twitch_connected,
             last_heartbeat_at=last_heartbeat_at,
             active_provider=active_provider,
             version=version,
             policy_loaded_at=os.getenv("ROONIE_POLICY_LOADED_AT"),
             policy_version=os.getenv("ROONIE_POLICY_VERSION"),
-            context_last_active=(latest_event.context_active if latest_event else False),
-            context_last_turns_used=(latest_event.context_turns_used if latest_event else 0),
+            context_last_active=bool(runtime_snapshot.get("context_last_active", False)),
+            context_last_turns_used=int(runtime_snapshot.get("context_last_turns_used", 0) or 0),
             silenced=bool(control["silenced"]),
             silence_until=control["silence_until"],
             read_only_mode=self.is_read_only_mode(),
             can_post=can_post,
             blocked_by=blocked_by,
+            active_director=self.normalize_active_director(control.get("active_director")),
+            routing_enabled=bool(routing_status.get("enabled", True)),
+            eventsub_connected=bool(eventsub_state.get("eventsub_connected", False)),
+            eventsub_session_id=(eventsub_session_id or None),
+            eventsub_last_message_ts=(eventsub_last_ts or None),
+            eventsub_reconnect_count=int(eventsub_state.get("reconnect_count", 0) or 0),
+            eventsub_last_error=(eventsub_last_error or None),
         )
+        step_ms["compose"] = (time.perf_counter() - t5) * 1000.0
+
+        total_ms = (time.perf_counter() - total_start) * 1000.0
+        if total_ms > self._status_slow_log_threshold_ms():
+            print(
+                "[perf][/api/status] "
+                f"total_ms={total_ms:.1f} "
+                f"blocks_provider={step_ms.get('blocks_provider', 0.0):.1f} "
+                f"routing={step_ms.get('routing', 0.0):.1f} "
+                f"runtime_snapshot={step_ms.get('runtime_snapshot', 0.0):.1f} "
+                f"twitch_cached={step_ms.get('twitch_cached', 0.0):.1f} "
+                f"eventsub={step_ms.get('eventsub', 0.0):.1f} "
+                f"compose={step_ms.get('compose', 0.0):.1f}"
+            )
+
+        return response
 
     def get_providers_status(self) -> Dict[str, Any]:
-        _, provider_status, _, blocked_by, can_post = self._current_blocks_and_provider()
+        _, provider_status, _, blocked_by, can_post = self._current_blocks_and_provider(
+            reload_control_from_disk=False
+        )
+        with self._lock:
+            active_director = self.normalize_active_director(self._control_state.get("active_director"))
+        routing_cfg = get_routing_runtime_status()
         runtime_metrics = get_provider_runtime_metrics()
         providers_metrics = runtime_metrics.get("providers", {}) if isinstance(runtime_metrics, dict) else {}
         return {
@@ -2301,6 +2977,8 @@ class DashboardStorage:
             "metrics": providers_metrics if isinstance(providers_metrics, dict) else {},
             "can_post": can_post,
             "blocked_by": blocked_by,
+            "routing_enabled": bool(routing_cfg.get("enabled", True)),
+            "active_director": active_director,
         }
 
     def _latest_routing_decision(self, run_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -2375,10 +3053,14 @@ class DashboardStorage:
 
     def get_routing_status(self) -> Dict[str, Any]:
         routing_status = get_routing_runtime_status()
-        _, _, _, blocked_by, can_post = self._current_blocks_and_provider()
+        _, _, _, blocked_by, can_post = self._current_blocks_and_provider(
+            reload_control_from_disk=False
+        )
+        with self._lock:
+            active_director = self.normalize_active_director(self._control_state.get("active_director"))
         _, run_data = self._load_latest_run()
         return {
-            "enabled": bool(routing_status.get("enabled", False)),
+            "enabled": bool(routing_status.get("enabled", True)),
             "default_provider": str(routing_status.get("default_provider", "openai") or "openai"),
             "music_route_provider": str(routing_status.get("music_route_provider", "grok") or "grok"),
             "moderation_provider": str(routing_status.get("moderation_provider", "openai") or "openai"),
@@ -2386,6 +3068,7 @@ class DashboardStorage:
             "classification_rules": dict(routing_status.get("classification_rules", {})),
             "can_post": can_post,
             "blocked_by": blocked_by,
+            "active_director": active_director,
             "last_decision": self._latest_routing_decision(run_data),
         }
 
@@ -2393,11 +3076,11 @@ class DashboardStorage:
         old_cfg, new_cfg = update_routing_runtime_controls(payload)
         return {
             "old": {
-                "enabled": bool(old_cfg.get("enabled", False)),
+                "enabled": bool(old_cfg.get("enabled", True)),
                 "manual_override": str(old_cfg.get("manual_override", "default") or "default"),
             },
             "new": {
-                "enabled": bool(new_cfg.get("enabled", False)),
+                "enabled": bool(new_cfg.get("enabled", True)),
                 "manual_override": str(new_cfg.get("manual_override", "default") or "default"),
             },
         }
@@ -2531,6 +3214,148 @@ class DashboardStorage:
             "new": {"caps": new_cfg.get("caps", {})},
         }
 
+    def set_eventsub_runtime_state(
+        self,
+        *,
+        connected: Optional[bool] = None,
+        session_id: Optional[str] = None,
+        last_message_ts: Optional[str] = None,
+        reconnect_count: Optional[int] = None,
+        last_error: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        with self._lock:
+            state = self._eventsub_runtime_state
+            if connected is not None:
+                state["eventsub_connected"] = bool(connected)
+            if session_id is not None:
+                state["eventsub_session_id"] = str(session_id).strip() or None
+            if last_message_ts is not None:
+                state["last_eventsub_message_ts"] = str(last_message_ts).strip() or None
+            if reconnect_count is not None:
+                try:
+                    state["reconnect_count"] = max(0, int(reconnect_count))
+                except (TypeError, ValueError):
+                    pass
+            if last_error is not None:
+                state["eventsub_last_error"] = str(last_error).strip() or None
+            return dict(state)
+
+    def get_eventsub_runtime_state(self) -> Dict[str, Any]:
+        with self._lock:
+            return dict(self._eventsub_runtime_state)
+
+    def record_eventsub_notification(
+        self,
+        *,
+        twitch_event_id: str,
+        event_type: str,
+        session_id: Optional[str],
+        emitted: bool,
+        suppression_reason: Optional[str],
+    ) -> None:
+        rec = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "twitch_event_id": str(twitch_event_id or "").strip() or None,
+            "event_type": str(event_type or "").strip().upper() or "UNKNOWN",
+            "session_id": (session_id.strip() if isinstance(session_id, str) else None),
+            "emitted": bool(emitted),
+            "suppression_reason": str(suppression_reason or "").strip() or None,
+        }
+        self._eventsub_events_log_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with self._eventsub_events_log_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except OSError:
+            return
+
+    @staticmethod
+    def _twitch_access_token_without_prefix(token: str) -> str:
+        text = str(token or "").strip()
+        if text.lower().startswith("oauth:"):
+            return text.split(":", 1)[1].strip()
+        return text
+
+    def _resolve_twitch_user_id(self, *, login: str, oauth_token: str, client_id: str) -> Optional[str]:
+        clean_login = str(login or "").strip().lstrip("#").lower()
+        token = self._twitch_access_token_without_prefix(oauth_token)
+        if not clean_login or not token or not client_id:
+            return None
+        url = f"https://api.twitch.tv/helix/users?login={quote_plus(clean_login)}"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Client-ID": client_id,
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=8.0) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except Exception:
+            return None
+        data = payload.get("data", []) if isinstance(payload, dict) else []
+        if not isinstance(data, list) or not data:
+            return None
+        row = data[0] if isinstance(data[0], dict) else {}
+        user_id = str(row.get("id", "")).strip()
+        return user_id or None
+
+    def get_eventsub_runtime_credentials(self) -> Dict[str, Any]:
+        checked_at = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            runtime_config = self._twitch_runtime_config_locked()
+            state = self._load_twitch_auth_state_locked()
+            account_status = self._twitch_account_status_locked(
+                "broadcaster",
+                state,
+                checked_at=checked_at,
+                runtime_config=runtime_config,
+            )
+            accounts = state.get("accounts", {}) if isinstance(state, dict) else {}
+            row = accounts.get("broadcaster", {}) if isinstance(accounts, dict) else {}
+            if not isinstance(row, dict):
+                row = {}
+            disconnected = bool(row.get("disconnected", False))
+            local_raw = row.get("token")
+            local_token = local_raw.strip() if isinstance(local_raw, str) else ""
+            env_token = self._twitch_env_value(self._twitch_token_env_names("broadcaster"))
+            oauth_token = "" if disconnected else (local_token or env_token)
+            client_id = str(runtime_config.get("client_id", "")).strip()
+            primary_channel = str(runtime_config.get("primary_channel", "")).strip().lstrip("#").lower()
+
+        if not bool(account_status.get("connected", False)):
+            reason = str(account_status.get("reason") or "DISCONNECTED").strip() or "DISCONNECTED"
+            return {
+                "ok": False,
+                "error": reason,
+                "detail": str(account_status.get("reason_detail") or "Broadcaster account not connected."),
+            }
+        if not oauth_token:
+            return {"ok": False, "error": "NO_TOKEN", "detail": "Missing broadcaster token for EventSub."}
+        if not client_id:
+            return {"ok": False, "error": "CONFIG_MISSING", "detail": "TWITCH_CLIENT_ID required for EventSub."}
+        if not primary_channel:
+            return {"ok": False, "error": "MISSING_PRIMARY_CHANNEL", "detail": "Primary channel is required."}
+
+        broadcaster_user_id = self._resolve_twitch_user_id(
+            login=primary_channel,
+            oauth_token=oauth_token,
+            client_id=client_id,
+        )
+        if not broadcaster_user_id:
+            return {
+                "ok": False,
+                "error": "USER_LOOKUP_FAILED",
+                "detail": f"Could not resolve broadcaster user id for '{primary_channel}'.",
+            }
+        return {
+            "ok": True,
+            "oauth_token": oauth_token,
+            "client_id": client_id,
+            "broadcaster_user_id": broadcaster_user_id,
+            "primary_channel": primary_channel,
+        }
+
     def _default_twitch_config(self) -> Dict[str, Any]:
         return {
             "version": 1,
@@ -2609,6 +3434,18 @@ class DashboardStorage:
             ),
             "missing_config_fields": missing,
         }
+
+    @staticmethod
+    def _twitch_status_cache_ttl_seconds() -> float:
+        raw = os.getenv("ROONIE_TWITCH_STATUS_CACHE_TTL_SECONDS", "2.0")
+        try:
+            return max(0.0, min(float(raw), 60.0))
+        except (TypeError, ValueError):
+            return 2.0
+
+    def _invalidate_twitch_status_cache_locked(self) -> None:
+        self._twitch_status_cache = None
+        self._twitch_status_cache_expiry_ts = 0.0
 
     @staticmethod
     def _twitch_account_names() -> Tuple[str, str]:
@@ -2951,7 +3788,7 @@ class DashboardStorage:
             "last_updated_at": row.get("updated_at"),
             "scopes": scopes,
             "connect_available": len(missing_fields) == 0,
-            "disconnect_available": bool(local_token or env_token or disconnected),
+            "disconnect_available": bool(local_token or env_token) and not disconnected,
             "primary_channel": primary_channel or None,
         }
 
@@ -3067,8 +3904,9 @@ class DashboardStorage:
             row["updated_at"] = now_iso
             row.pop("pending_state", None)
             self._save_twitch_auth_state_locked(current)
+            self._invalidate_twitch_status_cache_locked()
 
-        status_payload = self.get_twitch_status()
+        status_payload = self.get_twitch_status(force_refresh=True)
         account_status = status_payload.get("accounts", {}).get(account, {})
         return {
             "ok": True,
@@ -3100,13 +3938,21 @@ class DashboardStorage:
             for env_name in self._twitch_token_env_names(acc):
                 if env_name in os.environ:
                     os.environ.pop(env_name, None)
+            self._invalidate_twitch_status_cache_locked()
 
-        return self.get_twitch_status()
+        return self.get_twitch_status(force_refresh=True)
 
-    def get_twitch_status(self) -> Dict[str, Any]:
+    def get_twitch_status(self, *, force_refresh: bool = False) -> Dict[str, Any]:
         checked_at = datetime.now(timezone.utc).isoformat()
         scopes_payload = self._twitch_scopes_payload()
         with self._lock:
+            now_monotonic = time.monotonic()
+            if (
+                not force_refresh
+                and isinstance(self._twitch_status_cache, dict)
+                and self._twitch_status_cache_expiry_ts > now_monotonic
+            ):
+                return deepcopy(self._twitch_status_cache)
             state = self._load_twitch_auth_state_locked()
             runtime_config = self._twitch_runtime_config_locked()
             bot_status = self._twitch_account_status_locked(
@@ -3136,7 +3982,7 @@ class DashboardStorage:
         merged_scopes = sorted(scope_set)
         missing_fields = list(runtime_config.get("missing_config_fields", []))
         primary_channel = str(runtime_config.get("primary_channel", "")).strip() or None
-        return {
+        payload = {
             # Legacy compatibility fields.
             "connected": bool(bot_status.get("connected", False) or broadcaster_status.get("connected", False)),
             "scopes": merged_scopes,
@@ -3153,6 +3999,10 @@ class DashboardStorage:
             "last_checked_ts": checked_at,
             "accounts": accounts,
         }
+        with self._lock:
+            self._twitch_status_cache = deepcopy(payload)
+            self._twitch_status_cache_expiry_ts = time.monotonic() + self._twitch_status_cache_ttl_seconds()
+        return payload
 
     def get_live_twitch_credentials(self, account: str = "bot") -> Dict[str, Any]:
         acc = str(account or "").strip().lower() or "bot"

@@ -1,9 +1,9 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict
 
-from src.providers.base import Provider
+from providers.base import Provider
 
 
 @dataclass(frozen=True)

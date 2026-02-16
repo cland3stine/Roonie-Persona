@@ -9,11 +9,11 @@ import time
 from datetime import datetime
 from typing import Any, Dict
 
-from src.roonie.network.transports_urllib import UrllibJsonTransport
-from src.providers.openai_real import OpenAIProvider
-from src.providers.anthropic_real import AnthropicProvider
-from src.providers.grok_real import GrokProvider
-from src.providers.shadow_log import ShadowLogConfig, log_shadow
+from roonie.network.transports_urllib import UrllibJsonTransport
+from providers.openai_real import OpenAIProvider
+from providers.anthropic_real import AnthropicProvider
+from providers.grok_real import GrokProvider
+from providers.shadow_log import ShadowLogConfig, log_shadow
 
 def _load_secrets_env(path: Path) -> None:
     if not path.exists():

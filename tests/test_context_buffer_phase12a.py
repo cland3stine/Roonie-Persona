@@ -1,12 +1,12 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from pathlib import Path
 
-from src.providers.registry import ProviderRegistry
-from src.roonie.context.context_buffer import ContextBuffer
-from src.roonie.live_director import LiveDirector
-from src.roonie.types import Env, Event
+from providers.registry import ProviderRegistry
+from roonie.context.context_buffer import ContextBuffer
+from roonie.live_director import LiveDirector
+from roonie.types import Env, Event
 
 
 def _load_fixture(name: str) -> dict:

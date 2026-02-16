@@ -5,9 +5,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.providers.registry import ProviderRegistry
-from src.roonie.live_director import LiveDirector
-from src.roonie.types import Env, Event
+from providers.registry import ProviderRegistry
+from roonie.live_director import LiveDirector
+from roonie.types import Env, Event
 
 
 def main() -> int:

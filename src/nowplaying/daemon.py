@@ -1,11 +1,11 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 from pathlib import Path
 from typing import Callable, Optional
 
-from src.metadata.discogs import DiscogsEnricher
-from src.nowplaying.oneshot import run_nowplaying_oneshot
+from metadata.discogs import DiscogsEnricher
+from nowplaying.oneshot import run_nowplaying_oneshot
 
 
 def _hash_text(text: str) -> str:

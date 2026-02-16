@@ -1,11 +1,11 @@
-from pathlib import Path
+﻿from pathlib import Path
 
 def test_nowplaying_bridge_writes_enriched_current_and_previous(tmp_path):
-    from src.roonie.config import load_config
-    from src.roonie.network import NetworkClient
-    from src.roonie.network.transports import FakeTransport
-    from src.metadata.discogs import DiscogsEnricher
-    from src.nowplaying.bridge import build_chat_lines_from_nowplaying_txt
+    from roonie.config import load_config
+    from roonie.network import NetworkClient
+    from roonie.network.transports import FakeTransport
+    from metadata.discogs import DiscogsEnricher
+    from nowplaying.bridge import build_chat_lines_from_nowplaying_txt
 
     # Enable network in config, but we will still use FakeTransport (fixture-backed)
     cfg_dir = tmp_path / "config"

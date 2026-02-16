@@ -619,6 +619,24 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
                 )
                 _json_response(self, {"items": items, "total_count": total_count})
                 return
+            if path == "/api/memory/pending":
+                identity = self._authorize_write(
+                    action="MEMORY_PENDING_READ",
+                    payload={},
+                    required_role="operator",
+                )
+                if identity is None:
+                    return
+                limit = _parse_limit_bounded(query, default=100, max_value=500)
+                offset = _parse_offset(query, default=0)
+                q = _query_opt(query, "q")
+                items, total_count = storage.query_memory_pending(
+                    limit=limit,
+                    offset=offset,
+                    q=q,
+                )
+                _json_response(self, {"items": items, "total_count": total_count})
+                return
             if path == "/api/auth/me":
                 identity = self._session_identity()
                 if identity:
@@ -1085,6 +1103,123 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
                 )
                 _json_response(self, {"ok": True, "item": item, "audit": audit.to_dict()})
                 return
+            if parsed.path.startswith("/api/memory/pending/"):
+                suffix = parsed.path[len("/api/memory/pending/") :].strip("/")
+                if suffix.endswith("/approve"):
+                    candidate_id = suffix[: -len("/approve")].strip("/")
+                    if not candidate_id:
+                        _json_response(
+                            self,
+                            {"ok": False, "error": "bad_request", "detail": "Missing pending memory id."},
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    ok_body, payload = self._read_json_body()
+                    if not ok_body:
+                        _json_response(
+                            self,
+                            {"ok": False, "error": "bad_request", "detail": "Invalid JSON body."},
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    identity = self._authorize_write(
+                        action="MEMORY_PENDING_APPROVE",
+                        payload={"id": candidate_id, **payload},
+                        required_role="operator",
+                    )
+                    if identity is None:
+                        return
+                    try:
+                        result = storage.approve_memory_pending(
+                            candidate_id,
+                            username=self._identity_memory_username(identity),
+                            role=identity.get("role"),
+                            auth_mode=identity.get("auth_mode"),
+                        )
+                    except ValueError as exc:
+                        _json_response(
+                            self,
+                            {"ok": False, "error": "bad_request", "detail": str(exc)},
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    except KeyError:
+                        _json_response(
+                            self,
+                            {"ok": False, "error": "not_found", "detail": "Pending memory candidate not found."},
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+                    audit = storage.record_operator_action(
+                        operator=identity["operator"],
+                        action="MEMORY_PENDING_APPROVE",
+                        payload={"id": candidate_id},
+                        result="OK",
+                        actor=identity["actor"],
+                        username=identity.get("username"),
+                        role=identity.get("role"),
+                        auth_mode=identity.get("auth_mode"),
+                    )
+                    _json_response(self, {"ok": True, "result": result, "audit": audit.to_dict()})
+                    return
+                if suffix.endswith("/deny"):
+                    candidate_id = suffix[: -len("/deny")].strip("/")
+                    if not candidate_id:
+                        _json_response(
+                            self,
+                            {"ok": False, "error": "bad_request", "detail": "Missing pending memory id."},
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    ok_body, payload = self._read_json_body()
+                    if not ok_body:
+                        _json_response(
+                            self,
+                            {"ok": False, "error": "bad_request", "detail": "Invalid JSON body."},
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    identity = self._authorize_write(
+                        action="MEMORY_PENDING_DENY",
+                        payload={"id": candidate_id, **payload},
+                        required_role="operator",
+                    )
+                    if identity is None:
+                        return
+                    try:
+                        result = storage.deny_memory_pending(
+                            candidate_id,
+                            username=self._identity_memory_username(identity),
+                            role=identity.get("role"),
+                            auth_mode=identity.get("auth_mode"),
+                            reason=payload.get("reason") if isinstance(payload, dict) else None,
+                        )
+                    except ValueError as exc:
+                        _json_response(
+                            self,
+                            {"ok": False, "error": "bad_request", "detail": str(exc)},
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    except KeyError:
+                        _json_response(
+                            self,
+                            {"ok": False, "error": "not_found", "detail": "Pending memory candidate not found."},
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+                    audit = storage.record_operator_action(
+                        operator=identity["operator"],
+                        action="MEMORY_PENDING_DENY",
+                        payload={"id": candidate_id, "reason": payload.get("reason") if isinstance(payload, dict) else None},
+                        result="OK",
+                        actor=identity["actor"],
+                        username=identity.get("username"),
+                        role=identity.get("role"),
+                        auth_mode=identity.get("auth_mode"),
+                    )
+                    _json_response(self, {"ok": True, "item": result, "audit": audit.to_dict()})
+                    return
 
             if path == "/api/live/arm":
                 ok_body, payload = self._read_json_body()
@@ -1095,14 +1230,22 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
                         status=HTTPStatus.BAD_REQUEST,
                     )
                     return
-                identity = self._authorize_write(action="ARM", payload=payload, required_role="operator")
+                identity = self._authorize_write(
+                    action="CONTROL_ARM_SET", payload=payload, required_role="operator"
+                )
                 if identity is None:
                     return
                 state = storage.set_armed(True)
+                previous_armed = bool(state.get("previous_armed", False))
+                session_id = str(state.get("session_id", "")).strip() or None
                 audit = storage.record_operator_action(
                     operator=identity["operator"],
-                    action="ARM",
-                    payload=payload,
+                    action="CONTROL_ARM_SET",
+                    payload={
+                        "previous_armed": previous_armed,
+                        "new_armed": bool(state.get("armed", True)),
+                        "session_id": session_id,
+                    },
                     result="OK",
                     actor=identity["actor"],
                     username=identity.get("username"),
@@ -1121,14 +1264,22 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
                         status=HTTPStatus.BAD_REQUEST,
                     )
                     return
-                identity = self._authorize_write(action="DISARM", payload=payload, required_role="operator")
+                identity = self._authorize_write(
+                    action="CONTROL_DISARM_SET", payload=payload, required_role="operator"
+                )
                 if identity is None:
                     return
                 state = storage.set_armed(False)
+                previous_armed = bool(state.get("previous_armed", True))
+                session_id = str(state.get("session_id", "")).strip() or None
                 audit = storage.record_operator_action(
                     operator=identity["operator"],
-                    action="DISARM",
-                    payload=payload,
+                    action="CONTROL_DISARM_SET",
+                    payload={
+                        "previous_armed": previous_armed,
+                        "new_armed": bool(state.get("armed", False)),
+                        "session_id": session_id,
+                    },
                     result="OK",
                     actor=identity["actor"],
                     username=identity.get("username"),
@@ -1357,6 +1508,177 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
                 _json_response(
                     self,
                     {"ok": True, "status": storage.get_providers_status(), "audit": audit.to_dict()},
+                )
+                return
+
+            if path in {"/control/routing", "/api/control/routing"}:
+                ok_body, payload = self._read_json_body()
+                if not ok_body:
+                    _json_response(
+                        self,
+                        {"ok": False, "error": "bad_request", "detail": "Invalid JSON body."},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                identity = self._authorize_write(
+                    action="CONTROL_ROUTING_SET",
+                    payload=payload,
+                    required_role="operator",
+                )
+                if identity is None:
+                    return
+                if "enabled" not in payload:
+                    storage.record_operator_action(
+                        operator=identity["operator"],
+                        action="CONTROL_ROUTING_SET",
+                        payload=payload,
+                        result="INVALID_PAYLOAD: missing enabled",
+                        actor=identity["actor"],
+                        username=identity.get("username"),
+                        role=identity.get("role"),
+                        auth_mode=identity.get("auth_mode"),
+                    )
+                    _json_response(
+                        self,
+                        {"ok": False, "error": "bad_request", "detail": "Missing enabled boolean."},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                enabled = bool(payload.get("enabled"))
+                diff_payload = storage.set_routing_config({"enabled": enabled})
+                audit = storage.record_operator_action(
+                    operator=identity["operator"],
+                    action="CONTROL_ROUTING_SET",
+                    payload={"enabled": enabled, **diff_payload},
+                    result="OK",
+                    actor=identity["actor"],
+                    username=identity.get("username"),
+                    role=identity.get("role"),
+                    auth_mode=identity.get("auth_mode"),
+                )
+                _json_response(
+                    self,
+                    {"ok": True, "status": storage.get_routing_status(), "audit": audit.to_dict()},
+                )
+                return
+
+            if path in {"/control/director", "/api/control/director"}:
+                ok_body, payload = self._read_json_body()
+                if not ok_body:
+                    _json_response(
+                        self,
+                        {"ok": False, "error": "bad_request", "detail": "Invalid JSON body."},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                identity = self._authorize_write(
+                    action="CONTROL_DIRECTOR_SET",
+                    payload=payload,
+                    required_role="operator",
+                )
+                if identity is None:
+                    return
+                active = str(payload.get("active", "")).strip()
+                if not active:
+                    storage.record_operator_action(
+                        operator=identity["operator"],
+                        action="CONTROL_DIRECTOR_SET",
+                        payload=payload,
+                        result="INVALID_PAYLOAD: missing active",
+                        actor=identity["actor"],
+                        username=identity.get("username"),
+                        role=identity.get("role"),
+                        auth_mode=identity.get("auth_mode"),
+                    )
+                    _json_response(
+                        self,
+                        {"ok": False, "error": "bad_request", "detail": "Missing active director."},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                try:
+                    diff_payload = storage.set_active_director(active)
+                except ValueError as exc:
+                    storage.record_operator_action(
+                        operator=identity["operator"],
+                        action="CONTROL_DIRECTOR_SET",
+                        payload=payload,
+                        result=f"INVALID_PAYLOAD: {exc}",
+                        actor=identity["actor"],
+                        username=identity.get("username"),
+                        role=identity.get("role"),
+                        auth_mode=identity.get("auth_mode"),
+                    )
+                    _json_response(
+                        self,
+                        {"ok": False, "error": "bad_request", "detail": str(exc)},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                audit = storage.record_operator_action(
+                    operator=identity["operator"],
+                    action="CONTROL_DIRECTOR_SET",
+                    payload={"active": diff_payload.get("new"), **diff_payload},
+                    result="OK",
+                    actor=identity["actor"],
+                    username=identity.get("username"),
+                    role=identity.get("role"),
+                    auth_mode=identity.get("auth_mode"),
+                )
+                _json_response(
+                    self,
+                    {"ok": True, "status": storage.get_status().to_dict(), "audit": audit.to_dict()},
+                )
+                return
+
+            if path in {"/control/dry_run", "/api/control/dry_run"}:
+                ok_body, payload = self._read_json_body()
+                if not ok_body:
+                    _json_response(
+                        self,
+                        {"ok": False, "error": "bad_request", "detail": "Invalid JSON body."},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                identity = self._authorize_write(
+                    action="CONTROL_DRY_RUN_SET",
+                    payload=payload,
+                    required_role="operator",
+                )
+                if identity is None:
+                    return
+                if "enabled" not in payload:
+                    storage.record_operator_action(
+                        operator=identity["operator"],
+                        action="CONTROL_DRY_RUN_SET",
+                        payload=payload,
+                        result="INVALID_PAYLOAD: missing enabled",
+                        actor=identity["actor"],
+                        username=identity.get("username"),
+                        role=identity.get("role"),
+                        auth_mode=identity.get("auth_mode"),
+                    )
+                    _json_response(
+                        self,
+                        {"ok": False, "error": "bad_request", "detail": "Missing enabled boolean."},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                enabled = bool(payload.get("enabled"))
+                diff_payload = storage.set_dry_run(enabled)
+                audit = storage.record_operator_action(
+                    operator=identity["operator"],
+                    action="CONTROL_DRY_RUN_SET",
+                    payload={"enabled": enabled, **diff_payload},
+                    result="OK",
+                    actor=identity["actor"],
+                    username=identity.get("username"),
+                    role=identity.get("role"),
+                    auth_mode=identity.get("auth_mode"),
+                )
+                _json_response(
+                    self,
+                    {"ok": True, "status": storage.get_status().to_dict(), "audit": audit.to_dict()},
                 )
                 return
 

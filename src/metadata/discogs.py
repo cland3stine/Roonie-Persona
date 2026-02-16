@@ -1,10 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from src.roonie.network import NetworkClient
-from src.metadata.discogs_client import DiscogsClient
+from roonie.network import NetworkClient
+from metadata.discogs_client import DiscogsClient
 
 
 @dataclass(frozen=True)

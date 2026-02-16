@@ -1,10 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional
 
-from src.roonie.config import RoonieConfig
-from src.roonie.network.types import Transport
+from roonie.config import RoonieConfig
+from roonie.network.types import Transport
 
 
 class NetworkDisabledError(RuntimeError):

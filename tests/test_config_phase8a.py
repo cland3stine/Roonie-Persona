@@ -1,8 +1,8 @@
-from pathlib import Path
+﻿from pathlib import Path
 import os
 
 def test_default_config_loads_without_files(tmp_path, monkeypatch):
-    from src.roonie.config import load_config
+    from roonie.config import load_config
 
     # Ensure env is clean for deterministic behavior
     monkeypatch.delenv("ROONIE_MEMORY_DB_PATH", raising=False)
@@ -18,7 +18,7 @@ def test_default_config_loads_without_files(tmp_path, monkeypatch):
 
 
 def test_toml_overrides_non_secret_values(tmp_path, monkeypatch):
-    from src.roonie.config import load_config
+    from roonie.config import load_config
 
     monkeypatch.delenv("ROONIE_MEMORY_DB_PATH", raising=False)
 
@@ -40,7 +40,7 @@ def test_toml_overrides_non_secret_values(tmp_path, monkeypatch):
 
 
 def test_secrets_env_loaded_but_not_exposed_in_repr(tmp_path, monkeypatch):
-    from src.roonie.config import load_config
+    from roonie.config import load_config
 
     secrets = tmp_path / "config" / "secrets.env"
     secrets.parent.mkdir(parents=True, exist_ok=True)
@@ -61,7 +61,7 @@ def test_secrets_env_loaded_but_not_exposed_in_repr(tmp_path, monkeypatch):
 
 
 def test_env_overrides_work_only_through_loader(tmp_path, monkeypatch):
-    from src.roonie.config import load_config
+    from roonie.config import load_config
 
     monkeypatch.setenv("ROONIE_MEMORY_DB_PATH", "data/override.sqlite")
     cfg = load_config(base_dir=tmp_path)

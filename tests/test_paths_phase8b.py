@@ -1,8 +1,8 @@
-from pathlib import Path
+﻿from pathlib import Path
 
 def test_paths_default_resolve_to_data_dir(tmp_path):
-    from src.roonie.config import load_config
-    from src.roonie.paths import resolve_paths
+    from roonie.config import load_config
+    from roonie.paths import resolve_paths
 
     cfg = load_config(base_dir=tmp_path)
     paths = resolve_paths(base_dir=tmp_path, cfg=cfg)
@@ -14,8 +14,8 @@ def test_paths_default_resolve_to_data_dir(tmp_path):
 
 
 def test_paths_respect_config_override(tmp_path):
-    from src.roonie.config import load_config
-    from src.roonie.paths import resolve_paths
+    from roonie.config import load_config
+    from roonie.paths import resolve_paths
 
     cfg_dir = tmp_path / "config"
     cfg_dir.mkdir(parents=True, exist_ok=True)

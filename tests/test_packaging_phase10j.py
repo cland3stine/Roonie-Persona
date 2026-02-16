@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -10,7 +10,7 @@ def _fx(name: str) -> dict:
 
 
 def test_defaults_are_safe_and_silent():
-    from src.app.wiring import build_app
+    from app.wiring import build_app
 
     cfg = _fx("case_defaults_safe.json")
 
@@ -26,7 +26,7 @@ def test_defaults_are_safe_and_silent():
 
 
 def test_live_wiring_has_no_side_effects_in_tests_and_is_deterministic():
-    from src.app.wiring import build_app
+    from app.wiring import build_app
 
     cfg = _fx("case_live_wired_no_side_effects.json")
 

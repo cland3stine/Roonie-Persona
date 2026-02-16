@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from src.providers.base import Provider
-from src.providers.registry import ProviderRegistry
+from providers.base import Provider
+from providers.registry import ProviderRegistry
 
 _SUPPORTED_PROVIDERS = ("openai", "grok", "anthropic")
 _DEFAULT_APPROVED_PROVIDERS = ("openai", "grok")
@@ -32,7 +32,7 @@ _ROUTING_MUSIC_KEYWORDS = (
     "set",
     "tune",
 )
-_ARTIST_TITLE_PATTERN = re.compile(r"\b[\w][\w .&'’]{1,80}\s-\s[\w][\w .&'’]{1,120}\b")
+_ARTIST_TITLE_PATTERN = re.compile(r"\b[\w][\w .&'â€™]{1,80}\s-\s[\w][\w .&'â€™]{1,120}\b")
 _ARTIST_TITLE_HINT_PATTERN = re.compile(r"\b(track|id|song|tune|mix|remix)\b")
 _MODERATION_BLOCK_PHRASES = (
     "phone number",
@@ -56,6 +56,12 @@ _ROUTING_CFG_CACHE: Optional[Dict[str, Any]] = None
 _ROUTING_CFG_CACHE_MTIME_NS: Optional[int] = None
 _ROUTING_CFG_CACHE_PATH: Optional[str] = None
 _METRICS_LOCK = threading.Lock()
+_REAL_PROVIDER_TRANSPORT: Any = None
+_REAL_PROVIDER_TRANSPORT_LOCK = threading.Lock()
+_SECRETS_CACHE_LOCK = threading.Lock()
+_SECRETS_CACHE: Optional[Dict[str, str]] = None
+_SECRETS_CACHE_MTIME_NS: Optional[int] = None
+_SECRETS_CACHE_PATH: Optional[str] = None
 
 
 def _new_provider_metrics() -> Dict[str, Any]:
@@ -143,7 +149,7 @@ def _default_providers_config() -> Dict[str, Any]:
 def _default_routing_config() -> Dict[str, Any]:
     return {
         "version": 1,
-        "enabled": False,
+        "enabled": True,
         "default_provider": "openai",
         "music_route_provider": "grok",
         "moderation_provider": "openai",
@@ -607,13 +613,141 @@ def _mk_openai_provider(enabled: bool) -> Provider:
     return _OpenAIStub(name="openai", enabled=enabled)
 
 
-def _provider_for_name(name: str, registry_default: Provider) -> Provider:
-    selected = str(name or "").strip().lower()
-    if selected == registry_default.name:
-        return registry_default
+def _truthy_env(name: str, default: bool = False) -> bool:
+    raw = str(os.getenv(name, "")).strip().lower()
+    if not raw:
+        return bool(default)
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _read_secrets_env() -> Dict[str, str]:
+    global _SECRETS_CACHE, _SECRETS_CACHE_MTIME_NS, _SECRETS_CACHE_PATH
+    path = (_repo_root() / "config" / "secrets.env").resolve()
+    try:
+        stat = path.stat()
+        mtime_ns = int(stat.st_mtime_ns)
+    except OSError:
+        return {}
+    path_str = str(path)
+    with _SECRETS_CACHE_LOCK:
+        if (
+            _SECRETS_CACHE is not None
+            and _SECRETS_CACHE_PATH == path_str
+            and _SECRETS_CACHE_MTIME_NS == mtime_ns
+        ):
+            return dict(_SECRETS_CACHE)
+        parsed: Dict[str, str] = {}
+        try:
+            for raw_line in path.read_text(encoding="utf-8").splitlines():
+                line = str(raw_line or "").strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip()
+                if len(value) >= 2 and (
+                    (value[0] == '"' and value[-1] == '"')
+                    or (value[0] == "'" and value[-1] == "'")
+                ):
+                    value = value[1:-1]
+                if key:
+                    parsed[key] = value
+        except OSError:
+            parsed = {}
+        _SECRETS_CACHE = dict(parsed)
+        _SECRETS_CACHE_MTIME_NS = mtime_ns
+        _SECRETS_CACHE_PATH = path_str
+        return parsed
+
+
+def _resolve_secret_or_env(name: str) -> str:
+    direct = str(os.getenv(name, "")).strip()
+    if direct:
+        return direct
+    return str(_read_secrets_env().get(name, "")).strip()
+
+
+def _provider_api_key(provider_name: str) -> str:
+    selected = str(provider_name or "").strip().lower()
     if selected == "openai":
+        return _resolve_secret_or_env("OPENAI_API_KEY")
+    if selected == "grok":
+        return _resolve_secret_or_env("GROK_API_KEY") or _resolve_secret_or_env("XAI_API_KEY")
+    if selected == "anthropic":
+        return _resolve_secret_or_env("ANTHROPIC_API_KEY")
+    return ""
+
+
+def _real_provider_network_enabled(context: Optional[Dict[str, Any]]) -> bool:
+    if context and "allow_live_provider_network" in context:
+        return bool(context.get("allow_live_provider_network"))
+    return _truthy_env("ROONIE_ENABLE_LIVE_PROVIDER_NETWORK", False)
+
+
+def _real_provider_transport():
+    global _REAL_PROVIDER_TRANSPORT
+    with _REAL_PROVIDER_TRANSPORT_LOCK:
+        if _REAL_PROVIDER_TRANSPORT is not None:
+            return _REAL_PROVIDER_TRANSPORT
+        from roonie.network.transports_urllib import UrllibJsonTransport
+
+        _REAL_PROVIDER_TRANSPORT = UrllibJsonTransport(
+            user_agent="roonie-control-room/1.0",
+            timeout_seconds=12,
+        )
+        return _REAL_PROVIDER_TRANSPORT
+
+
+def _provider_for_name(
+    name: str,
+    registry_default: Provider,
+    *,
+    context: Optional[Dict[str, Any]] = None,
+) -> Provider:
+    selected = str(name or "").strip().lower()
+    if selected == "openai":
+        if _real_provider_network_enabled(context):
+            api_key = _provider_api_key("openai")
+            if api_key:
+                from providers.openai_real import OpenAIProvider
+
+                if context is not None and not context.get("model"):
+                    context["model"] = str(os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
+                return OpenAIProvider(
+                    enabled=True,
+                    transport=_real_provider_transport(),
+                    api_key=api_key,
+                )
         return _mk_openai_provider(enabled=True)
-    if selected in {"grok", "anthropic"}:
+    if selected == "grok":
+        if _real_provider_network_enabled(context):
+            api_key = _provider_api_key("grok")
+            if api_key:
+                from providers.grok_real import GrokProvider
+
+                if context is not None and not context.get("model"):
+                    context["model"] = str(
+                        os.getenv("GROK_MODEL", "grok-4-1-fast-non-reasoning")
+                    )
+                return GrokProvider(
+                    enabled=True,
+                    transport=_real_provider_transport(),
+                    api_key=api_key,
+                )
+        return _mk_shadow_provider("grok", enabled=True)
+    if selected == "anthropic":
+        if _real_provider_network_enabled(context):
+            api_key = _provider_api_key("anthropic")
+            if api_key:
+                from providers.anthropic_real import AnthropicProvider
+
+                if context is not None and not context.get("model"):
+                    context["model"] = str(os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet"))
+                return AnthropicProvider(
+                    enabled=True,
+                    transport=_real_provider_transport(),
+                    api_key=api_key,
+                )
         return _mk_shadow_provider(selected, enabled=True)
     return registry_default
 
@@ -624,6 +758,9 @@ def _select_provider_from_routing(
     fallback_provider: str,
     routing_class: str,
 ) -> str:
+    # Canon hard-stop: if routing is OFF, never call Grok.
+    if not bool(routing_cfg.get("enabled", False)):
+        return "openai"
     override_mode = str(routing_cfg.get("manual_override", "default")).strip().lower()
     if override_mode == "force_openai":
         return "openai"
@@ -738,7 +875,7 @@ def route_generate(
         context["override_mode"] = override_mode
 
         _record_routing_hit(routing_class, override_mode)
-        primary = _provider_for_name(active_provider_name, primary)
+        primary = _provider_for_name(active_provider_name, primary, context=context)
         if _is_cost_cap_blocked(
             {
                 "caps": provider_runtime_status.get("caps", {}),
@@ -764,6 +901,8 @@ def route_generate(
             raise RuntimeError("primary forced throw (test override)")
         out = primary.generate(prompt=prompt, context=context)
     except Exception as exc:
+        context["suppression_reason"] = "PROVIDER_ERROR"
+        context["provider_block_reason"] = "PROVIDER_ERROR"
         if provider_call_tracked and start_monotonic is not None:
             latency_ms = int((time.monotonic() - start_monotonic) * 1000)
             _record_provider_result(

@@ -19,9 +19,18 @@ class StatusResponse:
     context_last_turns_used: int
     silenced: bool = False
     silence_until: Optional[str] = None
-    read_only_mode: bool = True
+    # Canon: DRY_RUN/read-only defaults OFF unless explicitly enabled.
+    read_only_mode: bool = False
     can_post: bool = False
     blocked_by: List[str] = field(default_factory=list)
+    active_director: str = "ProviderDirector"
+    routing_enabled: bool = True
+    session_id: Optional[str] = None
+    eventsub_connected: bool = False
+    eventsub_session_id: Optional[str] = None
+    eventsub_last_message_ts: Optional[str] = None
+    eventsub_reconnect_count: int = 0
+    eventsub_last_error: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -30,6 +39,7 @@ class StatusResponse:
 @dataclass
 class EventResponse:
     ts: Optional[str]
+    session_id: Optional[str]
     user_handle: str
     message_text: str
     direct_address: bool

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -69,7 +69,7 @@ def test_twitch_write_path_gating_and_replay_never_posts(tmp_path: Path):
       - Live + armed + kill switch OFF -> posts exactly once
       - Replay -> never posts, even if armed and kill switch OFF
     """
-    from src.twitch.write_path import maybe_post_nowplaying
+    from twitch.write_path import maybe_post_nowplaying
 
     # Simulated nowplaying output (what 10C writes for streamer.bot)
     msg = "Now Playing: Artist A - Track One (Released 2020 on Label One)"
@@ -108,6 +108,6 @@ def test_kill_switch_default_is_on():
     """
     Kill switch default ON is a hard safety invariant.
     """
-    from src.twitch.write_path import DEFAULT_KILL_SWITCH_ON
+    from twitch.write_path import DEFAULT_KILL_SWITCH_ON
 
     assert DEFAULT_KILL_SWITCH_ON is True

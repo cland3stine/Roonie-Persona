@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import io
 import json
@@ -18,7 +18,7 @@ from roonie.dashboard_api.app import create_server
 
 def _today_ny() -> str:
     try:
-        from src.providers.router import _today_ny as _provider_today_ny
+        from providers.router import _today_ny as _provider_today_ny
 
         return _provider_today_ny()
     except Exception:
@@ -101,6 +101,49 @@ def _write_sample_run(runs_dir: Path) -> None:
         ],
     }
     (runs_dir / "run.json").write_text(json.dumps(sample), encoding="utf-8")
+
+
+def _sample_memory_intent_run(
+    *,
+    session_id: str = "memory-intent-session",
+    event_id: str = "evt-memory-1",
+    user: str = "RuleOfRune",
+    preference: str = "like",
+    memory_object: str = "progressive house",
+) -> Dict[str, Any]:
+    return {
+        "schema_version": "run-v1",
+        "session_id": session_id,
+        "started_at": "2026-02-16T00:00:00+00:00",
+        "inputs": [
+            {
+                "event_id": event_id,
+                "message": f"I {preference} {memory_object}",
+                "metadata": {"user": user, "mode": "live", "is_direct_mention": True},
+            }
+        ],
+        "decisions": [
+            {
+                "case_id": "live",
+                "event_id": event_id,
+                "action": "MEMORY_WRITE_INTENT",
+                "route": "none",
+                "response_text": None,
+                "trace": {
+                    "memory_intent": {
+                        "scope": "viewer",
+                        "user": user,
+                        "preference": preference,
+                        "object": memory_object,
+                        "confidence": 0.9,
+                        "ttl_days": 180,
+                        "cue": f"i {preference}",
+                    }
+                },
+            }
+        ],
+        "outputs": [],
+    }
 
 
 def _get_json(base: str, path: str) -> Dict[str, Any] | list[Dict[str, Any]]:
@@ -451,11 +494,11 @@ def test_write_endpoints_and_audit_with_operator_key(tmp_path: Path, monkeypatch
         thread.join(timeout=2.0)
 
     actions = [item["action"] for item in op_log]
-    assert "ARM" in actions
+    assert "CONTROL_ARM_SET" in actions
     assert "SILENCE_NOW" in actions
-    assert "DISARM" in actions
+    assert "CONTROL_DISARM_SET" in actions
     assert op_log[0]["actor"] == "jen"
-    arm_entry = next(item for item in op_log if item["action"] == "ARM")
+    arm_entry = next(item for item in op_log if item["action"] == "CONTROL_ARM_SET")
     assert arm_entry["auth_mode"] == "legacy_key"
 
 
@@ -501,11 +544,11 @@ def test_status_blocked_by_precedence_order(tmp_path: Path, monkeypatch) -> None
         server.server_close()
         thread.join(timeout=2.0)
 
-    assert status["blocked_by"] == ["KILL_SWITCH", "SILENCE_TTL"]
+    assert status["blocked_by"] == ["SILENCE_TTL"]
     assert status["can_post"] is False
 
 
-def test_arm_toggles_implicit_kill_switch_when_not_env_pinned(tmp_path: Path, monkeypatch) -> None:
+def test_arm_status_no_longer_depends_on_implicit_kill_switch(tmp_path: Path, monkeypatch) -> None:
     runs_dir = tmp_path / "runs"
     _write_sample_run(runs_dir)
     _set_dashboard_paths(monkeypatch, tmp_path)
@@ -528,13 +571,13 @@ def test_arm_toggles_implicit_kill_switch_when_not_env_pinned(tmp_path: Path, mo
         server.server_close()
         thread.join(timeout=2.0)
 
-    assert status_before["kill_switch_on"] is True
-    assert "KILL_SWITCH" in status_before["blocked_by"]
+    assert status_before["kill_switch_on"] is False
+    assert status_before["blocked_by"] == ["DISARMED"]
     assert status_after_arm["kill_switch_on"] is False
     assert status_after_arm["can_post"] is True
     assert status_after_arm["blocked_by"] == []
-    assert status_after_disarm["kill_switch_on"] is True
-    assert "KILL_SWITCH" in status_after_disarm["blocked_by"]
+    assert status_after_disarm["kill_switch_on"] is False
+    assert status_after_disarm["blocked_by"] == ["DISARMED"]
 
 
 def test_studio_profile_get_creates_defaults_when_missing(tmp_path: Path, monkeypatch) -> None:
@@ -966,15 +1009,15 @@ def test_status_blocked_by_cost_cap_when_limit_reached(tmp_path: Path, monkeypat
         server.server_close()
         thread.join(timeout=2.0)
 
-    assert "COST_CAP" in status["blocked_by"]
-    assert status["can_post"] is False
-    assert "COST_CAP" in providers["blocked_by"]
-    assert providers["can_post"] is False
+    assert "COST_CAP" not in status["blocked_by"]
+    assert status["can_post"] is True
+    assert "COST_CAP" not in providers["blocked_by"]
+    assert providers["can_post"] is True
 
 
 def test_route_generate_enforces_cost_cap_and_sets_suppression_reason(tmp_path: Path, monkeypatch) -> None:
-    from src.providers.registry import ProviderRegistry
-    from src.providers.router import route_generate
+    from providers.registry import ProviderRegistry
+    from providers.router import route_generate
 
     providers_path = tmp_path / "providers_config.json"
     providers_path.write_text(
@@ -1027,9 +1070,9 @@ def test_route_generate_enforces_cost_cap_and_sets_suppression_reason(tmp_path: 
     assert second_cfg["usage"]["requests"] == 1
 
 
-def test_routing_default_off_uses_openai_even_for_music_text(tmp_path: Path, monkeypatch) -> None:
-    from src.providers.registry import ProviderRegistry
-    from src.providers.router import route_generate
+def test_routing_default_on_routes_music_to_grok(tmp_path: Path, monkeypatch) -> None:
+    from providers.registry import ProviderRegistry
+    from providers.router import route_generate
 
     providers_path = tmp_path / "providers_config.json"
     routing_path = tmp_path / "routing_config.json"
@@ -1069,16 +1112,16 @@ def test_routing_default_off_uses_openai_even_for_music_text(tmp_path: Path, mon
 
     context = {"use_provider_config": True, "message_text": "what track is this tune?"}
     out = route_generate(registry=reg, routing_cfg={}, prompt="ping", context=context)
-    assert out == "[openai stub] ping"
-    assert context["routing_enabled"] is False
+    assert out == "[grok stub] ping"
+    assert context["routing_enabled"] is True
     assert context["routing_class"] == "music_culture"
-    assert context["provider_selected"] == "openai"
-    assert context["moderation_result"] == "not_applicable"
+    assert context["provider_selected"] == "grok"
+    assert context["moderation_result"] == "allow"
 
 
 def test_routing_enabled_music_selects_grok_and_runs_moderation(tmp_path: Path, monkeypatch) -> None:
-    from src.providers.registry import ProviderRegistry
-    from src.providers.router import route_generate
+    from providers.registry import ProviderRegistry
+    from providers.router import route_generate
 
     providers_path = tmp_path / "providers_config.json"
     routing_path = tmp_path / "routing_config.json"
@@ -1147,8 +1190,8 @@ def test_routing_enabled_music_selects_grok_and_runs_moderation(tmp_path: Path, 
 
 
 def test_routing_grok_blocked_by_openai_moderation_sets_suppression_reason(tmp_path: Path, monkeypatch) -> None:
-    from src.providers.registry import ProviderRegistry
-    from src.providers.router import route_generate
+    from providers.registry import ProviderRegistry
+    from providers.router import route_generate
 
     providers_path = tmp_path / "providers_config.json"
     routing_path = tmp_path / "routing_config.json"
@@ -1284,9 +1327,151 @@ def test_routing_config_patch_is_director_only_and_audited(tmp_path: Path, monke
     assert routing_action["auth_mode"] == "session"
 
 
+def test_control_routing_and_director_endpoints_toggle_and_audit(tmp_path: Path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_OPERATOR_KEY", "op-key-123")
+
+    headers = {"X-ROONIE-OP-KEY": "op-key-123", "X-ROONIE-ACTOR": "jen"}
+    server, thread = _start_server(runs_dir)
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        _, initial_status = _request_json(base, "/api/status")
+        code_route, body_route = _request_json(
+            base,
+            "/control/routing",
+            method="POST",
+            payload={"enabled": False},
+            headers=headers,
+        )
+        code_director, body_director = _request_json(
+            base,
+            "/control/director",
+            method="POST",
+            payload={"active": "OfflineDirector"},
+            headers=headers,
+        )
+        _, status = _request_json(base, "/api/status")
+        _, op_log = _request_json(base, "/api/operator_log?limit=50")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    assert code_route == 200
+    assert body_route["ok"] is True
+    assert body_route["status"]["enabled"] is False
+    assert code_director == 200
+    assert body_director["ok"] is True
+    assert initial_status["routing_enabled"] is True
+    assert initial_status["active_director"] == "ProviderDirector"
+    assert status["routing_enabled"] is False
+    assert status["active_director"] == "OfflineDirector"
+    assert any(item.get("action") == "CONTROL_ROUTING_SET" for item in op_log)
+    assert any(item.get("action") == "CONTROL_DIRECTOR_SET" for item in op_log)
+
+
+def test_control_dry_run_endpoint_toggles_and_status_reflects(tmp_path: Path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_OPERATOR_KEY", "op-key-123")
+    monkeypatch.delenv("ROONIE_DRY_RUN", raising=False)
+    monkeypatch.delenv("ROONIE_READ_ONLY_MODE", raising=False)
+
+    headers = {"X-ROONIE-OP-KEY": "op-key-123", "X-ROONIE-ACTOR": "jen"}
+    server, thread = _start_server(runs_dir)
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        _, initial_status = _request_json(base, "/api/status")
+        assert initial_status["read_only_mode"] is False
+        code_on, body_on = _request_json(
+            base,
+            "/control/dry_run",
+            method="POST",
+            payload={"enabled": True},
+            headers=headers,
+        )
+        assert code_on == 200
+        assert body_on["ok"] is True
+        _, status_on = _request_json(base, "/api/status")
+        assert status_on["read_only_mode"] is True
+        code_off, body_off = _request_json(
+            base,
+            "/control/dry_run",
+            method="POST",
+            payload={"enabled": False},
+            headers=headers,
+        )
+        assert code_off == 200
+        assert body_off["ok"] is True
+        _, status_off = _request_json(base, "/api/status")
+        assert status_off["read_only_mode"] is False
+        _, op_log = _request_json(base, "/api/operator_log?limit=50")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    assert any(item.get("action") == "CONTROL_DRY_RUN_SET" for item in op_log)
+
+
+def test_routing_off_never_selects_grok_even_if_active_provider_is_grok(tmp_path: Path, monkeypatch) -> None:
+    from providers.registry import ProviderRegistry
+    from providers.router import route_generate
+
+    providers_path = tmp_path / "providers_config.json"
+    routing_path = tmp_path / "routing_config.json"
+    providers_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "active_provider": "grok",
+                "approved_providers": ["openai", "grok"],
+                "caps": {"daily_requests_max": 10, "daily_tokens_max": 0, "hard_stop_on_cap": True},
+                "usage": {"day": _today_ny(), "requests": 0, "tokens": 0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    routing_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "enabled": False,
+                "default_provider": "grok",
+                "music_route_provider": "grok",
+                "moderation_provider": "openai",
+                "manual_override": "force_grok",
+                "classification_rules": {"music_culture_keywords": ["track", "id"], "artist_title_pattern": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ROONIE_PROVIDERS_CONFIG_PATH", str(providers_path))
+    monkeypatch.setenv("ROONIE_ROUTING_CONFIG_PATH", str(routing_path))
+
+    reg = ProviderRegistry.from_dict(
+        {
+            "default_provider": "openai",
+            "providers": {
+                "openai": {"enabled": True},
+                "grok": {"enabled": True},
+                "anthropic": {"enabled": False},
+            },
+        }
+    )
+    context = {"use_provider_config": True, "message_text": "track id please"}
+    out = route_generate(registry=reg, routing_cfg={}, prompt="ping", context=context)
+    assert out == "[openai stub] ping"
+    assert context["routing_enabled"] is False
+    assert context["provider_selected"] == "openai"
+
+
 def test_provider_runtime_metrics_increment_for_requests_and_routing_hits(tmp_path: Path, monkeypatch) -> None:
-    from src.providers.registry import ProviderRegistry
-    from src.providers.router import (
+    from providers.registry import ProviderRegistry
+    from providers.router import (
         get_provider_runtime_metrics,
         reset_provider_runtime_metrics_for_tests,
         route_generate,
@@ -1337,21 +1522,26 @@ def test_provider_runtime_metrics_increment_for_requests_and_routing_hits(tmp_pa
         context={"use_provider_config": True, "message_text": "track id please"},
     )
     assert out1 == "[openai stub] hello"
-    assert out2 == "[openai stub] track"
+    assert out2 == "[grok stub] track"
 
     metrics = get_provider_runtime_metrics()
     openai = metrics["providers"]["openai"]
-    assert openai["requests"] == 2
-    assert openai["success"] == 2
+    grok = metrics["providers"]["grok"]
+    assert openai["requests"] == 1
+    assert openai["success"] == 1
     assert openai["failures"] == 0
     assert openai["avg_latency_ms"] >= 0
+    assert grok["requests"] == 1
+    assert grok["success"] == 1
+    assert grok["failures"] == 0
+    assert grok["avg_latency_ms"] >= 0
     assert metrics["routing"]["general_hits"] == 1
     assert metrics["routing"]["music_culture_hits"] == 1
 
 
 def test_provider_runtime_metrics_track_moderation_block(tmp_path: Path, monkeypatch) -> None:
-    from src.providers.registry import ProviderRegistry
-    from src.providers.router import (
+    from providers.registry import ProviderRegistry
+    from providers.router import (
         get_provider_runtime_metrics,
         reset_provider_runtime_metrics_for_tests,
         route_generate,
@@ -1784,7 +1974,7 @@ def test_operator_session_permissions_and_audit_identity(tmp_path: Path, monkeyp
     assert provider_caps_entry["username"] == "jen"
     assert provider_caps_entry["role"] == "operator"
     assert provider_caps_entry["auth_mode"] == "session"
-    arm_entry = next(item for item in op_log if item["action"] == "ARM")
+    arm_entry = next(item for item in op_log if item["action"] == "CONTROL_ARM_SET")
     assert arm_entry["auth_mode"] == "session"
 
 
@@ -2297,9 +2487,9 @@ def test_memory_db_initializes_tables(tmp_path: Path, monkeypatch) -> None:
     assert db_path.exists()
     with sqlite3.connect(str(db_path)) as conn:
         rows = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('cultural_notes','viewer_notes','memory_audit')"
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('cultural_notes','viewer_notes','memory_audit','memory_pending')"
         ).fetchall()
-    assert sorted([row[0] for row in rows]) == ["cultural_notes", "memory_audit", "viewer_notes"]
+    assert sorted([row[0] for row in rows]) == ["cultural_notes", "memory_audit", "memory_pending", "viewer_notes"]
 
 
 def test_memory_endpoints_require_auth(tmp_path: Path, monkeypatch) -> None:
@@ -2314,11 +2504,18 @@ def test_memory_endpoints_require_auth(tmp_path: Path, monkeypatch) -> None:
     try:
         base = f"http://127.0.0.1:{server.server_address[1]}"
         code_get, body_get = _request_json(base, "/api/memory/cultural?limit=10&offset=0")
+        code_get_pending, body_get_pending = _request_json(base, "/api/memory/pending?limit=10&offset=0")
         code_post, body_post = _request_json(
             base,
             "/api/memory/cultural",
             method="POST",
             payload={"note": "Room energy is dry.", "tags": ["energy"]},
+        )
+        code_review, body_review = _request_json(
+            base,
+            "/api/memory/pending/candidate-id/approve",
+            method="POST",
+            payload={},
         )
     finally:
         server.shutdown()
@@ -2327,8 +2524,104 @@ def test_memory_endpoints_require_auth(tmp_path: Path, monkeypatch) -> None:
 
     assert code_get == 403
     assert body_get["ok"] is False
+    assert code_get_pending == 403
+    assert body_get_pending["ok"] is False
     assert code_post == 403
     assert body_post["ok"] is False
+    assert code_review == 403
+    assert body_review["ok"] is False
+
+
+def test_memory_pending_ingest_approve_deny_and_learning(tmp_path: Path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.delenv("ROONIE_OPERATOR_KEY", raising=False)
+    monkeypatch.setenv("ROONIE_DASHBOARD_ART_PASSWORD", "art-pass-123")
+    monkeypatch.setenv("ROONIE_DASHBOARD_JEN_PASSWORD", "jen-pass-123")
+    db_path = tmp_path / "data" / "memory.sqlite"
+
+    server, thread = _start_server(runs_dir)
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        storage = getattr(server, "_roonie_storage")
+
+        ingest_one = storage.ingest_memory_candidates_from_run(
+            _sample_memory_intent_run(session_id="mem-s1", event_id="evt-m1", memory_object="progressive house")
+        )
+        assert ingest_one["seen"] == 1
+        assert ingest_one["inserted"] == 1
+
+        _, _, login_headers = _request_json_with_headers(
+            base,
+            "/api/auth/login",
+            method="POST",
+            payload={"username": "jen", "password": "jen-pass-123"},
+        )
+        cookie = _cookie_from_response_headers(login_headers)
+        h = {"Cookie": cookie}
+
+        code_pending, body_pending = _request_json(base, "/api/memory/pending?limit=10&offset=0", headers=h)
+        assert code_pending == 200
+        assert body_pending["total_count"] >= 1
+        candidate_id = body_pending["items"][0]["id"]
+
+        code_approve, body_approve = _request_json(
+            base,
+            f"/api/memory/pending/{candidate_id}/approve",
+            method="POST",
+            payload={},
+            headers=h,
+        )
+        assert code_approve == 200
+        assert body_approve["ok"] is True
+
+        code_viewers, body_viewers = _request_json(
+            base,
+            "/api/memory/viewers?viewer_handle=ruleofrune&limit=20&offset=0&active_only=1",
+            headers=h,
+        )
+        assert code_viewers == 200
+        assert any("progressive house" in str(item.get("note", "")).lower() for item in body_viewers["items"])
+
+        ingest_after_approve = storage.ingest_memory_candidates_from_run(
+            _sample_memory_intent_run(session_id="mem-s2", event_id="evt-m2", memory_object="progressive house")
+        )
+        assert ingest_after_approve["inserted"] == 0
+        assert ingest_after_approve["skipped_learned"] == 1
+
+        ingest_two = storage.ingest_memory_candidates_from_run(
+            _sample_memory_intent_run(session_id="mem-s3", event_id="evt-m3", memory_object="hard techno")
+        )
+        assert ingest_two["inserted"] == 1
+        code_pending2, body_pending2 = _request_json(base, "/api/memory/pending?limit=10&offset=0", headers=h)
+        assert code_pending2 == 200
+        deny_id = body_pending2["items"][0]["id"]
+
+        code_deny, body_deny = _request_json(
+            base,
+            f"/api/memory/pending/{deny_id}/deny",
+            method="POST",
+            payload={"reason": "too generic"},
+            headers=h,
+        )
+        assert code_deny == 200
+        assert body_deny["ok"] is True
+
+        ingest_after_deny = storage.ingest_memory_candidates_from_run(
+            _sample_memory_intent_run(session_id="mem-s4", event_id="evt-m4", memory_object="hard techno")
+        )
+        assert ingest_after_deny["inserted"] == 0
+        assert ingest_after_deny["skipped_learned"] == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    audit_rows = _read_memory_audit_rows(db_path)
+    pending_rows = [row for row in audit_rows if row["table_name"] == "memory_pending"]
+    assert any(row["action"] == "CREATE" and row["username"] == "system" for row in pending_rows)
+    assert any(row["action"] == "UPDATE" and row["username"] == "jen" for row in pending_rows)
 
 
 def test_memory_crud_with_operator_session_and_audit(tmp_path: Path, monkeypatch) -> None:
@@ -2649,7 +2942,7 @@ def test_senses_enable_attempt_is_forbidden(tmp_path: Path, monkeypatch) -> None
 
 
 def test_senses_allowed_guard_always_false() -> None:
-    from src.roonie.live_director import senses_allowed
+    from roonie.live_director import senses_allowed
 
     assert senses_allowed({}) is False
     assert senses_allowed({"mode": "live"}) is False

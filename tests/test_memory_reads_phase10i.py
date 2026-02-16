@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -10,7 +10,7 @@ def _fx(name: str) -> dict:
 
 
 def test_no_explicit_context_does_not_use_memory():
-    from src.memory.read_policy import apply_memory_read_policy
+    from memory.read_policy import apply_memory_read_policy
 
     store = _fx("memory_store.json")
     case = _fx("case_no_explicit_context.json")
@@ -25,7 +25,7 @@ def test_no_explicit_context_does_not_use_memory():
 
 
 def test_explicit_likes_includes_likes_suppresses_dislikes():
-    from src.memory.read_policy import apply_memory_read_policy
+    from memory.read_policy import apply_memory_read_policy
 
     store = _fx("memory_store.json")
     case = _fx("case_explicit_likes.json")
@@ -40,7 +40,7 @@ def test_explicit_likes_includes_likes_suppresses_dislikes():
 
 
 def test_explicit_dislikes_are_still_suppressed():
-    from src.memory.read_policy import apply_memory_read_policy
+    from memory.read_policy import apply_memory_read_policy
 
     store = _fx("memory_store.json")
     case = _fx("case_explicit_dislikes_suppressed.json")
@@ -55,7 +55,7 @@ def test_explicit_dislikes_are_still_suppressed():
 
 
 def test_explicit_fact_included():
-    from src.memory.read_policy import apply_memory_read_policy
+    from memory.read_policy import apply_memory_read_policy
 
     store = _fx("memory_store.json")
     case = _fx("case_explicit_fact.json")

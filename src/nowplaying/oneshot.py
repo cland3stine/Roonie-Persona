@@ -1,10 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional
 
-from src.metadata.discogs import DiscogsEnricher
-from src.nowplaying.bridge import build_chat_lines_from_nowplaying_txt
+from metadata.discogs import DiscogsEnricher
+from nowplaying.bridge import build_chat_lines_from_nowplaying_txt
 
 
 def _read_nowplaying_txt(path: Path) -> str:

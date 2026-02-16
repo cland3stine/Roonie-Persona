@@ -1,8 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from typing import Tuple, Optional
 
-from src.metadata.discogs import DiscogsEnricher
+from metadata.discogs import DiscogsEnricher
 
 
 def _parse_track_id(track_id: str) -> Optional[tuple[str, str]]:

@@ -1,8 +1,8 @@
-from pathlib import Path
+﻿from pathlib import Path
 
 def test_discogs_build_search_url_includes_token(tmp_path, monkeypatch):
-    from src.roonie.config import load_config
-    from src.metadata.discogs_client import build_search_url
+    from roonie.config import load_config
+    from metadata.discogs_client import build_search_url
 
     # Provide token via secrets.env
     secrets = tmp_path / "config" / "secrets.env"
@@ -23,7 +23,7 @@ def test_discogs_build_search_url_includes_token(tmp_path, monkeypatch):
 
 
 def test_discogs_build_search_url_without_token(tmp_path):
-    from src.metadata.discogs_client import build_search_url
+    from metadata.discogs_client import build_search_url
 
     url = build_search_url(query="Artist A Track One", token=None, per_page=5, page=1)
     assert "token=" not in url
@@ -32,10 +32,10 @@ def test_discogs_build_search_url_without_token(tmp_path):
 
 def test_discogs_enricher_uses_real_discogs_search_url_shape(tmp_path):
     # Still fixture-backed transport: we only verify that the enricher routes through DiscogsClient
-    from src.roonie.config import load_config
-    from src.roonie.network import NetworkClient
-    from src.roonie.network.transports import FakeTransport
-    from src.metadata.discogs_client import DiscogsClient
+    from roonie.config import load_config
+    from roonie.network import NetworkClient
+    from roonie.network.transports import FakeTransport
+    from metadata.discogs_client import DiscogsClient
 
     cfg_dir = tmp_path / "config"
     cfg_dir.mkdir(parents=True, exist_ok=True)

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -10,7 +10,7 @@ def _load(name: str) -> dict:
 
 
 def test_presence_budget_exhausted_denies():
-    from src.presence.policy import decide_presence
+    from presence.policy import decide_presence
 
     cfg = _load("case_budget_exhausted.json")
     d = decide_presence(cfg)
@@ -19,7 +19,7 @@ def test_presence_budget_exhausted_denies():
 
 
 def test_presence_cooldown_active_denies():
-    from src.presence.policy import decide_presence
+    from presence.policy import decide_presence
 
     cfg = _load("case_cooldown_active.json")
     d = decide_presence(cfg)
@@ -28,7 +28,7 @@ def test_presence_cooldown_active_denies():
 
 
 def test_presence_allowed_ambient_allows():
-    from src.presence.policy import decide_presence
+    from presence.policy import decide_presence
 
     cfg = _load("case_allowed_ambient.json")
     d = decide_presence(cfg)
@@ -37,7 +37,7 @@ def test_presence_allowed_ambient_allows():
 
 
 def test_named_budget_exhausted_denies():
-    from src.presence.policy import decide_presence
+    from presence.policy import decide_presence
 
     cfg = _load("case_named_budget_exhausted.json")
     d = decide_presence(cfg)
@@ -46,7 +46,7 @@ def test_named_budget_exhausted_denies():
 
 
 def test_named_allowed_allows():
-    from src.presence.policy import decide_presence
+    from presence.policy import decide_presence
 
     cfg = _load("case_named_allowed.json")
     d = decide_presence(cfg)

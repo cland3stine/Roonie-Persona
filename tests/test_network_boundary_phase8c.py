@@ -1,12 +1,12 @@
-import json
+﻿import json
 from pathlib import Path
 import importlib
 
 
 def test_network_disabled_blocks_requests(tmp_path):
-    from src.roonie.config import load_config
-    from src.roonie.network import NetworkClient, NetworkDisabledError
-    from src.roonie.network.transports import FakeTransport
+    from roonie.config import load_config
+    from roonie.network import NetworkClient, NetworkDisabledError
+    from roonie.network.transports import FakeTransport
 
     cfg = load_config(base_dir=tmp_path)  # network_enabled default False
     transport = FakeTransport(fixtures_dir=Path("tests/fixtures/v1_8_phase8c_network"))
@@ -20,9 +20,9 @@ def test_network_disabled_blocks_requests(tmp_path):
 
 
 def test_network_enabled_allows_fake_transport(tmp_path):
-    from src.roonie.config import load_config
-    from src.roonie.network import NetworkClient
-    from src.roonie.network.transports import FakeTransport
+    from roonie.config import load_config
+    from roonie.network import NetworkClient
+    from roonie.network.transports import FakeTransport
 
     # Enable via toml
     cfg_dir = tmp_path / "config"

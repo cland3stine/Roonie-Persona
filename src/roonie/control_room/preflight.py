@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-from src.providers.router import get_provider_runtime_status, get_routing_runtime_status
+from providers.router import get_provider_runtime_status, get_routing_runtime_status
 
 
 def _utc_now_iso() -> str:
@@ -255,6 +255,12 @@ def run_preflight(paths: RuntimePaths) -> Dict[str, Any]:
         primary = ""
         if isinstance(twitch_cfg, dict):
             primary = str(twitch_cfg.get("primary_channel", "")).strip().lstrip("#")
+        env_primary = str(os.getenv("TWITCH_CHANNEL") or os.getenv("PRIMARY_CHANNEL") or "").strip().lstrip("#")
+        if not primary and env_primary:
+            primary = env_primary.lower()
+            payload = dict(twitch_cfg) if isinstance(twitch_cfg, dict) else _default_twitch_config()
+            payload["primary_channel"] = primary
+            _write_json_atomic(twitch_config_path, payload)
         add("twitch_config", True, f"path={twitch_config_path} primary_channel={primary or '<unset>'}")
     except Exception as exc:
         add("twitch_config", False, f"seed/read failed: {exc}", blocking=True)

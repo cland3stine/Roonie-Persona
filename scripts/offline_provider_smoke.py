@@ -9,11 +9,11 @@ from typing import Any, Dict
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.providers.anthropic_real import AnthropicProvider
-from src.providers.grok_real import GrokProvider
-from src.providers.openai_real import OpenAIProvider
-from src.providers.shadow_log import ShadowLogConfig, log_shadow
-from src.roonie.network.transports_urllib import UrllibJsonTransport
+from providers.anthropic_real import AnthropicProvider
+from providers.grok_real import GrokProvider
+from providers.openai_real import OpenAIProvider
+from providers.shadow_log import ShadowLogConfig, log_shadow
+from roonie.network.transports_urllib import UrllibJsonTransport
 
 
 def _load_secrets_env(path: Path) -> None:

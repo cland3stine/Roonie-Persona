@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
+import sys
 import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,6 +61,27 @@ def _apply_safe_start_defaults(storage: Any) -> None:
         storage.set_armed(False)
 
 
+def _port_is_in_use(host: str, port: int) -> bool:
+    bind_host = str(host or "").strip() or "0.0.0.0"
+    if bind_host in {"localhost", "127.0.0.1"}:
+        bind_host = "127.0.0.1"
+    if bind_host == "::":
+        bind_host = "0.0.0.0"
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        sock.bind((bind_host, int(port)))
+        return False
+    except OSError:
+        return True
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _arg_parser().parse_args(argv)
     repo_root = Path.cwd()
@@ -84,6 +107,19 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     _append_log(paths.control_log_path, "PRE-FLIGHT: passed")
+    if _port_is_in_use(args.host, int(args.port)):
+        message = (
+            f"PORT_IN_USE: {args.host}:{int(args.port)} is already listening. "
+            "Refusing to start a second control-room instance."
+        )
+        _append_log(paths.control_log_path, message)
+        print(message)
+        return 3
+
+    _append_log(
+        paths.control_log_path,
+        f"RUNTIME: pid={os.getpid()} python={sys.executable}",
+    )
     server = create_server(
         host=args.host,
         port=int(args.port),
@@ -93,6 +129,17 @@ def main(argv: list[str] | None = None) -> int:
     storage = getattr(server, "_roonie_storage", None)
     _apply_safe_start_defaults(storage)
     _append_log(paths.control_log_path, "SAFE-START: forced disarmed/output-disabled defaults")
+    if storage is not None and hasattr(storage, "get_status"):
+        try:
+            status = storage.get_status().to_dict()
+            active_director = str(status.get("active_director", "ProviderDirector"))
+            routing_enabled = bool(status.get("routing_enabled", True))
+            _append_log(
+                paths.control_log_path,
+                f"DIRECTOR: active={active_director} routing_enabled={routing_enabled}",
+            )
+        except Exception:
+            pass
     if storage is not None and hasattr(storage, "set_readiness_state"):
         readiness = dict(preflight)
         items = list(readiness.get("items", []))
@@ -115,8 +162,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Logs dir: {paths.logs_dir}")
 
     live_bridge = None
+    eventsub_bridge = None
     if bool(args.start_live_chat) and storage is not None:
         from roonie.control_room.live_chat import LiveChatBridge
+        from roonie.control_room.eventsub_bridge import EventSubBridge
 
         live_bridge = LiveChatBridge(
             storage=storage,
@@ -126,6 +175,14 @@ def main(argv: list[str] | None = None) -> int:
         live_bridge.start()
         _append_log(paths.control_log_path, f"LIVE-CHAT: started account={args.live_account}")
         print(f"Live chat bridge started (account={args.live_account}).")
+        eventsub_bridge = EventSubBridge(
+            storage=storage,
+            live_bridge=live_bridge,
+            logger=lambda line: _append_log(paths.control_log_path, line),
+        )
+        eventsub_bridge.start()
+        _append_log(paths.control_log_path, "EVENTSUB: started (websocket transport)")
+        print("EventSub bridge started.")
     elif bool(args.start_live_chat):
         _append_log(paths.control_log_path, "LIVE-CHAT: not started (storage unavailable)")
         print("Live chat bridge not started: storage unavailable.")
@@ -141,6 +198,9 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        if eventsub_bridge is not None:
+            eventsub_bridge.stop()
+            eventsub_bridge.join(timeout=2.0)
         if live_bridge is not None:
             live_bridge.stop()
             live_bridge.join(timeout=2.0)

@@ -1,9 +1,9 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from src.providers.base import Provider
-from src.roonie.network.types import Transport
+from providers.base import Provider
+from roonie.network.types import Transport
 
 
 class OpenAIProvider(Provider):

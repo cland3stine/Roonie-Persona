@@ -1,4 +1,4 @@
-import json
+﻿import json
 import sqlite3
 import hashlib
 from pathlib import Path
@@ -39,8 +39,8 @@ def tmp_db(tmp_path: Path) -> Path:
 
 def test_persist_writes_only_memory_write_intent(tmp_db):
     # Import here so tests fail until Phase 7 code exists
-    from src.memory.persistence import persist_memory_write_intents
-    from src.memory.stores.sqlite_store import SqliteMemoryWriteStore
+    from memory.persistence import persist_memory_write_intents
+    from memory.stores.sqlite_store import SqliteMemoryWriteStore
 
     records = _load_fixture("intents_basic.json")
 
@@ -73,8 +73,8 @@ def test_persist_writes_only_memory_write_intent(tmp_db):
 
 
 def test_persist_is_idempotent_on_replay(tmp_db):
-    from src.memory.persistence import persist_memory_write_intents
-    from src.memory.stores.sqlite_store import SqliteMemoryWriteStore
+    from memory.persistence import persist_memory_write_intents
+    from memory.stores.sqlite_store import SqliteMemoryWriteStore
 
     records = _load_fixture("intents_basic.json")
 
@@ -91,8 +91,8 @@ def test_persist_is_idempotent_on_replay(tmp_db):
 
 
 def test_overwrite_updates_current_item_and_keeps_event_log(tmp_db):
-    from src.memory.persistence import persist_memory_write_intents
-    from src.memory.stores.sqlite_store import SqliteMemoryWriteStore
+    from memory.persistence import persist_memory_write_intents
+    from memory.stores.sqlite_store import SqliteMemoryWriteStore
 
     records = _load_fixture("intents_overwrite.json")
     store = SqliteMemoryWriteStore(tmp_db)

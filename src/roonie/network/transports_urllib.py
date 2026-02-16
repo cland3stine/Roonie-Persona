@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from src.roonie.network.types import HttpResponse
+from roonie.network.types import HttpResponse
 
 
 @dataclass
