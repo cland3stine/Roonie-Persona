@@ -1,0 +1,23 @@
+### Session Entry
+- Date/Time (UTC, ISO 8601): {{UTC}}
+- Operator: Art + Codex
+- Goal: Fix context carry-forward so a prior music topic (e.g., Maze 28) does not bleed into unrelated banter.
+- Summary Logged (UTC, ISO 8601): {{UTC}}
+- Commits (local):
+  - `d239397 P19.4: Gate topic anchors to music/deictic followups`
+- Root cause:
+  - ProviderDirector injected `topic_anchor` and computed/injected library grounding on every addressed turn, including generic banter, which biased provider output to keep referencing the last music topic.
+- Fix:
+  - Topic anchors and library grounding are only injected when the message is music-intent or an explicit deictic follow-up (e.g., "that one", "when?") within TTL.
+  - Generic banter no longer receives the continuity hint or library grounding blocks.
+- Files changed:
+  - `src/roonie/provider_director.py`
+  - `tests/test_context_tone_tuning.py`
+- Tests run + result:
+  - `pytest -q` -> pass (`235 passed`)
+- Issues resolved:
+  - Prevented "stuck topic" behavior where Maze 28 kept appearing in unrelated conversation.
+- Issues introduced/regressions:
+  - None observed in unit tests.
+- Follow-up next steps:
+  1. If topic bleed still appears via raw context turns, consider context-turn filtering for non-music banter without weakening true multi-turn conversations.
