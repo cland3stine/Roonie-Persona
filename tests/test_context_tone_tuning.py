@@ -67,3 +67,32 @@ def test_provider_director_injects_topic_anchor_for_continuity(monkeypatch) -> N
     assert "Active topic from recent chat: Maze 28" in prompt
     assert "Do not invent new artist or track names when uncertain" in prompt
 
+
+def test_topic_anchor_does_not_bleed_into_unrelated_banter(monkeypatch) -> None:
+    captured: Dict[str, Any] = {}
+
+    def _stub_route_generate(**kwargs):
+        captured["prompt"] = kwargs.get("prompt")
+        kwargs["context"]["provider_selected"] = "openai"
+        kwargs["context"]["moderation_result"] = "allow"
+        return "ok"
+
+    monkeypatch.setattr("roonie.provider_director.route_generate", _stub_route_generate)
+
+    director = ProviderDirector()
+    env = Env(offline=False)
+
+    director.evaluate(
+        _live_event("evt-1", "@RoonieTheCat have you heard the latest Maze 28 release?"),
+        env,
+    )
+    director.evaluate(
+        _live_event("evt-2", "@RoonieTheCat oh same old shit... working..."),
+        env,
+    )
+
+    prompt = str(captured.get("prompt") or "")
+    assert "Conversation continuity hint:" not in prompt
+    assert "Active topic from recent chat: Maze 28" not in prompt
+    assert "Active topic anchor: Maze 28" not in prompt
+    assert "Library grounding (local)" not in prompt

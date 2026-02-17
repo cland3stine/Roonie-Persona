@@ -19,6 +19,7 @@ from roonie.behavior_spec import (
 )
 from providers.registry import ProviderRegistry
 from providers.router import (
+    classify_request,
     get_provider_runtime_status,
     get_routing_runtime_status,
     route_generate,
@@ -48,6 +49,10 @@ _TOPIC_ANCHOR_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9]*(?:\s+[A-Za-z0-9]+){0,2}\
 _TOPIC_ANCHOR_TTL_TURNS = 8
 _MUSIC_FACT_RE = re.compile(r"\b(label|release|released|out on|came out|drop|dropped|release date|when)\b", re.IGNORECASE)
 _TOKEN_RE = re.compile(r"[a-z0-9]{3,}", re.IGNORECASE)
+_DEICTIC_FOLLOWUP_RE = re.compile(
+    r"\b(it|that|this|the latest one|latest one|that one|which one|which track|remind me|what was it)\b",
+    re.IGNORECASE,
+)
 
 
 def _repo_root() -> Path:
@@ -138,6 +143,16 @@ def _is_music_fact_question(message: str, *, topic_anchor: str = "") -> bool:
     if topic_anchor and text.strip().lower() in {"when", "when?"}:
         return True
     return False
+
+
+def _is_deictic_followup(message: str) -> bool:
+    text = str(message or "").strip()
+    if not text:
+        return False
+    normalized = " ".join(text.lower().split())
+    if normalized in {"when", "when?", "the latest one", "latest one", "that one", "which one", "which track"}:
+        return True
+    return bool(_DEICTIC_FOLLOWUP_RE.search(text))
 
 
 def _load_persona_policy_text() -> str:
@@ -476,18 +491,36 @@ class ProviderDirector:
         if maybe_anchor:
             self._topic_anchor = maybe_anchor
             self._topic_anchor_turn = self._turn_counter
-        topic_anchor = ""
+        topic_anchor_candidate = ""
         if self._topic_anchor:
             age = self._turn_counter - self._topic_anchor_turn
             if age <= _TOPIC_ANCHOR_TTL_TURNS:
-                topic_anchor = self._topic_anchor
+                topic_anchor_candidate = self._topic_anchor
             else:
                 self._topic_anchor = ""
                 self._topic_anchor_turn = 0
 
-        grounding = self._library_grounding(message=event.message, topic_anchor=topic_anchor)
-        library_block = str(grounding.get("block", "")).strip()
-        library_confidence = str(grounding.get("confidence", "NONE")).strip().upper() or "NONE"
+        meta_category = str(event.metadata.get("category", "")).strip()
+        utility_source = str(event.metadata.get("utility_source", "")).strip()
+        routing_class_hint = classify_request(event.message, meta_category or category, utility_source)
+        musicish = (
+            (routing_class_hint == "music_culture")
+            or (category == CATEGORY_TRACK_ID)
+            or _is_music_fact_question(event.message, topic_anchor=topic_anchor_candidate)
+        )
+        deictic_followup = bool(topic_anchor_candidate) and _is_deictic_followup(event.message)
+
+        # Prevent "stuck topic" bleed: only use a topic anchor for music-ish messages
+        # or explicit deictic follow-ups ("that one", "when?") within TTL.
+        topic_anchor = topic_anchor_candidate if (musicish or deictic_followup) else ""
+
+        library_block = ""
+        library_confidence = "NONE"
+        if musicish or deictic_followup:
+            grounding = self._library_grounding(message=event.message, topic_anchor=topic_anchor)
+            library_block = str(grounding.get("block", "")).strip()
+            library_confidence = str(grounding.get("confidence", "NONE")).strip().upper() or "NONE"
+
         music_fact_question = _is_music_fact_question(event.message, topic_anchor=topic_anchor)
 
         stored_user_turn = self.context_buffer.add_turn(
@@ -531,6 +564,7 @@ class ProviderDirector:
                         "approved_emotes": approved_emotes,
                         "topic_anchor": topic_anchor,
                         "library_confidence": library_confidence,
+                        "routing_class_hint": routing_class_hint,
                     },
                     "memory": {
                         "keys_used": memory_result.keys_used,
@@ -574,6 +608,7 @@ class ProviderDirector:
                     "now_playing_available": now_playing_available,
                     "topic_anchor": topic_anchor,
                     "library_confidence": library_confidence,
+                    "routing_class_hint": routing_class_hint,
                 },
                 "memory": {
                     "keys_used": memory_result.keys_used,
@@ -620,6 +655,7 @@ class ProviderDirector:
                     "now_playing_available": now_playing_available,
                     "topic_anchor": topic_anchor,
                     "library_confidence": library_confidence,
+                    "routing_class_hint": routing_class_hint,
                 },
                 "memory": {
                     "keys_used": memory_result.keys_used,
@@ -738,6 +774,7 @@ class ProviderDirector:
                 "now_playing_available": now_playing_available,
                 "topic_anchor": topic_anchor,
                 "library_confidence": library_confidence,
+                "routing_class_hint": routing_class_hint,
             },
             "memory": {
                 "keys_used": memory_result.keys_used,
