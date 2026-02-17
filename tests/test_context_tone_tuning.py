@@ -96,3 +96,33 @@ def test_topic_anchor_does_not_bleed_into_unrelated_banter(monkeypatch) -> None:
     assert "Active topic from recent chat: Maze 28" not in prompt
     assert "Active topic anchor: Maze 28" not in prompt
     assert "Library grounding (local)" not in prompt
+
+
+def test_topic_anchor_can_apply_to_general_topics_on_deictic_followup(monkeypatch) -> None:
+    captured: Dict[str, Any] = {}
+
+    def _stub_route_generate(**kwargs):
+        captured["prompt"] = kwargs.get("prompt")
+        kwargs["context"]["provider_selected"] = "openai"
+        kwargs["context"]["moderation_result"] = "allow"
+        return "ok"
+
+    monkeypatch.setattr("roonie.provider_director.route_generate", _stub_route_generate)
+
+    director = ProviderDirector()
+    env = Env(offline=False)
+
+    director.evaluate(
+        _live_event("evt-1", "@RoonieTheCat have you seen Maze runner lately?"),
+        env,
+    )
+    director.evaluate(
+        _live_event("evt-2", "@RoonieTheCat when did it come out?"),
+        env,
+    )
+
+    prompt = str(captured.get("prompt") or "")
+    assert "Conversation continuity hint:" in prompt
+    assert "Active topic from recent chat:" in prompt
+    assert "Maze" in prompt
+    assert "Library grounding (local)" not in prompt

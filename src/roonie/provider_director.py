@@ -46,6 +46,7 @@ _DIRECT_VERBS = (
 )
 
 _TOPIC_ANCHOR_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9]*(?:\s+[A-Za-z0-9]+){0,2}\s+\d{1,3})\b")
+_TOPIC_ANCHOR_PHRASE_RE = re.compile(r"\b([A-Z][A-Za-z0-9]*(?:\s+[A-Za-z0-9][A-Za-z0-9']*){1,5})\b")
 _TOPIC_ANCHOR_TTL_TURNS = 8
 _MUSIC_FACT_RE = re.compile(r"\b(label|release|released|out on|came out|drop|dropped|release date|when)\b", re.IGNORECASE)
 _TOKEN_RE = re.compile(r"[a-z0-9]{3,}", re.IGNORECASE)
@@ -53,6 +54,26 @@ _DEICTIC_FOLLOWUP_RE = re.compile(
     r"\b(it|that|this|the latest one|latest one|that one|which one|which track|remind me|what was it)\b",
     re.IGNORECASE,
 )
+_ANCHOR_STOPWORDS = {
+    "the",
+    "a",
+    "an",
+    "this",
+    "that",
+    "latest",
+    "one",
+    "hey",
+    "hi",
+    "hello",
+    "thanks",
+    "thank",
+    "ok",
+    "okay",
+    "hope",
+    "today",
+    "tonight",
+    "lately",
+}
 
 
 def _repo_root() -> Path:
@@ -155,6 +176,33 @@ def _is_deictic_followup(message: str) -> bool:
     return bool(_DEICTIC_FOLLOWUP_RE.search(text))
 
 
+def _topic_overlap(message: str, anchor: str) -> bool:
+    msg_norm = _normalize_text(message)
+    anc_norm = _normalize_text(anchor)
+    if not msg_norm or not anc_norm:
+        return False
+    msg_tokens = {
+        t
+        for t in _TOKEN_RE.findall(msg_norm)
+        if t and (t not in _ANCHOR_STOPWORDS) and len(t) >= 3
+    }
+    anchor_tokens = [
+        t
+        for t in _TOKEN_RE.findall(anc_norm)
+        if t and (t not in _ANCHOR_STOPWORDS) and len(t) >= 3
+    ]
+    if not msg_tokens or not anchor_tokens:
+        return False
+    uniq_anchor = set(anchor_tokens)
+    hits = sum(1 for t in uniq_anchor if t in msg_tokens)
+    if hits >= 2:
+        return True
+    # Small anchors like "Maze 28" only have one meaningful token ("maze").
+    if hits >= 1 and len(uniq_anchor) <= 2:
+        return True
+    return False
+
+
 def _load_persona_policy_text() -> str:
     path = _persona_policy_path()
     try:
@@ -201,6 +249,7 @@ class ProviderDirector:
     _turn_counter: int = field(default=0, init=False, repr=False)
     _topic_anchor: str = field(default="", init=False, repr=False)
     _topic_anchor_turn: int = field(default=0, init=False, repr=False)
+    _topic_anchor_kind: str = field(default="", init=False, repr=False)  # "music"|"general"
     _library_cache_mtime_ns: int = field(default=0, init=False, repr=False)
     _library_cache_tracks: List[Dict[str, Any]] = field(default_factory=list, init=False, repr=False)
 
@@ -353,16 +402,42 @@ class ProviderDirector:
         text = str(message or "").strip()
         if not text:
             return ""
+        # Strip leading @mentions (viewer or roonie) to avoid anchoring on handles.
         text = re.sub(r"^@\w+\s*", "", text).strip()
+
+        # Prefer numeric-ish anchors (e.g., "Maze 28") because they are distinctive.
         m = _TOPIC_ANCHOR_RE.search(text)
-        if not m:
+        if m:
+            anchor = " ".join(str(m.group(1)).split())
+            tokens = anchor.split()
+            while tokens and tokens[0].lower() in _ANCHOR_STOPWORDS:
+                tokens.pop(0)
+            while tokens and tokens[-1].lower().strip(".,!?") in _ANCHOR_STOPWORDS:
+                tokens.pop()
+            normalized = " ".join(tokens).strip()
+            return normalized or anchor
+
+        # General-purpose anchor: a capitalized phrase with a few trailing tokens.
+        # This is intentionally conservative and should only be *used* when the
+        # current message indicates continuity (deictic follow-up or token overlap).
+        m2 = _TOPIC_ANCHOR_PHRASE_RE.search(text)
+        if not m2:
             return ""
-        anchor = " ".join(str(m.group(1)).split())
-        tokens = anchor.split()
-        while tokens and tokens[0].lower() in {"the", "latest", "this", "that", "a", "an"}:
-            tokens.pop(0)
-        normalized = " ".join(tokens).strip()
-        return normalized or anchor
+        anchor2 = " ".join(str(m2.group(1)).split()).strip().strip(".,!?")
+        if not anchor2:
+            return ""
+        tokens2 = [t.strip(".,!?") for t in anchor2.split() if t.strip(".,!?")]
+        while tokens2 and tokens2[0].lower() in _ANCHOR_STOPWORDS:
+            tokens2.pop(0)
+        while tokens2 and tokens2[-1].lower() in _ANCHOR_STOPWORDS:
+            tokens2.pop()
+        cleaned = " ".join(tokens2).strip()
+        if not cleaned:
+            return ""
+        lowered = cleaned.lower()
+        if lowered in {"roonie", "rooniethecat"}:
+            return ""
+        return cleaned
 
     @staticmethod
     def _sanitize_stub_output(text: str, *, category: str, user_message: str = "") -> str:
@@ -474,6 +549,7 @@ class ProviderDirector:
             self._turn_counter = 0
             self._topic_anchor = ""
             self._topic_anchor_turn = 0
+            self._topic_anchor_kind = ""
 
         metadata = event.metadata if isinstance(event.metadata, dict) else {}
         addressed = self._is_direct_address(event)
@@ -487,10 +563,22 @@ class ProviderDirector:
         context_active = context_turns_used > 0
 
         self._turn_counter += 1
+        meta_category = str(event.metadata.get("category", "")).strip()
+        utility_source = str(event.metadata.get("utility_source", "")).strip()
+        routing_class_hint = classify_request(event.message, meta_category or category, utility_source)
+
         maybe_anchor = self._extract_topic_anchor(event.message)
         if maybe_anchor:
             self._topic_anchor = maybe_anchor
             self._topic_anchor_turn = self._turn_counter
+            # Anchor kind is determined at the time it is set.
+            # This is used to avoid running music-only grounding for general topics.
+            anchor_musicish = (
+                (routing_class_hint == "music_culture")
+                or (category == CATEGORY_TRACK_ID)
+                or bool(_MUSIC_FACT_RE.search(str(event.message or "")))
+            )
+            self._topic_anchor_kind = "music" if anchor_musicish else "general"
         topic_anchor_candidate = ""
         if self._topic_anchor:
             age = self._turn_counter - self._topic_anchor_turn
@@ -499,29 +587,32 @@ class ProviderDirector:
             else:
                 self._topic_anchor = ""
                 self._topic_anchor_turn = 0
+                self._topic_anchor_kind = ""
 
-        meta_category = str(event.metadata.get("category", "")).strip()
-        utility_source = str(event.metadata.get("utility_source", "")).strip()
-        routing_class_hint = classify_request(event.message, meta_category or category, utility_source)
-        musicish = (
-            (routing_class_hint == "music_culture")
-            or (category == CATEGORY_TRACK_ID)
-            or _is_music_fact_question(event.message, topic_anchor=topic_anchor_candidate)
+        # Only treat "label/release/when" as music-fact intent if we're already in a music thread
+        # (router says music_culture, track-id category, or the anchor was set from a music turn).
+        music_thread = (routing_class_hint == "music_culture") or (category == CATEGORY_TRACK_ID) or (
+            self._topic_anchor_kind == "music"
+        )
+        music_fact_question_candidate = _is_music_fact_question(event.message, topic_anchor=topic_anchor_candidate)
+        musicish = (routing_class_hint == "music_culture") or (category == CATEGORY_TRACK_ID) or (
+            music_thread and music_fact_question_candidate
         )
         deictic_followup = bool(topic_anchor_candidate) and _is_deictic_followup(event.message)
+        overlap_followup = bool(topic_anchor_candidate) and _topic_overlap(event.message, topic_anchor_candidate)
 
         # Prevent "stuck topic" bleed: only use a topic anchor for music-ish messages
-        # or explicit deictic follow-ups ("that one", "when?") within TTL.
-        topic_anchor = topic_anchor_candidate if (musicish or deictic_followup) else ""
+        # or follow-ups that clearly indicate continuity ("that one", "when?", token overlap) within TTL.
+        topic_anchor = topic_anchor_candidate if (musicish or deictic_followup or overlap_followup) else ""
 
         library_block = ""
         library_confidence = "NONE"
-        if musicish or deictic_followup:
+        if musicish or (deictic_followup and self._topic_anchor_kind == "music"):
             grounding = self._library_grounding(message=event.message, topic_anchor=topic_anchor)
             library_block = str(grounding.get("block", "")).strip()
             library_confidence = str(grounding.get("confidence", "NONE")).strip().upper() or "NONE"
 
-        music_fact_question = _is_music_fact_question(event.message, topic_anchor=topic_anchor)
+        music_fact_question = bool(music_thread and _is_music_fact_question(event.message, topic_anchor=topic_anchor))
 
         stored_user_turn = self.context_buffer.add_turn(
             speaker="user",
@@ -563,6 +654,7 @@ class ProviderDirector:
                         "category": category,
                         "approved_emotes": approved_emotes,
                         "topic_anchor": topic_anchor,
+                        "topic_anchor_kind": self._topic_anchor_kind or None,
                         "library_confidence": library_confidence,
                         "routing_class_hint": routing_class_hint,
                     },
@@ -607,6 +699,7 @@ class ProviderDirector:
                     "approved_emotes": approved_emotes,
                     "now_playing_available": now_playing_available,
                     "topic_anchor": topic_anchor,
+                    "topic_anchor_kind": self._topic_anchor_kind or None,
                     "library_confidence": library_confidence,
                     "routing_class_hint": routing_class_hint,
                 },
@@ -654,6 +747,7 @@ class ProviderDirector:
                     "approved_emotes": approved_emotes,
                     "now_playing_available": now_playing_available,
                     "topic_anchor": topic_anchor,
+                    "topic_anchor_kind": self._topic_anchor_kind or None,
                     "library_confidence": library_confidence,
                     "routing_class_hint": routing_class_hint,
                 },
@@ -773,6 +867,7 @@ class ProviderDirector:
                 "approved_emotes": approved_emotes,
                 "now_playing_available": now_playing_available,
                 "topic_anchor": topic_anchor,
+                "topic_anchor_kind": self._topic_anchor_kind or None,
                 "library_confidence": library_confidence,
                 "routing_class_hint": routing_class_hint,
             },
