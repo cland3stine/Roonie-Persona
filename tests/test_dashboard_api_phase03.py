@@ -578,7 +578,8 @@ def test_status_blocked_by_precedence_order(tmp_path: Path, monkeypatch) -> None
         server.server_close()
         thread.join(timeout=2.0)
 
-    assert status["blocked_by"] == ["SILENCE_TTL"]
+    assert "KILL_SWITCH" in status["blocked_by"]
+    assert "SILENCE_TTL" in status["blocked_by"]
     assert status["can_post"] is False
 
 
@@ -2980,3 +2981,131 @@ def test_senses_allowed_guard_always_false() -> None:
 
     assert senses_allowed({}) is False
     assert senses_allowed({"mode": "live"}) is False
+
+
+def test_emergency_stop_engages_and_releases(tmp_path: Path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_OPERATOR_KEY", "op-key-123")
+    monkeypatch.setenv("ROONIE_KILL_SWITCH", "0")
+    headers = {"X-ROONIE-OP-KEY": "op-key-123", "X-ROONIE-ACTOR": "system"}
+
+    server, thread = _start_server(runs_dir)
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+
+        # Arm the system first.
+        _request_json(base, "/api/live/arm", method="POST", payload={}, headers=headers)
+        _, status_pre = _request_json(base, "/api/status")
+        assert status_pre["armed"] is True
+
+        # Engage E-Stop.
+        code, body = _request_json(base, "/api/live/emergency_stop", method="POST", payload={}, headers=headers)
+        assert code == 200
+        assert body["ok"] is True
+        assert body["state"]["kill_switch_on"] is True
+
+        # Verify status reflects kill switch.
+        _, status_engaged = _request_json(base, "/api/status")
+        assert status_engaged["kill_switch_on"] is True
+        assert status_engaged["armed"] is False
+        assert "KILL_SWITCH" in status_engaged["blocked_by"]
+        assert status_engaged["can_post"] is False
+
+        # Release E-Stop.
+        code2, body2 = _request_json(base, "/api/live/kill_switch_release", method="POST", payload={}, headers=headers)
+        assert code2 == 200
+        assert body2["ok"] is True
+        assert body2["state"]["kill_switch_on"] is False
+
+        # Verify status after release: kill switch off, still disarmed.
+        _, status_released = _request_json(base, "/api/status")
+        assert status_released["kill_switch_on"] is False
+        assert status_released["armed"] is False  # Not auto-rearmed.
+
+        # Check operator log has both actions.
+        _, op_log = _request_json(base, "/api/operator_log?limit=20")
+        actions = [entry["action"] for entry in op_log]
+        assert "EMERGENCY_STOP" in actions
+        assert "KILL_SWITCH_RELEASE" in actions
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+
+def test_kill_switch_appears_in_blocked_by(tmp_path: Path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_OPERATOR_KEY", "op-key-123")
+    monkeypatch.setenv("ROONIE_KILL_SWITCH", "1")
+
+    server, thread = _start_server(runs_dir)
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        _, status = _request_json(base, "/api/status")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    assert "KILL_SWITCH" in status["blocked_by"]
+    assert status["can_post"] is False
+
+
+def test_send_failure_tracking(tmp_path: Path, monkeypatch) -> None:
+    from roonie.dashboard_api.storage import DashboardStorage
+
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    storage = DashboardStorage(runs_dir=runs_dir)
+
+    state = storage.get_send_failure_state()
+    assert state["fail_count"] == 0
+    assert state["last_fail_reason"] is None
+
+    storage.record_send_failure("NO_OAUTH_TOKEN")
+    storage.record_send_failure("NO_OAUTH_TOKEN")
+
+    state = storage.get_send_failure_state()
+    assert state["fail_count"] == 2
+    assert state["last_fail_reason"] == "NO_OAUTH_TOKEN"
+    assert state["last_fail_at"] is not None
+
+
+def test_send_failure_clears_on_success(tmp_path: Path, monkeypatch) -> None:
+    from roonie.dashboard_api.storage import DashboardStorage
+
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    storage = DashboardStorage(runs_dir=runs_dir)
+
+    storage.record_send_failure("NO_OAUTH_TOKEN")
+    assert storage.get_send_failure_state()["fail_count"] == 1
+
+    storage.record_send_success()
+    state = storage.get_send_failure_state()
+    assert state["fail_count"] == 0
+    assert state["last_fail_reason"] is None
+    assert state["last_fail_at"] is None
+    assert state["last_success_at"] is not None
+
+
+def test_send_failure_in_status_response(tmp_path: Path, monkeypatch) -> None:
+    from roonie.dashboard_api.storage import DashboardStorage
+
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    storage = DashboardStorage(runs_dir=runs_dir)
+
+    storage.record_send_failure("TIMEOUT")
+    status = storage.get_status()
+    d = status.to_dict()
+    assert d["send_fail_count"] == 1
+    assert d["send_fail_reason"] == "TIMEOUT"
+    assert d["send_fail_at"] is not None

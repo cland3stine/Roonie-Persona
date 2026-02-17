@@ -33,7 +33,7 @@ class ContextBuffer:
     Bounded, process-local, and explicitly non-persistent.
     """
 
-    def __init__(self, *, max_turns: int = 3, now_fn: Optional[Callable[[], datetime]] = None) -> None:
+    def __init__(self, *, max_turns: int = 12, now_fn: Optional[Callable[[], datetime]] = None) -> None:
         self._max_turns = max(1, int(max_turns))
         self._turns: Deque[ContextTurn] = deque(maxlen=self._max_turns)
         self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))

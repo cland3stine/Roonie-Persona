@@ -28,7 +28,7 @@ EVENT_COOLDOWN_SECONDS = {
     CATEGORY_EVENT_CHEER: 20.0,
     CATEGORY_EVENT_RAID: 30.0,
 }
-GREETING_COOLDOWN_SECONDS = 25.0
+GREETING_COOLDOWN_SECONDS = 15.0
 
 
 _GREETING_RE = re.compile(r"^(?:@[\w_]+\s*)?(?:hey|heya|hi|hello|yo|sup|what'?s up|whats up)\b", re.IGNORECASE)
@@ -82,38 +82,26 @@ def behavior_guidance(
     now_playing_available: bool,
     topic_anchor: str = "",
 ) -> str:
-    base = [
-        "Behavior policy:",
-        "- Keep reply short and warm (1-2 sentences).",
-        "- Prefer clean, clear language; keep slang occasional.",
-        "- Do not repeat usernames excessively.",
-        "- Do not add unsolicited commentary.",
-        "- Maintain continuity with recent chat context.",
-    ]
-    if approved_emotes:
-        base.append(
-            f"- Use at most one approved emote if natural: {', '.join(approved_emotes)}."
-        )
-    else:
-        base.append("- Do not add emotes unless explicitly approved.")
-
+    lines: List[str] = []
     if category == CATEGORY_TRACK_ID:
-        base.append("- Track-ID mode: do not invent track names.")
+        lines.append("This is a track ID question. Don't guess track names you're not sure about. Show you're curious about the track too.")
         if now_playing_available:
-            base.append("- Use now-playing metadata if available.")
+            lines.append("You have now-playing info available to reference.")
         else:
-            base.append("- If now-playing data is unavailable, ask for timestamp/clip.")
+            lines.append("You don't have track info right now. Ask for a timestamp or clip if needed.")
     elif category in EVENT_COOLDOWN_SECONDS:
-        base.append("- Event acknowledgement mode: thank briefly and move on.")
+        lines.append("Quick thank-you for the event. Be warm and hyped, make them feel like it matters. Keep it brief.")
     elif category == CATEGORY_GREETING:
-        base.append("- Greeting mode: friendly, restrained, brief.")
+        lines.append("Greet them like a friend you're happy to see. Match their energy or bring it up a notch.")
     elif category == CATEGORY_BANTER:
-        base.append("- Banter mode: answer naturally and briefly.")
-        base.append("- If the viewer references earlier chat, continue that thread.")
-        base.append("- Do not invent artist or track names; ask a short clarifying question if unsure.")
-    if topic_anchor:
-        base.append(f"- Active topic anchor: {topic_anchor}. Use this before introducing new names.")
-    return "\n".join(base)
+        if topic_anchor:
+            lines.append(f"Recent topic: {topic_anchor}. Pick up the thread if relevant.")
+        lines.append("Chat naturally. Be warm, react to what they actually said. Light teasing is welcome if the moment is right. Don't ask a question unless you genuinely need an answer — most messages should just be reactions or comments.")
+    if topic_anchor and category != CATEGORY_BANTER:
+        lines.append(f"Recent topic: {topic_anchor}. Pick up the thread if relevant.")
+    if approved_emotes:
+        lines.append(f"Your channel emotes: {', '.join(approved_emotes)}. Use them freely — they're part of your personality. Sprinkle them in naturally, especially your own channel emotes.")
+    return "\n".join(lines) if lines else ""
 
 
 def cooldown_for_category(category: str) -> Tuple[Optional[str], float, Optional[str]]:

@@ -63,9 +63,7 @@ def test_provider_director_injects_topic_anchor_for_continuity(monkeypatch) -> N
         director.evaluate(_live_event(f"evt-{idx}", msg), env)
 
     prompt = str(captured.get("prompt") or "")
-    assert "Conversation continuity hint:" in prompt
-    assert "Active topic from recent chat: Maze 28" in prompt
-    assert "Do not invent new artist or track names when uncertain" in prompt
+    assert "Recent topic: Maze 28" in prompt
 
 
 def test_topic_anchor_does_not_bleed_into_unrelated_banter(monkeypatch) -> None:
@@ -92,9 +90,7 @@ def test_topic_anchor_does_not_bleed_into_unrelated_banter(monkeypatch) -> None:
     )
 
     prompt = str(captured.get("prompt") or "")
-    assert "Conversation continuity hint:" not in prompt
-    assert "Active topic from recent chat: Maze 28" not in prompt
-    assert "Active topic anchor: Maze 28" not in prompt
+    assert "Recent topic: Maze 28" not in prompt
     assert "Library grounding (local)" not in prompt
 
 
@@ -122,7 +118,6 @@ def test_topic_anchor_can_apply_to_general_topics_on_deictic_followup(monkeypatc
     )
 
     prompt = str(captured.get("prompt") or "")
-    assert "Conversation continuity hint:" in prompt
-    assert "Active topic from recent chat:" in prompt
+    assert "Recent topic:" in prompt
     assert "Maze" in prompt
     assert "Library grounding (local)" not in prompt

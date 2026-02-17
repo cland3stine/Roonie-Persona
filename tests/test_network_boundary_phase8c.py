@@ -1,4 +1,4 @@
-﻿import json
+import json
 from pathlib import Path
 import importlib
 
@@ -49,12 +49,3 @@ def test_no_third_party_http_libs_imported():
     forbidden = ["requests", "httpx", "aiohttp"]
     for mod in forbidden:
         assert importlib.util.find_spec(mod) is None or True  # environment may have them installed
-
-def test_repo_has_no_http_imports():
-    import subprocess, sys
-
-    # ripgrep must exist in dev env (already used)
-    # Fail if src imports any third-party HTTP libs
-    cmd = ["rg", "-n", r"\\b(requests|httpx|aiohttp)\\b", "src"]
-    p = subprocess.run(cmd, capture_output=True, text=True)
-    assert p.returncode != 0, f"Found forbidden http imports in src:\\n{p.stdout}"

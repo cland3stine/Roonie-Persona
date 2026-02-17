@@ -3,6 +3,7 @@
 import json
 import os
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
@@ -38,7 +39,7 @@ def _runs_output_dir() -> Path:
         or (os.getenv("ROONIE_RUNS_DIR") or "").strip()
     )
     if not configured:
-        return Path("runs")
+        return ROOT / "runs"
     path = Path(configured)
     if not path.is_absolute():
         path = (ROOT / path).resolve()
@@ -166,7 +167,7 @@ def run_payload(
             output_rec["session_id"] = str(proposal_session or session_id).strip() or session_id
             if output_rec.get("emitted") and decision.get("response_text"):
                 emit(decision["response_text"])
-                twitch_adapter.handle_output(
+                send_result = twitch_adapter.handle_output(
                     {
                         "type": decision.get("action"),
                         "event_id": decision.get("event_id"),
@@ -174,13 +175,22 @@ def run_payload(
                     },
                     {"mode": "live"},
                 )
+                output_rec["send_result"] = send_result
         output["outputs"] = outputs
     if fixture_hint:
         output["fixture_hint"] = fixture_hint
 
     runs_dir = _runs_output_dir()
     runs_dir.mkdir(parents=True, exist_ok=True)
-    out_path = runs_dir / f"{session_id}.json"
+    if _is_live_payload(payload) and inputs:
+        first_event_id = str(inputs[0].get("event_id", "")).strip()
+        if first_event_id:
+            safe_id = first_event_id.replace(":", "-")
+            out_path = runs_dir / f"{session_id}_{safe_id}.json"
+        else:
+            out_path = runs_dir / f"{session_id}_{int(time.time() * 1000)}.json"
+    else:
+        out_path = runs_dir / f"{session_id}.json"
     out_path.write_text(json.dumps(output, indent=2, sort_keys=False), encoding="utf-8")
     return out_path
 

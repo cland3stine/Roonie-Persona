@@ -443,6 +443,47 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
             )
             _json_response(self, {"ok": True, "profile": profile, "audit": audit.to_dict()})
 
+        def _handle_inner_circle_write(self, *, patch: bool) -> None:
+            ok_body, payload = self._read_json_body()
+            if not ok_body:
+                _json_response(
+                    self,
+                    {"ok": False, "error": "bad_request", "detail": "Invalid JSON body."},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            identity = self._authorize_write(
+                action="INNER_CIRCLE_UPDATE",
+                payload=payload,
+                required_role="operator",
+            )
+            if identity is None:
+                return
+            try:
+                circle, diff_payload = storage.update_inner_circle(
+                    payload,
+                    actor=(identity.get("username") or identity.get("actor")),
+                    patch=patch,
+                )
+            except ValueError as exc:
+                _json_response(
+                    self,
+                    {"ok": False, "error": "bad_request", "detail": str(exc)},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            audit = storage.record_operator_action(
+                operator=identity["operator"],
+                action="INNER_CIRCLE_UPDATE",
+                payload=diff_payload,
+                result="OK",
+                actor=identity["actor"],
+                username=identity.get("username"),
+                role=identity.get("role"),
+                auth_mode=identity.get("auth_mode"),
+            )
+            _json_response(self, {"ok": True, "inner_circle": circle, "audit": audit.to_dict()})
+
         def do_GET(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
             query = parse_qs(parsed.query)
@@ -520,8 +561,14 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
                 limit = _parse_limit(query, default=25)
                 _json_response(self, storage.get_queue(limit=limit))
                 return
+            if path == "/api/twitch/channel_emotes":
+                _json_response(self, storage.fetch_channel_emotes())
+                return
             if path == "/api/studio_profile":
                 _json_response(self, storage.get_studio_profile())
+                return
+            if path == "/api/inner_circle":
+                _json_response(self, storage.get_inner_circle())
                 return
             if path == "/api/providers/status":
                 _json_response(self, storage.get_providers_status())
@@ -1289,6 +1336,62 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
                 _json_response(self, {"ok": True, "state": state, "audit": audit.to_dict()})
                 return
 
+            if path == "/api/live/emergency_stop":
+                ok_body, payload = self._read_json_body()
+                if not ok_body:
+                    _json_response(
+                        self,
+                        {"ok": False, "error": "bad_request", "detail": "Invalid JSON body."},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                identity = self._authorize_write(
+                    action="EMERGENCY_STOP", payload=payload, required_role="operator"
+                )
+                if identity is None:
+                    return
+                state = storage.set_kill_switch(True)
+                audit = storage.record_operator_action(
+                    operator=identity["operator"],
+                    action="EMERGENCY_STOP",
+                    payload={"kill_switch_on": True},
+                    result="OK",
+                    actor=identity["actor"],
+                    username=identity.get("username"),
+                    role=identity.get("role"),
+                    auth_mode=identity.get("auth_mode"),
+                )
+                _json_response(self, {"ok": True, "state": state, "audit": audit.to_dict()})
+                return
+
+            if path == "/api/live/kill_switch_release":
+                ok_body, payload = self._read_json_body()
+                if not ok_body:
+                    _json_response(
+                        self,
+                        {"ok": False, "error": "bad_request", "detail": "Invalid JSON body."},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                identity = self._authorize_write(
+                    action="KILL_SWITCH_RELEASE", payload=payload, required_role="operator"
+                )
+                if identity is None:
+                    return
+                state = storage.set_kill_switch(False)
+                audit = storage.record_operator_action(
+                    operator=identity["operator"],
+                    action="KILL_SWITCH_RELEASE",
+                    payload={"kill_switch_on": False},
+                    result="OK",
+                    actor=identity["actor"],
+                    username=identity.get("username"),
+                    role=identity.get("role"),
+                    auth_mode=identity.get("auth_mode"),
+                )
+                _json_response(self, {"ok": True, "state": state, "audit": audit.to_dict()})
+                return
+
             if path == "/api/live/silence_now":
                 ok_body, payload = self._read_json_body()
                 if not ok_body:
@@ -1693,6 +1796,9 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
             if parsed.path == "/api/studio_profile":
                 self._handle_studio_profile_write(patch=False)
                 return
+            if parsed.path == "/api/inner_circle":
+                self._handle_inner_circle_write(patch=False)
+                return
             _json_response(
                 self,
                 {"ok": False, "error": "not_found", "path": parsed.path},
@@ -1703,6 +1809,9 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
             parsed = urlparse(self.path)
             if parsed.path == "/api/studio_profile":
                 self._handle_studio_profile_write(patch=True)
+                return
+            if parsed.path == "/api/inner_circle":
+                self._handle_inner_circle_write(patch=True)
                 return
             if parsed.path.startswith("/api/memory/cultural/"):
                 ok_body, payload = self._read_json_body()

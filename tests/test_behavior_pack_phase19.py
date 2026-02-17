@@ -121,6 +121,7 @@ def test_direct_address_greeting_emits_when_gates_open(tmp_path, monkeypatch) ->
         sent_calls.append({"output": dict(output), "metadata": dict(metadata)})
 
     monkeypatch.setattr("adapters.twitch_output.TwitchOutputAdapter.handle_output", _spy_handle_output)
+    monkeypatch.setattr("roonie.provider_director.route_generate", lambda **kwargs: "Hey, welcome in.")
 
     out_path = run_payload(
         {
@@ -134,7 +135,7 @@ def test_direct_address_greeting_emits_when_gates_open(tmp_path, monkeypatch) ->
     decision = run_doc["decisions"][0]
     output = run_doc["outputs"][0]
     assert decision["action"] == "RESPOND_PUBLIC"
-    assert decision["route"] == "behavior:greeting"
+    assert decision["route"].startswith("primary:")
     assert output["emitted"] is True
     assert output["reason"] == "EMITTED"
     assert len(sent_calls) == 1
@@ -156,6 +157,7 @@ def test_direct_address_greeting_cooldown_suppresses_second_message(tmp_path, mo
         sent_calls.append({"output": dict(output), "metadata": dict(metadata)})
 
     monkeypatch.setattr("adapters.twitch_output.TwitchOutputAdapter.handle_output", _spy_handle_output)
+    monkeypatch.setattr("roonie.provider_director.route_generate", lambda **kwargs: "Hey there.")
 
     out_path = run_payload(
         {
@@ -230,9 +232,19 @@ def test_noop_action_uses_noop_reason_not_action_not_allowed(monkeypatch) -> Non
     assert outputs[0]["reason"] == "NOOP"
 
 
-def test_track_id_no_hallucination_without_now_playing(tmp_path, monkeypatch) -> None:
+def test_track_id_without_now_playing_goes_through_llm(tmp_path, monkeypatch) -> None:
     _set_runtime_paths(monkeypatch, tmp_path)
     monkeypatch.setenv("ROONIE_OUTPUT_DISABLED", "0")
+
+    captured: Dict[str, Any] = {}
+
+    def _stub_route_generate(**kwargs):
+        captured["prompt"] = kwargs.get("prompt", "")
+        kwargs["context"]["provider_selected"] = "openai"
+        kwargs["context"]["moderation_result"] = "allow"
+        return "Not sure, drop a timestamp and I can check."
+
+    monkeypatch.setattr("roonie.provider_director.route_generate", _stub_route_generate)
 
     out_path = run_payload(
         {
@@ -244,10 +256,12 @@ def test_track_id_no_hallucination_without_now_playing(tmp_path, monkeypatch) ->
     )
     run_doc = json.loads(out_path.read_text(encoding="utf-8"))
     decision = run_doc["decisions"][0]
-    text = str(decision.get("response_text") or "")
-    assert decision["route"] == "behavior:track_id"
-    assert ("can't see" in text.lower()) or ("timestamp" in text.lower()) or ("clip" in text.lower())
-    assert " - " not in text
+    assert decision["action"] == "RESPOND_PUBLIC"
+    assert decision["route"].startswith("primary:")
+    # Behavior guidance tells the LLM it has no track info
+    prompt = str(captured.get("prompt", ""))
+    assert "track" in prompt.lower()
+    assert "Don't guess track names" in prompt or "don't have track info" in prompt.lower()
 
 
 def test_disallowed_emote_is_suppressed_when_allow_list_present(tmp_path, monkeypatch) -> None:
@@ -324,4 +338,4 @@ def test_live_stub_output_is_sanitized_when_flag_enabled(tmp_path, monkeypatch) 
     run_doc = json.loads(out_path.read_text(encoding="utf-8"))
     decision = run_doc["decisions"][0]
     assert decision["action"] == "RESPOND_PUBLIC"
-    assert decision["response_text"] == "Doing good, thanks for checking in."
+    assert decision["response_text"] == "Doing great, glad you're here!"

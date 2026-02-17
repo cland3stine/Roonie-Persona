@@ -58,11 +58,7 @@ def resolve_runtime_paths(
     log_dir: str = "logs",
 ) -> RuntimePaths:
     repo = repo_root.resolve()
-    localapp = (os.getenv("LOCALAPPDATA") or "").strip()
-    if os.name == "nt" and localapp:
-        runtime_root = (Path(localapp) / "RoonieControlRoom").resolve()
-    else:
-        runtime_root = repo
+    runtime_root = repo
 
     data_env = (os.getenv("ROONIE_DASHBOARD_DATA_DIR") or "").strip()
     logs_env = (os.getenv("ROONIE_DASHBOARD_LOGS_DIR") or "").strip()

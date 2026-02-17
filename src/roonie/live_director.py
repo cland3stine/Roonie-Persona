@@ -19,7 +19,7 @@ def senses_allowed(runtime_context: Dict[str, Any] | None = None) -> bool:
 class LiveDirector:
     registry: ProviderRegistry
     routing_cfg: Dict[str, Any]
-    context_buffer: ContextBuffer = field(default_factory=lambda: ContextBuffer(max_turns=3))
+    context_buffer: ContextBuffer = field(default_factory=lambda: ContextBuffer(max_turns=12))
     _session_id: str = field(default="", init=False, repr=False)
 
     @staticmethod
@@ -37,7 +37,7 @@ class LiveDirector:
             self.context_buffer.clear()
             self._session_id = session_id
 
-        prompt_context_turns = self.context_buffer.get_context(max_turns=3)
+        prompt_context_turns = self.context_buffer.get_context(max_turns=8)
         context_turns_used = len(prompt_context_turns)
         context_active = context_turns_used > 0
 
@@ -48,8 +48,8 @@ class LiveDirector:
                 "channel": event.metadata.get("channel", ""),
             },
             context_turns=prompt_context_turns,
-            max_context_turns=3,
-            max_context_chars=480,
+            max_context_turns=8,
+            max_context_chars=1200,
         )
         senses_ok = senses_allowed(
             {

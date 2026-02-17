@@ -193,7 +193,38 @@ class LiveChatBridge:
                 profile = self._storage.get_studio_profile()
                 approved = profile.get("approved_emotes", []) if isinstance(profile, dict) else []
                 if isinstance(approved, list) and approved:
-                    metadata["approved_emotes"] = [str(item).strip() for item in approved if str(item).strip()]
+                    normalized: list = []
+                    for item in approved:
+                        if isinstance(item, dict):
+                            if item.get("denied", False):
+                                continue
+                            name = str(item.get("name") or "").strip()
+                            desc = str(item.get("desc") or "").strip()
+                            if name:
+                                normalized.append(f"{name} ({desc})" if desc else name)
+                        else:
+                            text = str(item or "").strip()
+                            if text:
+                                normalized.append(text)
+                    if normalized:
+                        metadata["approved_emotes"] = normalized
+            except Exception:
+                pass
+        if hasattr(self._storage, "get_inner_circle"):
+            try:
+                circle = self._storage.get_inner_circle()
+                members = circle.get("members", []) if isinstance(circle, dict) else []
+                if isinstance(members, list) and members:
+                    metadata["inner_circle"] = [
+                        {
+                            "username": str(m.get("username", "")).strip().lower(),
+                            "display_name": str(m.get("display_name", "")).strip(),
+                            "role": str(m.get("role", "")).strip(),
+                            "note": str(m.get("note", "")).strip(),
+                        }
+                        for m in members
+                        if isinstance(m, dict) and str(m.get("username", "")).strip()
+                    ]
             except Exception:
                 pass
         if isinstance(metadata_extra, dict):
@@ -221,6 +252,7 @@ class LiveChatBridge:
             )
         emitted = False
         emit_reason = "NO_OUTPUT_RECORD"
+        send_result = None
         try:
             run_doc = json.loads(run_path.read_text(encoding="utf-8-sig"))
             if hasattr(self._storage, "ingest_memory_candidates_from_run"):
@@ -236,6 +268,7 @@ class LiveChatBridge:
                     if str(item.get("event_id", "")).strip() == event_id:
                         emitted = bool(item.get("emitted", False))
                         emit_reason = str(item.get("reason", "")).strip() or "UNKNOWN"
+                        send_result = item.get("send_result")
                         break
         except Exception:
             pass
@@ -245,6 +278,7 @@ class LiveChatBridge:
             "session_id": (active_session_id or None),
             "emitted": emitted,
             "reason": emit_reason,
+            "send_result": send_result,
             "blocked_by": blocked_by,
             "can_post": can_post,
             "run_path": str(run_path),
@@ -267,9 +301,20 @@ class LiveChatBridge:
             self._log(f"[LiveChatBridge] process error user={viewer}: {exc}")
             return
         if bool(result.get("emitted", False)):
-            self._log(
-                f"[LiveChatBridge] emitted event_id={result.get('event_id')} user={msg.nick} reason={result.get('reason')}"
-            )
+            sr = result.get("send_result")
+            if isinstance(sr, dict) and not sr.get("sent", True):
+                fail_reason = str(sr.get("reason", "UNKNOWN"))
+                self._log(
+                    f"[LiveChatBridge] SEND FAILED event_id={result.get('event_id')} reason={fail_reason}"
+                )
+                if hasattr(self._storage, "record_send_failure"):
+                    self._storage.record_send_failure(fail_reason)
+            else:
+                self._log(
+                    f"[LiveChatBridge] emitted event_id={result.get('event_id')} user={msg.nick} reason={result.get('reason')}"
+                )
+                if hasattr(self._storage, "record_send_success"):
+                    self._storage.record_send_success()
         elif bool(result.get("can_post", False)):
             self._log(
                 f"[LiveChatBridge] processed(no-emit) event_id={result.get('event_id')} reason={result.get('reason')}"
@@ -353,9 +398,20 @@ class LiveChatBridge:
             return
 
         if bool(result.get("emitted", False)):
-            self._log(
-                f"[LiveChatBridge] emitted(retry) event_id={result.get('event_id')} user={actor} reason={result.get('reason')}"
-            )
+            sr = result.get("send_result")
+            if isinstance(sr, dict) and not sr.get("sent", True):
+                fail_reason = str(sr.get("reason", "UNKNOWN"))
+                self._log(
+                    f"[LiveChatBridge] SEND FAILED(retry) event_id={result.get('event_id')} reason={fail_reason}"
+                )
+                if hasattr(self._storage, "record_send_failure"):
+                    self._storage.record_send_failure(fail_reason)
+            else:
+                self._log(
+                    f"[LiveChatBridge] emitted(retry) event_id={result.get('event_id')} user={actor} reason={result.get('reason')}"
+                )
+                if hasattr(self._storage, "record_send_success"):
+                    self._storage.record_send_success()
             return
 
         reason = str(result.get("reason", "")).strip().upper()

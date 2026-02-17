@@ -243,7 +243,7 @@ def _provider_registry_from_runtime() -> ProviderRegistry:
 
 @dataclass
 class ProviderDirector:
-    context_buffer: ContextBuffer = field(default_factory=lambda: ContextBuffer(max_turns=3))
+    context_buffer: ContextBuffer = field(default_factory=lambda: ContextBuffer(max_turns=12))
     _session_id: str = field(default="", init=False, repr=False)
     _persona_policy_text: str = field(default="", init=False, repr=False)
     _turn_counter: int = field(default=0, init=False, repr=False)
@@ -374,9 +374,17 @@ class ProviderDirector:
             return []
         out: List[str] = []
         for item in raw[:24]:
-            text = str(item or "").strip()
-            if text:
-                out.append(text)
+            if isinstance(item, dict):
+                if item.get("denied", False):
+                    continue
+                name = str(item.get("name") or "").strip()
+                desc = str(item.get("desc") or "").strip()
+                if name:
+                    out.append(f"{name} ({desc})" if desc else name)
+            else:
+                text = str(item or "").strip()
+                if text:
+                    out.append(text)
         return out
 
     @staticmethod
@@ -396,6 +404,33 @@ class ProviderDirector:
         if title:
             return title
         return ""
+
+    @staticmethod
+    def _inner_circle_block(metadata: Dict[str, Any]) -> str:
+        raw = metadata.get("inner_circle", [])
+        if not isinstance(raw, list) or not raw:
+            return ""
+        lines = []
+        for m in raw[:50]:
+            if not isinstance(m, dict):
+                continue
+            username = str(m.get("username", "")).strip()
+            if not username:
+                continue
+            display = str(m.get("display_name", "")).strip() or username
+            role = str(m.get("role", "")).strip()
+            note = str(m.get("note", "")).strip()
+            parts = [f"@{username}"]
+            if display and display.lower() != username.lower():
+                parts[0] = f"@{username} ({display})"
+            if role:
+                parts.append(role)
+            if note:
+                parts.append(note)
+            lines.append("- " + " — ".join(parts))
+        if not lines:
+            return ""
+        return "People you know:\n" + "\n".join(lines)
 
     @staticmethod
     def _extract_topic_anchor(message: str) -> str:
@@ -452,24 +487,24 @@ class ProviderDirector:
         cat = str(category or "").strip().upper()
         msg = str(user_message or "").strip().lower()
         if cat == CATEGORY_GREETING:
-            return "Hey! Good to see you."
+            return "Hey! Good to see you in here."
         if cat == CATEGORY_BANTER:
             if "vibe" in msg or "vibes" in msg:
-                return "Vibes are good over here."
+                return "Vibes are immaculate right now honestly."
             if "you there" in msg or "are you there" in msg:
-                return "Yep, I'm here with you."
+                return "I'm right here! Just vibing on the desk."
             if "how are" in msg or "how you" in msg or "how's" in msg:
-                return "Doing good, thanks for checking in."
-            return "Doing good, thanks for checking in."
+                return "Doing great, glad you're here!"
+            return "Doing great, glad you're here!"
         if cat == "EVENT_FOLLOW":
-            return "Thanks for the follow."
+            return "Welcome in! Glad to have you."
         if cat == "EVENT_SUB":
-            return "Thanks for the sub."
+            return "Appreciate the sub! Welcome to the crew."
         if cat == "EVENT_CHEER":
-            return "Thanks for the bits."
+            return "Ayy, thanks for the bits!"
         if cat == "EVENT_RAID":
-            return "Thanks for the raid."
-        return "Hey! I'm here."
+            return "Let's go! Welcome raiders!"
+        return "Hey! I'm right here."
 
     def _build_prompt(
         self,
@@ -479,6 +514,8 @@ class ProviderDirector:
         category: str,
         approved_emotes: List[str],
         now_playing_available: bool,
+        now_playing_text: str = "",
+        inner_circle_text: str = "",
         memory_hints: str,
         topic_anchor: str,
         library_block: str,
@@ -491,8 +528,10 @@ class ProviderDirector:
                 "channel": event.metadata.get("channel", ""),
             },
             context_turns=context_turns,
-            max_context_turns=3,
-            max_context_chars=480,
+            max_context_turns=8,
+            max_context_chars=1200,
+            now_playing_text=now_playing_text,
+            inner_circle_text=inner_circle_text,
         )
         behavior_block = behavior_guidance(
             category=category,
@@ -500,15 +539,6 @@ class ProviderDirector:
             now_playing_available=now_playing_available,
             topic_anchor=topic_anchor,
         )
-        continuity_block = ""
-        if topic_anchor:
-            continuity_block = (
-                "\n\n"
-                "Conversation continuity hint:\n"
-                f"- Active topic from recent chat: {topic_anchor}\n"
-                "- If the viewer says 'it/that/this' or gives a partial title, resolve it against this topic first.\n"
-                "- Do not invent new artist or track names when uncertain; ask one short clarification."
-            )
         grounding_block = ""
         if library_block:
             grounding_block = (
@@ -533,10 +563,10 @@ class ProviderDirector:
                 f"{memory_hints}"
             )
         if not self._persona_policy_text:
-            return f"{base_prompt}\n\n{behavior_block}{continuity_block}{grounding_block}{music_fact_block}{memory_block}\n"
+            return f"{base_prompt}\n\n{behavior_block}{grounding_block}{music_fact_block}{memory_block}\n"
         return (
             f"{base_prompt}\n\n"
-            f"{behavior_block}{continuity_block}{grounding_block}{music_fact_block}{memory_block}\n\n"
+            f"{behavior_block}{grounding_block}{music_fact_block}{memory_block}\n\n"
             "Canonical Persona Policy (do not violate):\n"
             f"{self._persona_policy_text}\n"
         )
@@ -558,7 +588,7 @@ class ProviderDirector:
         approved_emotes = self._approved_emotes(metadata)
         now_playing = self._now_playing_text(metadata)
         now_playing_available = bool(now_playing)
-        context_turns = self.context_buffer.get_context(max_turns=3)
+        context_turns = self.context_buffer.get_context(max_turns=8)
         context_turns_used = len(context_turns)
         context_active = context_turns_used > 0
 
@@ -681,105 +711,7 @@ class ProviderDirector:
                 context_turns_used=context_turns_used,
             )
 
-        if category == CATEGORY_TRACK_ID:
-            track_text = now_playing
-            if track_text:
-                response_text = f"I see: {track_text}."
-            else:
-                response_text = "I can't see the current track from here yet. Drop a timestamp or clip and I'll help ID it."
-            trace = {
-                "director": {
-                    "type": "ProviderDirector",
-                    "addressed_to_roonie": addressed,
-                    "trigger": trigger,
-                    "routing_enabled": bool(get_routing_runtime_status().get("enabled", True)),
-                },
-                "behavior": {
-                    "category": category,
-                    "approved_emotes": approved_emotes,
-                    "now_playing_available": now_playing_available,
-                    "topic_anchor": topic_anchor,
-                    "topic_anchor_kind": self._topic_anchor_kind or None,
-                    "library_confidence": library_confidence,
-                    "routing_class_hint": routing_class_hint,
-                },
-                "memory": {
-                    "keys_used": memory_result.keys_used,
-                    "chars_used": memory_result.chars_used,
-                    "items_used": memory_result.items_used,
-                    "dropped_count": memory_result.dropped_count,
-                },
-                "proposal": {
-                    "text": response_text,
-                    "provider_used": "none",
-                    "route_used": "behavior:track_id",
-                    "moderation_status": "not_applicable",
-                    "session_id": session_id or None,
-                    "token_usage_if_available": None,
-                    "memory_keys_used": memory_result.keys_used,
-                    "memory_chars_used": memory_result.chars_used,
-                    "memory_items_used": memory_result.items_used,
-                    "memory_dropped_count": memory_result.dropped_count,
-                },
-            }
-            return DecisionRecord(
-                case_id=str(event.metadata.get("case_id", "live")),
-                event_id=event.event_id,
-                action="RESPOND_PUBLIC",
-                route="behavior:track_id",  # type: ignore[arg-type]
-                response_text=response_text,
-                trace=trace,
-                context_active=context_active,
-                context_turns_used=context_turns_used,
-            )
-
-        if addressed and category == CATEGORY_GREETING:
-            response_text = "Hey! Good to see you."
-            trace = {
-                "director": {
-                    "type": "ProviderDirector",
-                    "addressed_to_roonie": addressed,
-                    "trigger": trigger,
-                    "routing_enabled": bool(get_routing_runtime_status().get("enabled", True)),
-                },
-                "behavior": {
-                    "category": category,
-                    "approved_emotes": approved_emotes,
-                    "now_playing_available": now_playing_available,
-                    "topic_anchor": topic_anchor,
-                    "topic_anchor_kind": self._topic_anchor_kind or None,
-                    "library_confidence": library_confidence,
-                    "routing_class_hint": routing_class_hint,
-                },
-                "memory": {
-                    "keys_used": memory_result.keys_used,
-                    "chars_used": memory_result.chars_used,
-                    "items_used": memory_result.items_used,
-                    "dropped_count": memory_result.dropped_count,
-                },
-                "proposal": {
-                    "text": response_text,
-                    "provider_used": "none",
-                    "route_used": "behavior:greeting",
-                    "moderation_status": "not_applicable",
-                    "session_id": session_id or None,
-                    "token_usage_if_available": None,
-                    "memory_keys_used": memory_result.keys_used,
-                    "memory_chars_used": memory_result.chars_used,
-                    "memory_items_used": memory_result.items_used,
-                    "memory_dropped_count": memory_result.dropped_count,
-                },
-            }
-            return DecisionRecord(
-                case_id=str(event.metadata.get("case_id", "live")),
-                event_id=event.event_id,
-                action="RESPOND_PUBLIC",
-                route="behavior:greeting",  # type: ignore[arg-type]
-                response_text=response_text,
-                trace=trace,
-                context_active=context_active,
-                context_turns_used=context_turns_used,
-            )
+        inner_circle_text = self._inner_circle_block(metadata)
 
         prompt = self._build_prompt(
             event,
@@ -787,6 +719,8 @@ class ProviderDirector:
             category=category,
             approved_emotes=approved_emotes,
             now_playing_available=now_playing_available,
+            now_playing_text=now_playing,
+            inner_circle_text=inner_circle_text,
             memory_hints=memory_result.text_snippet,
             topic_anchor=topic_anchor,
             library_block=library_block,
@@ -846,12 +780,10 @@ class ProviderDirector:
             action = "RESPOND_PUBLIC"
             route = f"primary:{provider_used}"
 
-        # Roonie turn storage remains "sent-only"; we intentionally do not add assistant
-        # turns here because OutputGate is the final authority on posting.
         self.context_buffer.add_turn(
             speaker="roonie",
             text=response_text or "",
-            sent=False,
+            sent=True,
             related_to_stored_user=stored_user_turn,
         )
 

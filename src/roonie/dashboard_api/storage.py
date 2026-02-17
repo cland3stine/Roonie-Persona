@@ -175,7 +175,10 @@ def _default_studio_profile(*, updated_by: str) -> Dict[str, Any]:
         "faq": [
             {"q": "Where are you based?", "a": "Washington DC area."},
         ],
-        "approved_emotes": ["RoonieWave", "RoonieHi"],
+        "approved_emotes": [
+            {"name": "RoonieWave", "desc": "", "denied": False},
+            {"name": "RoonieHi", "desc": "", "denied": False},
+        ],
     }
 
 
@@ -196,6 +199,7 @@ class DashboardStorage:
         self._senses_config_path = self.data_dir / "senses_config.json"
         self._twitch_config_path = self.data_dir / "twitch_config.json"
         self._studio_profile_path = self.data_dir / "studio_profile.json"
+        self._inner_circle_path = self.data_dir / "inner_circle.json"
         self._library_dir = self.data_dir / "library"
         self._library_xml_path = self._library_dir / "rekordbox.xml"
         self._library_index_path = self._library_dir / "library_index.json"
@@ -209,6 +213,8 @@ class DashboardStorage:
         self._sessions: Dict[str, Dict[str, Any]] = {}
         self._session_ttl_seconds = self._session_ttl_seconds_from_env()
         self._kill_switch_env_pinned = any(name in os.environ for name in self._KILL_SWITCH_ENV_NAMES)
+        self._kill_switch_env_pinned_true = self._kill_switch_env_pinned and _env_bool(list(self._KILL_SWITCH_ENV_NAMES), False)
+        self._dashboard_kill_switch: bool = False
         self._dry_run_env_pinned = any(name in os.environ for name in self._DRY_RUN_ENV_NAMES)
         self._readiness_state: Dict[str, Any] = {
             "ready": False,
@@ -222,6 +228,12 @@ class DashboardStorage:
             "last_eventsub_message_ts": None,
             "reconnect_count": 0,
             "eventsub_last_error": None,
+        }
+        self._send_failure_state: Dict[str, Any] = {
+            "fail_count": 0,
+            "last_fail_reason": None,
+            "last_fail_at": None,
+            "last_success_at": None,
         }
         self._twitch_status_cache: Optional[Dict[str, Any]] = None
         self._twitch_status_cache_expiry_ts: float = 0.0
@@ -530,6 +542,8 @@ class DashboardStorage:
         cost_cap_on: bool = False,
     ) -> List[str]:
         blocks: List[str] = []
+        if bool(kill_switch_on):
+            blocks.append("KILL_SWITCH")
         if not bool(armed):
             blocks.append("DISARMED")
         if bool(dry_run):
@@ -642,7 +656,7 @@ class DashboardStorage:
 
     def _sync_env_from_state_locked(self) -> None:
         snap = self._control_snapshot_locked()
-        kill_switch_on = _env_bool(list(self._KILL_SWITCH_ENV_NAMES), False)
+        kill_switch_on = _env_bool(list(self._KILL_SWITCH_ENV_NAMES), False) or self._dashboard_kill_switch
         cost_cap_on = bool(get_provider_runtime_status().get("cost_cap_blocked", False))
         dry_run = bool(snap.get("dry_run", False))
         blocked_by = self.effective_blocks(
@@ -663,8 +677,8 @@ class DashboardStorage:
         # /api/status can_post and adapter eligibility stay consistent.
         os.environ["TWITCH_OUTPUT_ENABLED"] = "0" if output_disabled else "1"
         os.environ["ROONIE_ACTIVE_DIRECTOR"] = self.normalize_active_director(snap.get("active_director"))
-        if not self._kill_switch_env_pinned:
-            os.environ["ROONIE_KILL_SWITCH"] = "0"
+        if not self._kill_switch_env_pinned_true:
+            os.environ["ROONIE_KILL_SWITCH"] = "1" if self._dashboard_kill_switch else "0"
         if not self._dry_run_env_pinned:
             os.environ["ROONIE_DRY_RUN"] = "1" if dry_run else "0"
 
@@ -688,6 +702,19 @@ class DashboardStorage:
             snap = self._control_snapshot_locked()
             snap["previous_armed"] = previous_armed
             return snap
+
+    def set_kill_switch(self, on: bool) -> Dict[str, Any]:
+        on = bool(on)
+        self._dashboard_kill_switch = on
+        if on:
+            self.set_armed(False)
+        if not self._kill_switch_env_pinned_true:
+            os.environ["ROONIE_KILL_SWITCH"] = "1" if on else "0"
+        with self._lock:
+            self._sync_env_from_state_locked()
+            snap = self._control_snapshot_locked()
+        snap["kill_switch_on"] = on
+        return snap
 
     def force_safe_start_defaults(self) -> Dict[str, Any]:
         with self._lock:
@@ -2149,15 +2176,27 @@ class DashboardStorage:
             raise ValueError("approved_emotes must be a list.")
         if len(emotes_raw) > 200:
             raise ValueError("approved_emotes exceeds maximum size.")
-        approved_emotes: List[str] = []
+        approved_emotes: List[Dict[str, Any]] = []
         for idx, value in enumerate(emotes_raw):
-            emote = self._bounded_text(
-                value,
-                field_name=f"approved_emotes[{idx}]",
-                max_len=40,
-                required=True,
-            )
-            approved_emotes.append(emote)
+            if isinstance(value, str):
+                name = value.strip()
+                if not name:
+                    continue
+                approved_emotes.append({"name": name, "desc": "", "denied": False})
+            elif isinstance(value, dict):
+                name = self._bounded_text(
+                    value.get("name"),
+                    field_name=f"approved_emotes[{idx}].name",
+                    max_len=40,
+                    required=True,
+                )
+                desc = str(value.get("desc") or "").strip()[:120]
+                denied = bool(value.get("denied", False))
+                approved_emotes.append({"name": name, "desc": desc, "denied": denied})
+            else:
+                text = str(value or "").strip()
+                if text:
+                    approved_emotes.append({"name": text[:40], "desc": "", "denied": False})
 
         return {
             "version": 1,
@@ -2246,6 +2285,154 @@ class DashboardStorage:
             "mode": "patch" if patch else "put",
         }
         return new_profile, audit_payload
+
+    # ── inner_circle ──────────────────────────────────────────────
+
+    @staticmethod
+    def _default_inner_circle() -> Dict[str, Any]:
+        return {
+            "version": 1,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_by": "system",
+            "members": [
+                {
+                    "username": "cland3stine",
+                    "display_name": "Art",
+                    "role": "host",
+                    "note": "DJ host of RuleOfRune. One of Roonie's humans.",
+                },
+                {
+                    "username": "c0rcyra",
+                    "display_name": "Jen",
+                    "role": "host",
+                    "note": "DJ hostess of RuleOfRune. One of Roonie's humans.",
+                },
+                {
+                    "username": "ruleofrune",
+                    "display_name": "Art or Jen",
+                    "role": "host",
+                    "note": "Stream account — whoever is DJing at the moment.",
+                },
+            ],
+        }
+
+    def _coerce_inner_circle_fields(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ValueError("inner_circle payload must be an object.")
+        members_raw = payload.get("members", [])
+        if not isinstance(members_raw, list):
+            raise ValueError("members must be a list.")
+        if len(members_raw) > 50:
+            raise ValueError("members exceeds maximum size (50).")
+        members: List[Dict[str, str]] = []
+        seen_usernames: set[str] = set()
+        for idx, item in enumerate(members_raw):
+            if not isinstance(item, dict):
+                raise ValueError(f"members[{idx}] must be an object.")
+            username = self._bounded_text(
+                item.get("username"),
+                field_name=f"members[{idx}].username",
+                max_len=40,
+                required=True,
+            ).lower()
+            display_name = self._bounded_text(
+                item.get("display_name"),
+                field_name=f"members[{idx}].display_name",
+                max_len=40,
+                required=False,
+            )
+            role = self._bounded_text(
+                item.get("role"),
+                field_name=f"members[{idx}].role",
+                max_len=30,
+                required=False,
+            )
+            note = self._bounded_text(
+                item.get("note"),
+                field_name=f"members[{idx}].note",
+                max_len=200,
+                required=False,
+            )
+            key = username.lower()
+            if key in seen_usernames:
+                raise ValueError(f"Duplicate username: {username}")
+            seen_usernames.add(key)
+            members.append({
+                "username": username,
+                "display_name": display_name,
+                "role": role,
+                "note": note,
+            })
+        return {"version": 1, "members": members}
+
+    def _normalize_inner_circle_for_read(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        fields = self._coerce_inner_circle_fields(payload)
+        updated_at_raw = payload.get("updated_at")
+        updated_at = _format_iso(_parse_iso(str(updated_at_raw))) if updated_at_raw else None
+        return {
+            **fields,
+            "updated_at": updated_at or datetime.now(timezone.utc).isoformat(),
+            "updated_by": self.normalize_actor(payload.get("updated_by")),
+        }
+
+    def _normalize_inner_circle_for_write(self, payload: Dict[str, Any], actor: str) -> Dict[str, Any]:
+        fields = self._coerce_inner_circle_fields(payload)
+        return {
+            **fields,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_by": self.normalize_actor(actor),
+        }
+
+    def _read_or_create_inner_circle_locked(self) -> Dict[str, Any]:
+        raw = _safe_read_json(self._inner_circle_path)
+        if isinstance(raw, dict):
+            try:
+                return self._normalize_inner_circle_for_read(raw)
+            except ValueError:
+                pass
+        default = self._default_inner_circle()
+        self._write_json_atomic(self._inner_circle_path, default)
+        return default
+
+    def get_inner_circle(self) -> Dict[str, Any]:
+        with self._lock:
+            circle = self._read_or_create_inner_circle_locked()
+            self._write_json_atomic(self._inner_circle_path, circle)
+            return deepcopy(circle)
+
+    def update_inner_circle(
+        self,
+        payload: Dict[str, Any],
+        *,
+        actor: Optional[str] = None,
+        patch: bool = False,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid JSON payload.")
+        actor_norm = self.normalize_actor(actor)
+        with self._lock:
+            old = self._read_or_create_inner_circle_locked()
+            merged = (
+                self._merge_dicts(old, payload)
+                if patch
+                else self._merge_dicts(self._default_inner_circle(), payload)
+            )
+            new = self._normalize_inner_circle_for_write(merged, actor_norm)
+            self._write_json_atomic(self._inner_circle_path, new)
+
+        changed_keys = [
+            key for key in ("members",)
+            if old.get(key) != new.get(key)
+        ]
+        old_hash = _json_sha256(old)
+        new_hash = _json_sha256(new)
+        audit_payload = {
+            "changed_keys": changed_keys,
+            "old_snapshot_hash": old_hash,
+            "new_snapshot_hash": new_hash,
+            "mode": "patch" if patch else "put",
+        }
+        return new, audit_payload
 
     @staticmethod
     def _library_build_version() -> str:
@@ -2770,7 +2957,7 @@ class DashboardStorage:
         *,
         reload_control_from_disk: bool = False,
     ) -> Tuple[bool, Dict[str, Any], Dict[str, Any], List[str], bool]:
-        kill_switch_on = _env_bool(list(self._KILL_SWITCH_ENV_NAMES), False)
+        kill_switch_on = _env_bool(list(self._KILL_SWITCH_ENV_NAMES), False) or self._dashboard_kill_switch
         provider_status = get_provider_runtime_status()
         with self._lock:
             if reload_control_from_disk:
@@ -2902,6 +3089,8 @@ class DashboardStorage:
         eventsub_state = self.get_eventsub_runtime_state()
         step_ms["eventsub"] = (time.perf_counter() - t4) * 1000.0
 
+        send_fail = self.get_send_failure_state()
+
         active_provider = str(provider_status.get("active_provider", "none") or "none")
         if active_provider == "none":
             active_provider = str(runtime_snapshot.get("active_provider", "none") or "none")
@@ -2971,6 +3160,9 @@ class DashboardStorage:
                 ).strip()
                 or None,
             },
+            send_fail_count=int(send_fail.get("fail_count", 0) or 0),
+            send_fail_reason=send_fail.get("last_fail_reason"),
+            send_fail_at=send_fail.get("last_fail_at"),
         )
         step_ms["compose"] = (time.perf_counter() - t5) * 1000.0
 
@@ -3306,6 +3498,23 @@ class DashboardStorage:
         with self._lock:
             return dict(self._eventsub_runtime_state)
 
+    def record_send_failure(self, reason: str) -> None:
+        with self._lock:
+            self._send_failure_state["fail_count"] = int(self._send_failure_state.get("fail_count", 0)) + 1
+            self._send_failure_state["last_fail_reason"] = str(reason).strip() or "UNKNOWN"
+            self._send_failure_state["last_fail_at"] = datetime.now(timezone.utc).isoformat()
+
+    def record_send_success(self) -> None:
+        with self._lock:
+            self._send_failure_state["fail_count"] = 0
+            self._send_failure_state["last_fail_reason"] = None
+            self._send_failure_state["last_fail_at"] = None
+            self._send_failure_state["last_success_at"] = datetime.now(timezone.utc).isoformat()
+
+    def get_send_failure_state(self) -> Dict[str, Any]:
+        with self._lock:
+            return dict(self._send_failure_state)
+
     def record_eventsub_notification(
         self,
         *,
@@ -3417,6 +3626,81 @@ class DashboardStorage:
             "broadcaster_user_id": broadcaster_user_id,
             "primary_channel": primary_channel,
         }
+
+    def fetch_channel_emotes(self) -> Dict[str, Any]:
+        """Fetch custom channel emotes from Twitch Helix API."""
+        checked_at = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            runtime_config = self._twitch_runtime_config_locked()
+            state = self._load_twitch_auth_state_locked()
+            account_status = self._twitch_account_status_locked(
+                "broadcaster",
+                state,
+                checked_at=checked_at,
+                runtime_config=runtime_config,
+            )
+            accounts = state.get("accounts", {}) if isinstance(state, dict) else {}
+            row = accounts.get("broadcaster", {}) if isinstance(accounts, dict) else {}
+            if not isinstance(row, dict):
+                row = {}
+            disconnected = bool(row.get("disconnected", False))
+            local_raw = row.get("token")
+            local_token = local_raw.strip() if isinstance(local_raw, str) else ""
+            env_token = self._twitch_env_value(self._twitch_token_env_names("broadcaster"))
+            oauth_token = "" if disconnected else (local_token or env_token)
+            client_id = str(runtime_config.get("client_id", "")).strip()
+            primary_channel = str(runtime_config.get("primary_channel", "")).strip().lstrip("#").lower()
+
+        if not bool(account_status.get("connected", False)):
+            return {"ok": False, "error": "Broadcaster account not connected."}
+        if not oauth_token:
+            return {"ok": False, "error": "Missing broadcaster token."}
+        if not client_id:
+            return {"ok": False, "error": "TWITCH_CLIENT_ID required."}
+        if not primary_channel:
+            return {"ok": False, "error": "Primary channel is required."}
+
+        broadcaster_user_id = self._resolve_twitch_user_id(
+            login=primary_channel,
+            oauth_token=oauth_token,
+            client_id=client_id,
+        )
+        if not broadcaster_user_id:
+            return {"ok": False, "error": f"Could not resolve user id for '{primary_channel}'."}
+
+        token = self._twitch_access_token_without_prefix(oauth_token)
+        url = f"https://api.twitch.tv/helix/chat/emotes?broadcaster_id={quote_plus(broadcaster_user_id)}"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Client-ID": client_id,
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=8.0) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except Exception as exc:
+            return {"ok": False, "error": f"Twitch API error: {exc}"}
+
+        data = payload.get("data", []) if isinstance(payload, dict) else []
+        if not isinstance(data, list):
+            data = []
+        emotes = []
+        for entry in data:
+            if isinstance(entry, dict):
+                name = str(entry.get("name", "")).strip()
+                if not name:
+                    continue
+                emote_id = str(entry.get("id", "")).strip()
+                images = entry.get("images", {})
+                url = ""
+                if isinstance(images, dict):
+                    url = str(images.get("url_1x", "")).strip()
+                if not url and emote_id:
+                    url = f"https://static-cdn.jtvnbs.net/emoticons/v2/{emote_id}/static/dark/1.0"
+                emotes.append({"name": name, "id": emote_id, "url": url})
+        return {"ok": True, "emotes": emotes}
 
     def _default_twitch_config(self) -> Dict[str, Any]:
         return {
@@ -3967,6 +4251,15 @@ class DashboardStorage:
             row.pop("pending_state", None)
             self._save_twitch_auth_state_locked(current)
             self._invalidate_twitch_status_cache_locked()
+
+            # Restore env vars that twitch_disconnect may have popped.
+            # Without this the TwitchOutputAdapter cannot find the token
+            # even though the LiveChatBridge IRC read socket is still alive.
+            new_token = str(row.get("token") or "").strip()
+            if new_token:
+                oauth_val = new_token if new_token.lower().startswith("oauth:") else f"oauth:{new_token}"
+                for env_name in self._twitch_token_env_names(account):
+                    os.environ[env_name] = oauth_val
 
         status_payload = self.get_twitch_status(force_refresh=True)
         account_status = status_payload.get("accounts", {}).get(account, {})

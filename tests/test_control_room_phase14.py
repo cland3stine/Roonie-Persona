@@ -146,7 +146,7 @@ def test_runtime_path_resolver_prefers_localappdata_on_windows(tmp_path: Path, m
     monkeypatch.delenv("ROONIE_DASHBOARD_RUNS_DIR", raising=False)
 
     paths = resolve_runtime_paths(repo_root=repo_root, runs_dir="runs", log_dir="logs")
-    assert str(paths.runtime_root).startswith(str(tmp_path / "localapp"))
+    assert paths.runtime_root == repo_root.resolve()
     assert paths.data_dir == paths.runtime_root / "data"
     assert paths.logs_dir == paths.runtime_root / "logs"
 

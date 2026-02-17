@@ -35,6 +35,9 @@ class StatusResponse:
     provider_models: Dict[str, str] = field(default_factory=dict)
     resolved_models: Dict[str, str] = field(default_factory=dict)
     routing_info: Dict[str, Any] = field(default_factory=dict)
+    send_fail_count: int = 0
+    send_fail_reason: Optional[str] = None
+    send_fail_at: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

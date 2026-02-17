@@ -1,4 +1,4 @@
-﻿"""Twitch output adapter (live send via IRC)."""
+"""Twitch output adapter (live send via IRC)."""
 
 from __future__ import annotations
 
@@ -12,34 +12,20 @@ PORT = 6697
 
 
 class TwitchOutputAdapter:
-    def handle_output(self, envelope: Dict[str, Any], ctx: Dict[str, Any]) -> None:
-        if envelope.get("type") != "RESPOND_PUBLIC":
-            return
-        if ctx.get("mode") not in {"live", "replay"}:
-            return
-
-        if ctx.get("mode") == "replay":
-            print("[TwitchOutputAdapter] replay mode: output suppressed")
-            return
-
-        if os.getenv("TWITCH_OUTPUT_ENABLED") != "1":
-            return
-        if os.getenv("ROONIE_OUTPUT_DISABLED") == "1":
-            return
-
+    def handle_output(self, envelope: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
         channel = os.getenv("TWITCH_CHANNEL", "").lstrip("#")
         if not channel:
-            print("[TwitchOutputAdapter] live send skipped: no TWITCH_CHANNEL")
-            return
+            return {"sent": False, "reason": "NO_CHANNEL"}
         nick = os.getenv("TWITCH_BOT_NICK")
+        if not nick:
+            return {"sent": False, "reason": "NO_BOT_NICK"}
         token = os.getenv("TWITCH_OAUTH_TOKEN")
-        if not nick or not token:
-            print("[TwitchOutputAdapter] live send skipped: missing auth")
-            return
+        if not token:
+            return {"sent": False, "reason": "NO_OAUTH_TOKEN"}
 
         text = envelope.get("response_text") or ""
         if not text:
-            return
+            return {"sent": False, "reason": "EMPTY_TEXT"}
 
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -54,6 +40,7 @@ class TwitchOutputAdapter:
             sock.sendall(b"QUIT\r\n")
             sock.close()
             print(f"[TwitchOutputAdapter] send ok -> #{channel}")
+            return {"sent": True, "reason": "OK"}
         except Exception as exc:
             print(f"[TwitchOutputAdapter] send failed: {exc}")
-        return
+            return {"sent": False, "reason": f"SEND_FAILED: {exc}"}

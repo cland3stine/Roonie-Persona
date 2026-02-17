@@ -13,11 +13,11 @@ _TOKEN_RE = re.compile(r"\b[A-Za-z0-9_]{3,32}\b")
 
 
 def _emit_cooldown_seconds() -> float:
-    raw = os.getenv("ROONIE_OUTPUT_RATE_LIMIT_SECONDS", "30")
+    raw = os.getenv("ROONIE_OUTPUT_RATE_LIMIT_SECONDS", "6")
     try:
         return max(0.0, float(raw))
     except (TypeError, ValueError):
-        return 30.0
+        return 6.0
 
 
 def _decision_trace(decision: Dict[str, Any]) -> Dict[str, Any]:
@@ -50,9 +50,16 @@ def _decision_approved_emotes(decision: Dict[str, Any]) -> List[str]:
         return []
     out: List[str] = []
     for item in raw[:24]:
-        text = str(item or "").strip()
-        if text:
-            out.append(text)
+        if isinstance(item, dict):
+            if item.get("denied", False):
+                continue
+            name = str(item.get("name") or "").strip()
+            if name:
+                out.append(name)
+        else:
+            text = str(item or "").strip()
+            if text:
+                out.append(text)
     return out
 
 
