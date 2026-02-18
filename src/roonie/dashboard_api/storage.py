@@ -2926,6 +2926,21 @@ class DashboardStorage:
             except (TypeError, ValueError):
                 context_turns_used = 0
 
+            # Extract model_used from proposal trace
+            model_used_raw = proposal.get("model_used") or proposal.get("model") or None
+            model_used = str(model_used_raw).strip() if model_used_raw else None
+
+            # Extract behavior_category from trace or output
+            behavior_raw = trace.get("behavior", {})
+            if not isinstance(behavior_raw, dict):
+                behavior_raw = {}
+            behavior_category = (
+                str(behavior_raw.get("category", "")).strip()
+                or str(output.get("category", "")).strip()
+                or str(decision.get("category", "")).strip()
+                or None
+            )
+
             out.append(
                 EventResponse(
                     ts=derived_ts,
@@ -2946,6 +2961,8 @@ class DashboardStorage:
                     suppression_detail=self._suppression_detail(trace),
                     context_active=context_active,
                     context_turns_used=context_turns_used,
+                    model_used=model_used,
+                    behavior_category=behavior_category,
                 )
             )
 

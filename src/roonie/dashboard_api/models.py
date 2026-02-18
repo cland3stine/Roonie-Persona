@@ -57,6 +57,8 @@ class EventResponse:
     suppression_detail: Optional[str]
     context_active: bool
     context_turns_used: int
+    model_used: Optional[str] = None
+    behavior_category: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         payload = asdict(self)

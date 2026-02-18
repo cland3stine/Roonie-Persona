@@ -94,9 +94,10 @@ const TEXT_STYLES = {
   meta: {
     fontSize: 10,
     color: "#555",
-    fontFamily: "'IBM Plex Sans', sans-serif",
+    fontFamily: "'JetBrains Mono', monospace",
     lineHeight: 1.5,
     fontWeight: 400,
+    letterSpacing: 0.5,
   },
 };
 
@@ -121,6 +122,50 @@ function buildMessageLine(event) {
   const decision = (event.decision || "").trim();
   if (msg && decision) return `${msg} -> ${decision}`;
   return msg || decision || "";
+}
+
+function MessageBlock({ event }) {
+  if (!event) return null;
+  const user = (event.user_handle || "viewer").trim();
+  const msg = (event.message_text || "").trim();
+  const response = (event.final_text || event.decision || "").trim();
+  const model = (event.model_used || "").trim();
+  const category = (event.behavior_category || "").trim().toUpperCase();
+  const dtype = (event.decision_type || "speak").trim();
+  const suppressionReason = (event.suppression_reason || "").trim();
+  const suppressionDetail = (event.suppression_detail || "").trim();
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      {msg && (
+        <div style={{ fontSize: 12, color: "#aaa", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.5 }}>
+          <span style={{ color: "#7faacc" }}>@{user}:</span> {msg}
+        </div>
+      )}
+      {dtype === "speak" && response && response.toUpperCase() !== "NOOP" ? (
+        <div style={{ fontSize: 12, color: "#ccc", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.5 }}>
+          <span style={{ color: "#2ecc40", fontWeight: 600 }}>Roonie:</span> {response}
+        </div>
+      ) : dtype === "suppress" ? (
+        <div style={{ fontSize: 12, color: "#ff4136", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.5 }}>
+          Suppressed: {suppressionReason}{suppressionDetail ? ` (${suppressionDetail})` : ""}
+        </div>
+      ) : dtype === "noop" ? (
+        <div style={{ fontSize: 12, color: "#ff851b", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.5 }}>
+          NOOP{suppressionReason ? `: ${suppressionReason}` : ""}
+        </div>
+      ) : (
+        <div style={{ fontSize: 12, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.5 }}>
+          No response
+        </div>
+      )}
+      {(model || category) && (
+        <div style={{ fontSize: 9, color: "#555", fontFamily: "'JetBrains Mono', monospace", letterSpacing: 0.5 }}>
+          {model ? `MODEL: ${model}` : ""}{model && category ? " | " : ""}{category || ""}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // MICRO COMPONENTS
@@ -1242,7 +1287,10 @@ function LivePage({ statusData, eventsData, suppressionsData, performAction, bus
   const silenceTimer = Number.isFinite(silenceUntilMs)
     ? Math.max(0, Math.ceil((silenceUntilMs - Date.now()) / 1000))
     : null;
-  const chatActivity = eventsData.length >= 5 ? "BUSY" : (eventsData.length >= 2 ? "FLOWING" : "QUIET");
+  // Chat activity based on messages in the last 5 minutes
+  const fiveMinAgo = Date.now() - 5 * 60 * 1000;
+  const recentCount = eventsData.filter((e) => e.ts && Date.parse(e.ts) > fiveMinAgo).length;
+  const chatActivity = recentCount >= 10 ? "BUSY" : (recentCount >= 5 ? "FLOWING" : "QUIET");
   const contextText = statusData.context_last_active
     ? `${statusData.context_last_turns_used}-turn carry active`
     : "No context carry";
@@ -1311,14 +1359,11 @@ function LivePage({ statusData, eventsData, suppressionsData, performAction, bus
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <Led color={statusData.eventsub_connected ? "#2ecc40" : "#ff4136"} size={8} />
             <span style={{ color: statusData.eventsub_connected ? "#888" : "#ff4136" }}>EVENTSUB {statusData.eventsub_connected ? "OK" : "DOWN"}</span>
-            {!statusData.eventsub_connected && statusData.eventsub_last_error && (
-              <span style={{ color: "#666", fontSize: 9, maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{String(statusData.eventsub_last_error).slice(0, 40)}</span>
-            )}
           </div>
           {statusData.send_fail_count > 0 && (
             <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
               <Led color="#ff4136" size={8} pulse />
-              <span style={{ color: "#ff4136", fontWeight: 600 }}>SEND FAIL: {statusData.send_fail_reason || "UNKNOWN"}</span>
+              <span style={{ color: "#ff4136", fontWeight: 600 }}>SEND FAIL</span>
               <span style={{ color: "#ff4136", fontSize: 9 }}>({statusData.send_fail_count}x)</span>
             </div>
           )}
@@ -1326,7 +1371,23 @@ function LivePage({ statusData, eventsData, suppressionsData, performAction, bus
             <Led color={isOfflineDirector ? "#ff4136" : "#2ecc40"} size={8} pulse={isOfflineDirector} />
             <span style={{ color: isOfflineDirector ? "#ff4136" : "#888" }}>{isOfflineDirector ? "\u26A0 OFFLINE" : "PROVIDER"}</span>
           </div>
+          <div style={{ width: 1, height: 14, background: "#333", flexShrink: 0 }} />
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <Led color={activityColors[chatActivity]} size={8} pulse={chatActivity === "BUSY"} />
+            <span style={{ color: activityColors[chatActivity], fontWeight: chatActivity !== "QUIET" ? 600 : 400 }}>CHAT: {chatActivity}</span>
+            <span style={{ color: "#555", fontSize: 9 }}>({recentCount}/5m)</span>
+          </div>
         </div>
+        {((!statusData.eventsub_connected && statusData.eventsub_last_error) || (statusData.send_fail_count > 0 && statusData.send_fail_reason)) && (
+          <div style={{ marginTop: 6, fontSize: 9, color: "#666", fontFamily: "'JetBrains Mono', monospace", lineHeight: 1.6, wordBreak: "break-word" }}>
+            {!statusData.eventsub_connected && statusData.eventsub_last_error && (
+              <div>EVENTSUB: {String(statusData.eventsub_last_error)}</div>
+            )}
+            {statusData.send_fail_count > 0 && statusData.send_fail_reason && (
+              <div>SEND FAIL: {String(statusData.send_fail_reason)}</div>
+            )}
+          </div>
+        )}
       </RackPanel>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -1360,32 +1421,27 @@ function LivePage({ statusData, eventsData, suppressionsData, performAction, bus
           </div>
         </RackPanel>
 
-        <RackPanel>
-          <RackLabel>Chat Activity</RackLabel>
-          <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-            {["QUIET", "FLOWING", "BUSY"].map((level) => (
-              <div key={level} style={{
-                display: "flex", alignItems: "center", gap: 6, padding: "4px 10px", borderRadius: 2,
-                background: chatActivity === level ? `${activityColors[level]}15` : "transparent",
-                border: `1px solid ${chatActivity === level ? activityColors[level] : "transparent"}`,
-              }}>
-                <Led color={activityColors[level]} size={6} pulse={chatActivity === level} />
-                <span style={{ fontSize: 11, color: chatActivity === level ? activityColors[level] : "#444", fontWeight: chatActivity === level ? 700 : 400, letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace" }}>{level}</span>
-              </div>
-            ))}
-          </div>
-        </RackPanel>
       </div>
 
       <RackPanel style={{ display: "flex", flexDirection: "column" }}>
-        <RackLabel>Last 5 Messages - Roonie</RackLabel>
-        <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
-          {(eventsData.length ? eventsData : []).map((msg, i) => (
-            <div key={i} style={{ padding: "10px 0", borderBottom: i < eventsData.length - 1 ? "1px solid #222" : "none", display: "flex", gap: 12, alignItems: "flex-start" }}>
-              <Timestamp time={fmtTime(msg.ts)} />
-              <div style={{ fontSize: 12, color: "#aaa", lineHeight: 1.5, fontFamily: "'IBM Plex Sans', sans-serif" }}>{buildMessageLine(msg)}</div>
-            </div>
-          ))}
+        <RackLabel>Recent Messages</RackLabel>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 2 }}>
+          {(eventsData.length ? eventsData : []).map((msg, i) => {
+            const dtype = msg.decision_type || "speak";
+            const borderColor = dtype === "suppress" ? "#ff413630" : dtype === "noop" ? "#ff851b30" : "#2a2a2e";
+            return (
+              <div key={i} style={{
+                padding: "10px 12px",
+                background: i % 2 === 0 ? "#16161a" : "transparent",
+                borderLeft: `3px solid ${borderColor}`,
+                borderRadius: "0 2px 2px 0",
+                display: "flex", gap: 12, alignItems: "flex-start",
+              }}>
+                <Timestamp time={fmtTime(msg.ts)} />
+                <MessageBlock event={msg} />
+              </div>
+            );
+          })}
           {!eventsData.length && <AwaitingBlock style={{ padding: "10px 0" }} message="No messages yet" />}
         </div>
       </RackPanel>
@@ -1749,18 +1805,125 @@ function NowPlayingPage() {
 
 function LogsPage({ eventsData, suppressionsData, operatorLogData }) {
   const [at, setAt] = useState("messages");
-  const tabs = [{ id: "messages", label: "MESSAGES" }, { id: "suppression", label: "SUPPRESSED" }, { id: "operator", label: "OPERATOR" }];
-  const messages = eventsData.length ? eventsData : [];
-  const suppressions = suppressionsData.length ? suppressionsData : [];
+  const tabs = [{ id: "messages", label: "MESSAGE LOG" }, { id: "operator", label: "OPERATOR LOG" }];
+
+  // Unified event stream: merge events + suppressions, deduplicate by ts+user_handle, sort by time desc
+  const allEvents = [...(eventsData || []), ...(suppressionsData || [])];
+  const seen = new Set();
+  const unified = allEvents.filter((e) => {
+    const key = `${e.ts || ""}|${e.user_handle || ""}|${e.message_text || ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).sort((a, b) => {
+    const ta = a.ts ? new Date(a.ts).getTime() : 0;
+    const tb = b.ts ? new Date(b.ts).getTime() : 0;
+    return tb - ta;
+  });
+
   const operators = operatorLogData.length ? operatorLogData : [];
+
+  const ledColorForType = (dtype) => {
+    if (dtype === "suppress") return "#ff4136";
+    if (dtype === "noop") return "#ff851b";
+    return "#2ecc40";
+  };
+  const borderColorForType = (dtype) => {
+    if (dtype === "suppress") return "#ff413633";
+    if (dtype === "noop") return "#ff851b33";
+    return "transparent";
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <div style={{ display: "flex", gap: 0, borderBottom: "1px solid #2a2a2e" }}>{tabs.map((tab) => (<button key={tab.id} onClick={() => setAt(tab.id)} style={{ background: at === tab.id ? "#1a1a1e" : "transparent", color: at === tab.id ? "#ccc" : "#555", border: "none", borderBottom: at === tab.id ? "2px solid #7faacc" : "2px solid transparent", padding: "10px 20px", fontSize: 11, letterSpacing: 2, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, cursor: "pointer" }}>{tab.label}</button>))}</div>
+      <div style={{ display: "flex", gap: 0, borderBottom: "1px solid #2a2a2e" }}>
+        {tabs.map((tab) => (
+          <button key={tab.id} onClick={() => setAt(tab.id)} style={{
+            background: at === tab.id ? "#1a1a1e" : "transparent",
+            color: at === tab.id ? "#ccc" : "#555",
+            border: "none",
+            borderBottom: at === tab.id ? "2px solid #7faacc" : "2px solid transparent",
+            padding: "10px 20px", fontSize: 11, letterSpacing: 2,
+            fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, cursor: "pointer",
+          }}>{tab.label}</button>
+        ))}
+      </div>
       <RackPanel>
-        {at === "messages" && (<><RackLabel>Message Log</RackLabel>{messages.map((msg, i) => (<div key={i} style={{ display: "flex", gap: 12, padding: "10px 0", borderBottom: "1px solid #1f1f22", alignItems: "flex-start" }}><Timestamp time={fmtTime(msg.ts)} /><Led color="#2ecc40" size={5} /><div style={{ fontSize: 12, color: "#aaa", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.5 }}>{buildMessageLine(msg) || "\u2014"}</div></div>))}{messages.length === 0 && <div style={{ fontSize: 12, color: "#555", fontFamily: "'IBM Plex Sans', sans-serif" }}>No messages logged</div>}</>)}
-        {at === "suppression" && (<><RackLabel>Suppression Log</RackLabel>{suppressions.map((e, i) => (<div key={i} style={{ display: "flex", gap: 12, padding: "10px 0", borderBottom: "1px solid #1f1f22", alignItems: "flex-start" }}><Timestamp time={fmtTime(e.ts)} /><Led color="#ff851b" size={5} /><div style={{ flex: 1 }}><div style={{ fontSize: 12, color: "#aaa", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.5 }}>{e.suppression_detail ? `${e.suppression_reason} (${e.suppression_detail})` : (e.suppression_reason || "\u2014")}</div><div style={{ display: "inline-block", marginTop: 4, padding: "2px 8px", background: "#ff851b12", border: "1px solid #ff851b33", borderRadius: 2, fontSize: 9, color: "#ff851b", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>{e.suppression_reason || "\u2014"}</div></div></div>))}{suppressions.length === 0 && <div style={{ fontSize: 12, color: "#555", fontFamily: "'IBM Plex Sans', sans-serif" }}>No suppressions logged</div>}</>)}
-        {at === "operator" && (<><RackLabel>Operator Action Log</RackLabel>{operators.map((e, i) => (<div key={i} style={{ display: "flex", gap: 12, padding: "10px 0", borderBottom: "1px solid #1f1f22", alignItems: "flex-start" }}><Timestamp time={fmtTime(e.ts)} /><span style={{ fontSize: 10, padding: "2px 8px", background: e.operator === "Art" ? "#7faacc18" : "#cc7faa18", border: `1px solid ${e.operator === "Art" ? "#7faacc33" : "#cc7faa33"}`, borderRadius: 2, color: e.operator === "Art" ? "#7faacc" : "#cc7faa", fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, letterSpacing: 1, minWidth: 30, textAlign: "center" }}>{String(e.operator || "").toUpperCase() || "\u2014"}</span><div style={{ fontSize: 12, color: "#aaa", fontFamily: "'IBM Plex Sans', sans-serif" }}>{e.action || "\u2014"}</div></div>))}{operators.length === 0 && <div style={{ fontSize: 12, color: "#555", fontFamily: "'IBM Plex Sans', sans-serif" }}>No operator actions logged</div>}</>)}
+        {at === "messages" && (
+          <>
+            <RackLabel>Unified Message Log</RackLabel>
+            {unified.map((msg, i) => {
+              const dtype = msg.decision_type || "speak";
+              return (
+                <div key={i} style={{
+                  display: "flex", gap: 12, padding: "10px 0",
+                  borderBottom: "1px solid #1f1f22", alignItems: "flex-start",
+                  borderLeft: dtype !== "speak" ? `3px solid ${borderColorForType(dtype)}` : "3px solid transparent",
+                  paddingLeft: 8,
+                }}>
+                  <Timestamp time={fmtTime(msg.ts)} />
+                  <Led color={ledColorForType(dtype)} size={5} />
+                  <MessageBlock event={msg} />
+                </div>
+              );
+            })}
+            {unified.length === 0 && <div style={{ fontSize: 12, color: "#555", fontFamily: "'IBM Plex Sans', sans-serif" }}>No messages logged</div>}
+          </>
+        )}
+        {at === "operator" && (
+          <>
+            <RackLabel>Operator Action Log</RackLabel>
+            {operators.map((e, i) => {
+              const opColor = e.operator === "Art" ? "#7faacc" : "#cc7faa";
+              const resultColor = e.result && String(e.result).startsWith("DENIED") ? "#ff4136" : "#2ecc40";
+              return (
+                <div key={i} style={{
+                  display: "flex", gap: 12, padding: "10px 0",
+                  borderBottom: "1px solid #1f1f22", alignItems: "flex-start", flexWrap: "wrap",
+                }}>
+                  <Timestamp time={fmtTime(e.ts)} />
+                  <span style={{
+                    fontSize: 10, padding: "2px 8px",
+                    background: `${opColor}18`, border: `1px solid ${opColor}33`,
+                    borderRadius: 2, color: opColor,
+                    fontFamily: "'JetBrains Mono', monospace", fontWeight: 700,
+                    letterSpacing: 1, minWidth: 30, textAlign: "center",
+                  }}>
+                    {String(e.operator || "").toUpperCase() || "\u2014"}
+                    {e.role ? ` (${e.role})` : ""}
+                  </span>
+                  {e.auth_mode && (
+                    <span style={{
+                      fontSize: 9, padding: "2px 6px",
+                      background: "#22222a", border: "1px solid #333",
+                      borderRadius: 2, color: "#666",
+                      fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1,
+                    }}>{e.auth_mode}</span>
+                  )}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 12, color: "#aaa", fontFamily: "'IBM Plex Sans', sans-serif" }}>{e.action || "\u2014"}</span>
+                      {e.result && (
+                        <span style={{
+                          fontSize: 9, padding: "1px 6px",
+                          background: `${resultColor}12`, border: `1px solid ${resultColor}33`,
+                          borderRadius: 2, color: resultColor,
+                          fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, letterSpacing: 1,
+                        }}>{e.result}</span>
+                      )}
+                    </div>
+                    {e.payload_summary && (
+                      <div style={{ fontSize: 9, color: "#555", fontFamily: "'JetBrains Mono', monospace", marginTop: 3 }}>
+                        {e.payload_summary}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+            {operators.length === 0 && <div style={{ fontSize: 12, color: "#555", fontFamily: "'IBM Plex Sans', sans-serif" }}>No operator actions logged</div>}
+          </>
+        )}
       </RackPanel>
     </div>
   );
@@ -2400,12 +2563,58 @@ function SensesPage({ sensesStatusData }) {
 // --- PAGE: SETTINGS & GOVERNANCE ---
 
 function GovernancePage() {
+  const rules = [
+    "Roonie never initiates conversation unprompted.",
+    "Roonie limits exclamation points to two maximum. Warmth comes from specificity, not volume.",
+    "Roonie goes quieter when chat gets louder - never louder.",
+    "Roonie does not reference operator names unless asked.",
+    "Roonie does not guess track IDs - uncertainty is stated.",
+    "Roonie does not store or surface personal viewer data beyond operator notes.",
+    "Silence and restraint are features, not failures.",
+    "Roonie uses no Unicode emojis \u2014 only approved Twitch channel emotes, one per message max.",
+  ];
+  const antiDrift = [
+    { label: "Persona editing", status: "LOCKED" },
+    { label: "Auto-message scheduling", status: "NOT SUPPORTED" },
+    { label: "Viewer profiling", status: "NOT SUPPORTED" },
+    { label: "Deep configuration knobs", status: "NOT EXPOSED" },
+  ];
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-      <RackPanel><RackLabel>Locked Behavior - Read Only</RackLabel><div style={{ fontSize: 10, color: "#555", fontFamily: "'IBM Plex Sans', sans-serif", marginBottom: 12 }}>These constraints are enforced at startup and cannot be changed from the dashboard.</div>{["Roonie never initiates conversation unprompted.", "Roonie never uses exclamation-heavy or hype language.", "Roonie goes quieter when chat gets louder - never louder.", "Roonie does not reference operator names unless asked.", "Roonie does not guess track IDs - uncertainty is stated.", "Roonie does not store or surface personal viewer data beyond operator notes.", "Silence and restraint are features, not failures."].map((rule, i) => (<div key={i} style={{ padding: "8px 12px", marginBottom: 4, background: "#15151a", borderLeft: "2px solid #2ecc4044", borderRadius: "0 2px 2px 0" }}><div style={{ fontSize: 12, color: "#aaa", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.5 }}>{rule}</div></div>))}</RackPanel>
+      <RackPanel>
+        <RackLabel>Enforced Behavioral Constraints</RackLabel>
+        <div style={{ fontSize: 11, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif", marginBottom: 14, lineHeight: 1.6 }}>
+          This page documents Roonie's enforced behavioral constraints. These rules are baked into the persona system and cannot be modified from the dashboard. They exist to prevent drift and ensure consistent behavior.
+        </div>
+        {rules.map((rule, i) => (
+          <div key={i} style={{ padding: "8px 12px", marginBottom: 4, background: "#15151a", borderLeft: "2px solid #2ecc4044", borderRadius: "0 2px 2px 0" }}>
+            <div style={{ fontSize: 12, color: "#aaa", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.5 }}>{rule}</div>
+          </div>
+        ))}
+      </RackPanel>
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        <RackPanel><RackLabel>Persona Source</RackLabel><div style={{ padding: "10px 12px", background: "#15151a", border: "1px solid #222", borderRadius: 2, marginBottom: 8 }}><div style={{ fontSize: 12, color: "#aaa", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.5 }}>Persona is defined in versioned policy files loaded at startup.</div></div><div style={{ padding: "10px 12px", background: "#15151a", border: "1px solid #222", borderRadius: 2 }}><div style={{ fontSize: 12, color: "#aaa", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.5 }}>Dashboard only edits bounded Style Profile values.</div></div><div style={{ fontSize: 9, color: "#444", fontFamily: "'JetBrains Mono', monospace", marginTop: 10, letterSpacing: 1 }}>NO FREE-TEXT PERSONA EDITOR EXISTS BY DESIGN</div></RackPanel>
-        <RackPanel><RackLabel>Anti-Drift</RackLabel><div style={{ fontSize: 10, color: "#555", fontFamily: "'IBM Plex Sans', sans-serif", marginBottom: 12 }}>This section exists to prevent scope creep. If something is not listed here, it is not in scope.</div>{[{ label: "Persona editing", status: "LOCKED" }, { label: "Auto-message scheduling", status: "NOT SUPPORTED" }, { label: "Viewer profiling", status: "NOT SUPPORTED" }, { label: "Deep configuration knobs", status: "NOT EXPOSED" }].map((item, i) => (<div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "7px 0", borderBottom: i < 3 ? "1px solid #1f1f22" : "none" }}><span style={{ fontSize: 12, color: "#888", fontFamily: "'IBM Plex Sans', sans-serif" }}>{item.label}</span><span style={{ fontSize: 9, padding: "2px 8px", background: "#ff851b12", border: "1px solid #ff851b33", borderRadius: 2, color: "#ff851b", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>{item.status}</span></div>))}</RackPanel>
+        <RackPanel>
+          <RackLabel>Persona Source</RackLabel>
+          <div style={{ padding: "10px 12px", background: "#15151a", border: "1px solid #222", borderRadius: 2, marginBottom: 8 }}>
+            <div style={{ fontSize: 12, color: "#aaa", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.5 }}>Persona is defined in versioned policy files loaded at startup.</div>
+          </div>
+          <div style={{ padding: "10px 12px", background: "#15151a", border: "1px solid #222", borderRadius: 2 }}>
+            <div style={{ fontSize: 12, color: "#aaa", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.5 }}>Dashboard only edits bounded Style Profile values.</div>
+          </div>
+          <div style={{ fontSize: 9, color: "#444", fontFamily: "'JetBrains Mono', monospace", marginTop: 10, letterSpacing: 1 }}>NO FREE-TEXT PERSONA EDITOR EXISTS BY DESIGN</div>
+        </RackPanel>
+        <RackPanel>
+          <RackLabel>Anti-Drift</RackLabel>
+          <div style={{ fontSize: 11, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif", marginBottom: 12, lineHeight: 1.6 }}>
+            These guardrails prevent scope creep. Features not listed here are intentionally out of scope. If you find yourself wanting to add something, check here first.
+          </div>
+          {antiDrift.map((item, i) => (
+            <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "7px 0", borderBottom: i < antiDrift.length - 1 ? "1px solid #1f1f22" : "none" }}>
+              <span style={{ fontSize: 12, color: "#888", fontFamily: "'IBM Plex Sans', sans-serif" }}>{item.label}</span>
+              <span style={{ fontSize: 9, padding: "2px 8px", background: "#ff851b12", border: "1px solid #ff851b33", borderRadius: 2, color: "#ff851b", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>{item.status}</span>
+            </div>
+          ))}
+        </RackPanel>
       </div>
     </div>
   );

@@ -50,11 +50,12 @@ These are the "don't do this" rules that prevent Roonie from drifting into bad h
 - No stage directions (*actions*).
 
 ### Emotes
-- Only use approved channel emotes (currently: `RoonieWave`, `RoonieHi`).
+- Only use approved channel emotes. The full approved set is the 59 `ruleof6*` emotes (e.g., `ruleof6Tune`, `ruleof6Disco`, `ruleof6Beer`, `ruleof6Paws`, `ruleof6Fire`, `ruleof6Vinyl`, `ruleof6Headphones`, `ruleof6Dance`, etc.). Legacy `RoonieWave` and `RoonieHi` are **denied**.
 - Unapproved emotes (detected by CamelCase/underscore heuristic) are **hard-suppressed** by the output gate -- the message will never send.
 - **One emote per message maximum, at the END only.** Never mid-sentence, never stacked.
 - **Most messages should have no emote at all.** An emote is punctuation, not decoration.
 - Never invent or guess emote names.
+- **No Unicode emojis** (🔥 ❤️ 😂 etc.). Only approved Twitch channel emotes.
 
 ---
 
@@ -266,7 +267,7 @@ The final prompt sent to the LLM is built in this order (top = first):
 
 From `studio_profile.json`:
 - **Location**: Washington DC area
-- **Approved emotes**: RoonieWave, RoonieHi
+- **Approved emotes**: 59 `ruleof6*` channel emotes (RoonieWave and RoonieHi denied)
 - **Socials**: Twitch (twitch.tv/ruleofrune), TikTok (tiktok.com/@ruleofrune)
 - **FAQ**: "Where are you based?" -> "Washington DC area."
 - **Gear**: all placeholder "(fill later)"
@@ -463,8 +464,9 @@ senses:
 ```json
 {
   "approved_emotes": [
-    {"denied": false, "desc": "", "name": "RoonieWave"},
-    {"denied": false, "desc": "", "name": "RoonieHi"}
+    {"denied": true, "desc": "wave greeting", "name": "RoonieWave"},
+    {"denied": true, "desc": "hi greeting", "name": "RoonieHi"},
+    "... 59 ruleof6* emotes (see data/studio_profile.json for full list)"
   ],
   "faq": [
     {"a": "Washington DC area.", "q": "Where are you based?"}
