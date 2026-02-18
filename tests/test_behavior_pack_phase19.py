@@ -338,4 +338,6 @@ def test_live_stub_output_is_sanitized_when_flag_enabled(tmp_path, monkeypatch) 
     run_doc = json.loads(out_path.read_text(encoding="utf-8"))
     decision = run_doc["decisions"][0]
     assert decision["action"] == "RESPOND_PUBLIC"
-    assert decision["response_text"] == "Doing great, glad you're here!"
+    # Stub pool — any valid how-are banter response is acceptable
+    _HOW_POOL = {"I'm good. glad you're here", "doing well. this set is helping", "all good up here on the booth"}
+    assert decision["response_text"] in _HOW_POOL

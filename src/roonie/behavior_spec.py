@@ -96,11 +96,11 @@ def behavior_guidance(
     elif category == CATEGORY_BANTER:
         if topic_anchor:
             lines.append(f"Recent topic: {topic_anchor}. Pick up the thread if relevant.")
-        lines.append("Chat naturally. Be warm, react to what they actually said. Light teasing is welcome if the moment is right. Don't ask a question unless you genuinely need an answer — most messages should just be reactions or comments.")
+        lines.append("Chat naturally. Be warm, react to what they actually said. Light teasing is welcome if the moment is right.")
     if topic_anchor and category != CATEGORY_BANTER:
         lines.append(f"Recent topic: {topic_anchor}. Pick up the thread if relevant.")
     if approved_emotes:
-        lines.append(f"Your channel emotes: {', '.join(approved_emotes)}. Use them freely — they're part of your personality. Sprinkle them in naturally, especially your own channel emotes.")
+        lines.append(f"Approved emotes: {', '.join(approved_emotes)}. One per message maximum, at the END only. Most messages: no emote.")
     return "\n".join(lines) if lines else ""
 
 

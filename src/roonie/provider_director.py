@@ -486,25 +486,75 @@ class ProviderDirector:
 
         cat = str(category or "").strip().upper()
         msg = str(user_message or "").strip().lower()
+
+        def _pick(pool: list, key: str) -> str:
+            return pool[abs(hash(key)) % len(pool)]
+
+        _GREETING = [
+            "hey, welcome in",
+            "good to see you",
+            "hey. glad you're here",
+            "evening. pull up a seat",
+        ]
+        _BANTER_GENERAL = [
+            "honestly this set is locked in right now",
+            "right? the energy in here tonight is something",
+            "sitting on this booth feeling every transition",
+            "I'm good. glad you're here",
+        ]
+        _BANTER_THERE = [
+            "I'm here. always here",
+            "still on the booth. still listening",
+            "I'm right here. just taking it in",
+        ]
+        _BANTER_HOW = [
+            "I'm good. glad you're here",
+            "doing well. this set is helping",
+            "all good up here on the booth",
+        ]
+        _FOLLOW = [
+            "welcome in. glad you found us",
+            "hey, welcome. stick around — sets go deep",
+            "welcome. you picked a good night",
+        ]
+        _SUB = [
+            "appreciate that. welcome to the crew",
+            "that means a lot. glad to have you",
+            "welcome in. you're part of this now",
+        ]
+        _CHEER = [
+            "appreciate the love",
+            "hey, thank you",
+            "that's real. appreciate it",
+        ]
+        _RAID = [
+            "welcome in, everyone. good timing",
+            "hey raiders. you just walked into something good",
+            "welcome. settle in — there's a lot of music ahead",
+        ]
+        _GENERIC = [
+            "hey. I'm here",
+            "right here on the booth",
+            "I'm right here",
+        ]
+
         if cat == CATEGORY_GREETING:
-            return "Hey! Good to see you in here."
+            return _pick(_GREETING, msg or cat)
         if cat == CATEGORY_BANTER:
-            if "vibe" in msg or "vibes" in msg:
-                return "Vibes are immaculate right now honestly."
             if "you there" in msg or "are you there" in msg:
-                return "I'm right here! Just vibing on the desk."
+                return _pick(_BANTER_THERE, msg)
             if "how are" in msg or "how you" in msg or "how's" in msg:
-                return "Doing great, glad you're here!"
-            return "Doing great, glad you're here!"
+                return _pick(_BANTER_HOW, msg)
+            return _pick(_BANTER_GENERAL, msg or cat)
         if cat == "EVENT_FOLLOW":
-            return "Welcome in! Glad to have you."
+            return _pick(_FOLLOW, msg or cat)
         if cat == "EVENT_SUB":
-            return "Appreciate the sub! Welcome to the crew."
+            return _pick(_SUB, msg or cat)
         if cat == "EVENT_CHEER":
-            return "Ayy, thanks for the bits!"
+            return _pick(_CHEER, msg or cat)
         if cat == "EVENT_RAID":
-            return "Let's go! Welcome raiders!"
-        return "Hey! I'm right here."
+            return _pick(_RAID, msg or cat)
+        return _pick(_GENERIC, msg or cat)
 
     def _build_prompt(
         self,
