@@ -16,6 +16,7 @@ from roonie.provider_director import ProviderDirector
 from roonie.types import Env, Event
 from responders.output_gate import maybe_emit
 from responders.stdout_responder import emit
+from responders.typing_delay import compute_typing_delay
 from memory.intent_evaluator import evaluate_memory_intents
 from adapters.twitch_output import TwitchOutputAdapter
 
@@ -166,6 +167,10 @@ def run_payload(
             proposal_session = proposal.get("session_id") if isinstance(proposal, dict) else None
             output_rec["session_id"] = str(proposal_session or session_id).strip() or session_id
             if output_rec.get("emitted") and decision.get("response_text"):
+                delay = compute_typing_delay(decision["response_text"])
+                if delay > 0:
+                    time.sleep(delay)
+                output_rec["typing_delay_seconds"] = round(delay, 2)
                 emit(decision["response_text"])
                 send_result = twitch_adapter.handle_output(
                     {
