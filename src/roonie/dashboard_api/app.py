@@ -399,9 +399,39 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
             return "roonie_session"
 
         @staticmethod
-        def _secure_cookies_enabled() -> bool:
-            raw = os.getenv("ROONIE_DASHBOARD_SECURE_COOKIES", "0")
-            return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+        def _secure_cookie_override() -> Optional[bool]:
+            raw = os.getenv("ROONIE_DASHBOARD_SECURE_COOKIES")
+            if raw is None:
+                return None
+            text = str(raw).strip().lower()
+            if text in {"1", "true", "yes", "on"}:
+                return True
+            if text in {"0", "false", "no", "off"}:
+                return False
+            return None
+
+        @staticmethod
+        def _configured_dashboard_url_is_https() -> bool:
+            for env_name in ("ROONIE_DASHBOARD_PUBLIC_URL", "ROONIE_DASHBOARD_APP_URL"):
+                raw = str(os.getenv(env_name, "")).strip()
+                if raw.lower().startswith("https://"):
+                    return True
+            return False
+
+        def _request_is_https(self) -> bool:
+            forwarded_proto = str(self.headers.get("X-Forwarded-Proto", "")).split(",", 1)[0].strip().lower()
+            if forwarded_proto == "https":
+                return True
+            forwarded = str(self.headers.get("Forwarded", "")).strip().lower()
+            if "proto=https" in forwarded:
+                return True
+            return False
+
+        def _secure_cookies_enabled(self) -> bool:
+            override = self._secure_cookie_override()
+            if override is not None:
+                return override
+            return self._request_is_https() or self._configured_dashboard_url_is_https()
 
         def _build_session_cookie(self, value: str, *, max_age: int) -> str:
             cookie = (

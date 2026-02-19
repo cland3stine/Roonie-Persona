@@ -2358,6 +2358,68 @@ def test_auth_login_set_cookie_secure_flag_toggle(tmp_path: Path, monkeypatch) -
     assert "Secure" in set_cookie
 
 
+def test_auth_login_set_cookie_secure_flag_auto_enabled_for_https_public_url(tmp_path: Path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_DASHBOARD_ART_PASSWORD", "art-pass-123")
+    monkeypatch.setenv("ROONIE_DASHBOARD_JEN_PASSWORD", "jen-pass-123")
+    monkeypatch.delenv("ROONIE_OPERATOR_KEY", raising=False)
+    monkeypatch.delenv("ROONIE_DASHBOARD_SECURE_COOKIES", raising=False)
+    monkeypatch.setenv("ROONIE_DASHBOARD_PUBLIC_URL", "https://dashboard.example")
+    monkeypatch.setenv("ROONIE_DASHBOARD_SESSION_TTL_SECONDS", "43200")
+
+    server, thread = _start_server(runs_dir)
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        code, body, headers = _request_json_with_headers(
+            base,
+            "/api/auth/login",
+            method="POST",
+            payload={"username": "jen", "password": "jen-pass-123"},
+        )
+        set_cookie = _set_cookie_header(headers)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    assert code == 200
+    assert body["authenticated"] is True
+    assert "Secure" in set_cookie
+
+
+def test_auth_login_set_cookie_secure_flag_explicit_override_wins(tmp_path: Path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_DASHBOARD_ART_PASSWORD", "art-pass-123")
+    monkeypatch.setenv("ROONIE_DASHBOARD_JEN_PASSWORD", "jen-pass-123")
+    monkeypatch.delenv("ROONIE_OPERATOR_KEY", raising=False)
+    monkeypatch.setenv("ROONIE_DASHBOARD_SECURE_COOKIES", "0")
+    monkeypatch.setenv("ROONIE_DASHBOARD_PUBLIC_URL", "https://dashboard.example")
+    monkeypatch.setenv("ROONIE_DASHBOARD_SESSION_TTL_SECONDS", "43200")
+
+    server, thread = _start_server(runs_dir)
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        code, body, headers = _request_json_with_headers(
+            base,
+            "/api/auth/login",
+            method="POST",
+            payload={"username": "jen", "password": "jen-pass-123"},
+        )
+        set_cookie = _set_cookie_header(headers)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    assert code == 200
+    assert body["authenticated"] is True
+    assert "Secure" not in set_cookie
+
+
 def test_auth_session_expires_after_ttl(tmp_path: Path, monkeypatch) -> None:
     runs_dir = tmp_path / "runs"
     _write_sample_run(runs_dir)

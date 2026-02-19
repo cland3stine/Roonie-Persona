@@ -18,6 +18,7 @@ os.environ["TMPDIR"] = str(_TMP_ROOT)
 os.environ["TEMP"] = str(_TMP_ROOT)
 os.environ["TMP"] = str(_TMP_ROOT)
 tempfile.tempdir = str(_TMP_ROOT)
+_SENSITIVE_TMP_FILENAMES = {"secrets.env"}
 
 
 def _safe_getbasetemp(self: TempPathFactory) -> Path:
@@ -46,6 +47,30 @@ def _safe_mktemp(self: TempPathFactory, basename: str, numbered: bool = True) ->
             i += 1
 
 
+def _cleanup_sensitive_tmp_files(root: Path) -> int:
+    if not isinstance(root, Path):
+        root = Path(root)
+    if not root.exists():
+        return 0
+    removed = 0
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.name.lower() not in _SENSITIVE_TMP_FILENAMES:
+            continue
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def pytest_configure(config) -> None:
     TempPathFactory.getbasetemp = _safe_getbasetemp
     TempPathFactory.mktemp = _safe_mktemp
+    _cleanup_sensitive_tmp_files(_TMP_ROOT)
+
+
+def pytest_sessionfinish(session, exitstatus) -> None:
+    _cleanup_sensitive_tmp_files(_TMP_ROOT)

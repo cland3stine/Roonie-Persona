@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import socket
 import ssl
@@ -9,9 +10,20 @@ from typing import Any, Dict
 
 HOST = "irc.chat.twitch.tv"
 PORT = 6697
+logger = logging.getLogger(__name__)
 
 
 class TwitchOutputAdapter:
+    @staticmethod
+    def _send_error_code(exc: Exception) -> str:
+        if isinstance(exc, TimeoutError):
+            return "TIMEOUT"
+        if isinstance(exc, ssl.SSLError):
+            return "TLS_ERROR"
+        if isinstance(exc, OSError):
+            return "NETWORK_ERROR"
+        return "UNKNOWN_ERROR"
+
     def handle_output(self, envelope: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
         channel = os.getenv("TWITCH_CHANNEL", "").lstrip("#")
         if not channel:
@@ -42,5 +54,10 @@ class TwitchOutputAdapter:
             print(f"[TwitchOutputAdapter] send ok -> #{channel}")
             return {"sent": True, "reason": "OK"}
         except Exception as exc:
-            print(f"[TwitchOutputAdapter] send failed: {exc}")
-            return {"sent": False, "reason": f"SEND_FAILED: {exc}"}
+            error_code = self._send_error_code(exc)
+            logger.warning("Twitch send failed (%s)", error_code)
+            return {
+                "sent": False,
+                "reason": f"SEND_FAILED_{error_code}",
+                "error_code": error_code,
+            }
