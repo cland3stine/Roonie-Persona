@@ -90,6 +90,119 @@ def test_run_payload_strip_does_not_mutate_original_metadata(tmp_path, monkeypat
     assert payload["inputs"][0]["metadata"]["inner_circle"] == inner_circle
 
 
+def test_run_payload_strips_model_metadata_from_persisted_decisions(tmp_path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runtime-runs"
+    monkeypatch.setenv("ROONIE_DASHBOARD_RUNS_DIR", str(runs_dir))
+
+    decision_payload = {
+        "event_id": "evt-1",
+        "action": "RESPOND_PUBLIC",
+        "route": "primary:openai",
+        "response_text": "all good",
+        "trace": {
+            "proposal": {
+                "provider_used": "openai",
+                "model_used": "gpt-5.2",
+                "model": "gpt-5.2",
+                "active_model": "gpt-5.2",
+            },
+            "routing": {
+                "provider_selected": "openai",
+                "model_selected": "gpt-5.2",
+                "active_model": "gpt-5.2",
+            },
+        },
+    }
+
+    class _DecisionStub:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def to_dict(self, exclude_defaults=True):
+            return self._payload
+
+    class _DirectorStub:
+        def evaluate(self, event, env):
+            return _DecisionStub(decision_payload)
+
+    payload = {
+        "session_id": "live-shim-strip-model-metadata",
+        "active_director": "ProviderDirector",
+        "inputs": [
+            {
+                "event_id": "evt-1",
+                "message": "@RoonieTheCat hey",
+                "metadata": {"user": "ruleofrune", "is_direct_mention": True, "mode": "live"},
+            }
+        ],
+    }
+
+    out_path = run_payload(
+        payload,
+        emit_outputs=False,
+        director_instance=_DirectorStub(),
+        env_instance=Env(offline=False),
+    )
+    doc = json.loads(out_path.read_text(encoding="utf-8"))
+    stored = doc["decisions"][0]
+    proposal = stored["trace"]["proposal"]
+    routing = stored["trace"]["routing"]
+    assert proposal["provider_used"] == "openai"
+    assert routing["provider_selected"] == "openai"
+    assert "model_used" not in proposal
+    assert "model" not in proposal
+    assert "active_model" not in proposal
+    assert "model_selected" not in routing
+    assert "active_model" not in routing
+
+
+def test_run_payload_model_sanitization_does_not_mutate_runtime_decision(tmp_path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runtime-runs"
+    monkeypatch.setenv("ROONIE_DASHBOARD_RUNS_DIR", str(runs_dir))
+
+    runtime_decision = {
+        "event_id": "evt-1",
+        "action": "RESPOND_PUBLIC",
+        "route": "primary:openai",
+        "response_text": "all good",
+        "trace": {
+            "proposal": {"provider_used": "openai", "model_used": "gpt-5.2"},
+            "routing": {"provider_selected": "openai", "model_selected": "gpt-5.2"},
+        },
+    }
+
+    class _DecisionStub:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def to_dict(self, exclude_defaults=True):
+            return self._payload
+
+    class _DirectorStub:
+        def evaluate(self, event, env):
+            return _DecisionStub(runtime_decision)
+
+    payload = {
+        "session_id": "live-shim-strip-model-no-mutate",
+        "active_director": "ProviderDirector",
+        "inputs": [
+            {
+                "event_id": "evt-1",
+                "message": "@RoonieTheCat yo",
+                "metadata": {"user": "ruleofrune", "is_direct_mention": True, "mode": "live"},
+            }
+        ],
+    }
+    _ = run_payload(
+        payload,
+        emit_outputs=False,
+        director_instance=_DirectorStub(),
+        env_instance=Env(offline=False),
+    )
+    assert runtime_decision["trace"]["proposal"]["model_used"] == "gpt-5.2"
+    assert runtime_decision["trace"]["routing"]["model_selected"] == "gpt-5.2"
+
+
 def test_live_direct_greeting_routes_to_ack() -> None:
     director = OfflineDirector()
     env = Env(offline=False)

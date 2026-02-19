@@ -100,6 +100,33 @@ def _director_name_for_instance(director: Any) -> str:
     return ""
 
 
+def _strip_model_metadata_from_decisions(decisions: list[dict]) -> list[dict]:
+    # SEC-018: Remove model identifiers from persisted run artifacts.
+    sanitized = copy.deepcopy(decisions)
+    for decision in sanitized:
+        if not isinstance(decision, dict):
+            continue
+        decision.pop("model_used", None)
+        decision.pop("model_selected", None)
+        decision.pop("provider_model", None)
+        trace = decision.get("trace")
+        if not isinstance(trace, dict):
+            continue
+        proposal = trace.get("proposal")
+        if isinstance(proposal, dict):
+            proposal.pop("model", None)
+            proposal.pop("model_used", None)
+            proposal.pop("active_model", None)
+            proposal.pop("moderation_model_used", None)
+        routing = trace.get("routing")
+        if isinstance(routing, dict):
+            routing.pop("model", None)
+            routing.pop("model_selected", None)
+            routing.pop("active_model", None)
+            routing.pop("moderation_model_used", None)
+    return sanitized
+
+
 def run_payload(
     payload: dict,
     emit_outputs: bool = False,
@@ -157,6 +184,7 @@ def run_payload(
             meta = inp.get("metadata")
             if isinstance(meta, dict):
                 meta.pop("inner_circle", None)
+    sanitized_decisions = _strip_model_metadata_from_decisions(decisions)
 
     output = {
         "schema_version": "run-v1",
@@ -165,7 +193,7 @@ def run_payload(
         "started_at": datetime.now(timezone.utc).isoformat(),
         "active_director": active_director,
         "inputs": sanitized_inputs,
-        "decisions": decisions,
+        "decisions": sanitized_decisions,
     }
     if emit_outputs:
         outputs = maybe_emit(decisions)

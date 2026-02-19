@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 
@@ -20,6 +21,21 @@ def test_password_hash_verify_roundtrip() -> None:
     stored = hash_password("jen-pass-123")
     assert verify_password("jen-pass-123", stored) is True
     assert verify_password("wrong-pass", stored) is False
+
+
+def test_password_hash_uses_random_salt() -> None:
+    first = hash_password("same-password")
+    second = hash_password("same-password")
+    assert first != second
+    assert verify_password("same-password", first) is True
+    assert verify_password("same-password", second) is True
+
+
+def test_password_hash_binary_layout_is_salt_plus_key() -> None:
+    stored = hash_password("art-pass-123")
+    raw = base64.b64decode(stored.encode("ascii"), validate=True)
+    # 16-byte salt + 32-byte PBKDF2-SHA256 derived key
+    assert len(raw) == 48
 
 
 def test_legacy_auth_users_format_reseeds_automatically(tmp_path: Path, monkeypatch) -> None:
