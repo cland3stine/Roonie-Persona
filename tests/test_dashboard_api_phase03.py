@@ -2,15 +2,17 @@
 
 import io
 import json
+import os
 import sqlite3
 import threading
 import time
 import urllib.error
 import urllib.request
 import zipfile
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from roonie.dashboard_api.app import create_server
@@ -34,6 +36,9 @@ def _set_dashboard_paths(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("ROONIE_DASHBOARD_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("ROONIE_PROVIDERS_CONFIG_PATH", str(tmp_path / "data" / "providers_config.json"))
     monkeypatch.setenv("ROONIE_ROUTING_CONFIG_PATH", str(tmp_path / "data" / "routing_config.json"))
+    monkeypatch.setenv("ROONIE_DASHBOARD_ART_PASSWORD", "art-pass-123")
+    monkeypatch.setenv("ROONIE_DASHBOARD_JEN_PASSWORD", "jen-pass-123")
+    _SESSION_COOKIE_CACHE.clear()
 
 
 def _write_sample_run(runs_dir: Path) -> None:
@@ -146,8 +151,83 @@ def _sample_memory_intent_run(
     }
 
 
+_AUTO_AUTH_GET_PATHS = {
+    "/api/status",
+    "/api/events",
+    "/api/suppressions",
+    "/api/operator_log",
+    "/api/queue",
+    "/api/twitch/channel_emotes",
+    "/api/studio_profile",
+    "/api/inner_circle",
+    "/api/providers/status",
+    "/api/system/readiness",
+    "/api/senses/status",
+    "/api/auth/twitch_status",
+    "/api/twitch/status",
+    "/api/library_index/status",
+    "/api/library_index/search",
+    "/api/logs/events",
+    "/api/logs/suppressions",
+    "/api/logs/operator",
+}
+
+_SESSION_COOKIE_CACHE: Dict[str, str] = {}
+
+
+def _path_only(path: str) -> str:
+    return str(urlparse(str(path or "")).path or "")
+
+
+def _cookie_from_set_cookie_header(raw: str) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    return text.split(";", 1)[0].strip()
+
+
+def _login_cookie(base: str) -> str:
+    cached = _SESSION_COOKIE_CACHE.get(base)
+    if cached:
+        return cached
+    payload = json.dumps({"username": "jen", "password": "jen-pass-123"}).encode("utf-8")
+    request = urllib.request.Request(
+        f"{base}/api/auth/login",
+        data=payload,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=2.0) as response:
+            cookie = _cookie_from_set_cookie_header(response.headers.get("Set-Cookie"))
+    except urllib.error.HTTPError:
+        return ""
+    if cookie:
+        _SESSION_COOKIE_CACHE[base] = cookie
+    return cookie
+
+
+def _with_auto_cookie(base: str, path: str, method: str, headers: Dict[str, str] | None) -> Dict[str, str]:
+    req_headers = dict(headers or {})
+    if str(method or "GET").upper() != "GET":
+        return req_headers
+    if "Cookie" in req_headers or "X-ROONIE-OP-KEY" in req_headers:
+        return req_headers
+    if _path_only(path) not in _AUTO_AUTH_GET_PATHS:
+        return req_headers
+    cookie = _login_cookie(base)
+    if cookie:
+        req_headers["Cookie"] = cookie
+    return req_headers
+
+
 def _get_json(base: str, path: str) -> Dict[str, Any] | list[Dict[str, Any]]:
-    with urllib.request.urlopen(f"{base}{path}", timeout=2.0) as response:
+    request = urllib.request.Request(
+        f"{base}{path}",
+        method="GET",
+        headers=_with_auto_cookie(base, path, "GET", None),
+    )
+    with urllib.request.urlopen(request, timeout=2.0) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -160,7 +240,7 @@ def _request_json(
     headers: Dict[str, str] | None = None,
 ) -> tuple[int, Dict[str, Any] | list[Dict[str, Any]]]:
     body = None
-    req_headers = dict(headers or {})
+    req_headers = _with_auto_cookie(base, path, method, headers)
     if payload is not None:
         body = json.dumps(payload).encode("utf-8")
         req_headers.setdefault("Content-Type", "application/json")
@@ -177,7 +257,7 @@ def _request_json(
         return exc.code, json.loads(exc.read().decode("utf-8"))
 
 
-def _request_json_with_headers(
+def _raw_request_json(
     base: str,
     path: str,
     *,
@@ -187,6 +267,32 @@ def _request_json_with_headers(
 ) -> tuple[int, Dict[str, Any] | list[Dict[str, Any]], Dict[str, str]]:
     body = None
     req_headers = dict(headers or {})
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+        req_headers.setdefault("Content-Type", "application/json")
+    request = urllib.request.Request(
+        f"{base}{path}",
+        data=body,
+        method=method,
+        headers=req_headers,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=2.0) as response:
+            return response.status, json.loads(response.read().decode("utf-8")), dict(response.headers.items())
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8")), dict(exc.headers.items())
+
+
+def _request_json_with_headers(
+    base: str,
+    path: str,
+    *,
+    method: str = "GET",
+    payload: Dict[str, Any] | None = None,
+    headers: Dict[str, str] | None = None,
+) -> tuple[int, Dict[str, Any] | list[Dict[str, Any]], Dict[str, str]]:
+    body = None
+    req_headers = _with_auto_cookie(base, path, method, headers)
     if payload is not None:
         body = json.dumps(payload).encode("utf-8")
         req_headers.setdefault("Content-Type", "application/json")
@@ -220,7 +326,7 @@ def _request_bytes_with_headers(
     headers: Dict[str, str] | None = None,
 ) -> tuple[int, bytes, Dict[str, str]]:
     body = None
-    req_headers = dict(headers or {})
+    req_headers = _with_auto_cookie(base, path, method, headers)
     if payload is not None:
         body = json.dumps(payload).encode("utf-8")
         req_headers.setdefault("Content-Type", "application/json")
@@ -268,10 +374,7 @@ def _request_multipart_json(
 
 
 def _cookie_from_response_headers(headers: Dict[str, str]) -> str:
-    raw = str(headers.get("Set-Cookie", "")).strip()
-    if not raw:
-        return ""
-    return raw.split(";", 1)[0].strip()
+    return _cookie_from_set_cookie_header(str(headers.get("Set-Cookie", "")))
 
 
 def _set_cookie_header(headers: Dict[str, str]) -> str:
@@ -480,6 +583,8 @@ def test_write_endpoints_and_audit_with_operator_key(tmp_path: Path, monkeypatch
         assert code_arm == 200
         assert arm_body["ok"] is True
         assert arm_body["state"]["armed"] is True
+        assert arm_body["audit"]["auth_mode"] == "legacy_key"
+        assert arm_body["audit"]["role"] == "operator"
 
         _, status_after_arm = _request_json(base, "/api/status")
         assert status_after_arm["armed"] is True
@@ -534,6 +639,200 @@ def test_write_endpoints_and_audit_with_operator_key(tmp_path: Path, monkeypatch
     assert op_log[0]["actor"] == "jen"
     arm_entry = next(item for item in op_log if item["action"] == "CONTROL_ARM_SET")
     assert arm_entry["auth_mode"] == "legacy_key"
+    assert arm_entry["role"] == "operator"
+
+
+def test_legacy_operator_key_rejected_for_director_only_route(tmp_path: Path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_OPERATOR_KEY", "op-key-123")
+
+    headers = {"X-ROONIE-OP-KEY": "op-key-123", "X-ROONIE-ACTOR": "jen"}
+    server, thread = _start_server(runs_dir)
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        code, body = _request_json(
+            base,
+            "/api/routing/config",
+            method="PATCH",
+            payload={"enabled": True},
+            headers=headers,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    assert code == 403
+    assert body["ok"] is False
+    assert "Director role required." in body["detail"]
+
+
+def test_login_rate_limit_locks_out_after_five_failures(tmp_path: Path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_AUTH_RATE_LIMIT_MAX_ATTEMPTS", "5")
+    monkeypatch.setenv("ROONIE_AUTH_RATE_LIMIT_LOCKOUT_SECONDS", "60")
+
+    server, thread = _start_server(runs_dir)
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        for _ in range(5):
+            code, body = _request_json(
+                base,
+                "/api/auth/login",
+                method="POST",
+                payload={"username": "jen", "password": "wrong-pass"},
+            )
+            assert code == 401
+            assert body["error"] == "unauthorized"
+
+        locked_code, locked_body = _request_json(
+            base,
+            "/api/auth/login",
+            method="POST",
+            payload={"username": "jen", "password": "wrong-pass"},
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    assert locked_code == 429
+    assert locked_body["ok"] is False
+    assert locked_body["error"] == "rate_limited"
+
+
+def test_login_rate_limit_success_resets_counter(tmp_path: Path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_AUTH_RATE_LIMIT_MAX_ATTEMPTS", "2")
+    monkeypatch.setenv("ROONIE_AUTH_RATE_LIMIT_LOCKOUT_SECONDS", "60")
+
+    server, thread = _start_server(runs_dir)
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        fail1_code, _ = _request_json(
+            base,
+            "/api/auth/login",
+            method="POST",
+            payload={"username": "jen", "password": "wrong-pass"},
+        )
+        success_code, success_body = _request_json(
+            base,
+            "/api/auth/login",
+            method="POST",
+            payload={"username": "jen", "password": "jen-pass-123"},
+        )
+        fail2_code, _ = _request_json(
+            base,
+            "/api/auth/login",
+            method="POST",
+            payload={"username": "jen", "password": "wrong-pass"},
+        )
+        fail3_code, _ = _request_json(
+            base,
+            "/api/auth/login",
+            method="POST",
+            payload={"username": "jen", "password": "wrong-pass"},
+        )
+        locked_code, locked_body = _request_json(
+            base,
+            "/api/auth/login",
+            method="POST",
+            payload={"username": "jen", "password": "wrong-pass"},
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    assert fail1_code == 401
+    assert success_code == 200
+    assert success_body["ok"] is True
+    assert fail2_code == 401
+    assert fail3_code == 401
+    assert locked_code == 429
+    assert locked_body["error"] == "rate_limited"
+
+
+def test_login_rate_limit_expires_after_lockout_ttl(tmp_path: Path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_AUTH_RATE_LIMIT_MAX_ATTEMPTS", "2")
+    monkeypatch.setenv("ROONIE_AUTH_RATE_LIMIT_LOCKOUT_SECONDS", "0.1")
+
+    server, thread = _start_server(runs_dir)
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        code1, _ = _request_json(
+            base,
+            "/api/auth/login",
+            method="POST",
+            payload={"username": "jen", "password": "wrong-pass"},
+        )
+        code2, _ = _request_json(
+            base,
+            "/api/auth/login",
+            method="POST",
+            payload={"username": "jen", "password": "wrong-pass"},
+        )
+        locked_code, locked_body = _request_json(
+            base,
+            "/api/auth/login",
+            method="POST",
+            payload={"username": "jen", "password": "wrong-pass"},
+        )
+        time.sleep(0.15)
+        after_code, after_body = _request_json(
+            base,
+            "/api/auth/login",
+            method="POST",
+            payload={"username": "jen", "password": "jen-pass-123"},
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    assert code1 == 401
+    assert code2 == 401
+    assert locked_code == 429
+    assert locked_body["error"] == "rate_limited"
+    assert after_code == 200
+    assert after_body["ok"] is True
+
+
+def test_legacy_operator_key_failures_trigger_rate_limit(tmp_path: Path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_OPERATOR_KEY", "op-key-123")
+    monkeypatch.setenv("ROONIE_AUTH_RATE_LIMIT_MAX_ATTEMPTS", "5")
+    monkeypatch.setenv("ROONIE_AUTH_RATE_LIMIT_LOCKOUT_SECONDS", "60")
+
+    bad_headers = {"X-ROONIE-OP-KEY": "bad-key", "X-ROONIE-ACTOR": "jen"}
+    good_headers = {"X-ROONIE-OP-KEY": "op-key-123", "X-ROONIE-ACTOR": "jen"}
+    server, thread = _start_server(runs_dir)
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        for _ in range(5):
+            bad_code, bad_body = _request_json(base, "/api/live/arm", method="POST", payload={}, headers=bad_headers)
+            assert bad_code == 403
+            assert bad_body["ok"] is False
+        locked_code, locked_body = _request_json(base, "/api/live/arm", method="POST", payload={}, headers=good_headers)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    assert locked_code == 403
+    assert locked_body["ok"] is False
+    assert "too many failed operator-key attempts" in locked_body["detail"].lower()
 
 
 def test_operator_actor_defaults_to_unknown_when_missing(tmp_path: Path, monkeypatch) -> None:
@@ -745,6 +1044,103 @@ def test_library_upload_forbidden_without_operator_key(tmp_path: Path, monkeypat
 
     assert code == 403
     assert body["ok"] is False
+
+
+def test_json_body_too_large_returns_413(tmp_path: Path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_MAX_JSON_BODY_BYTES", "1024")
+
+    server, thread = _start_server(runs_dir)
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        code, body = _request_json(
+            base,
+            "/api/auth/login",
+            method="POST",
+            payload={"username": "jen", "password": ("x" * 5000)},
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    assert code == 413
+    assert body["ok"] is False
+    assert body["error"] == "payload_too_large"
+    assert int(body["max_bytes"]) == 1024
+
+
+def test_library_upload_multipart_body_too_large_returns_413(tmp_path: Path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_MAX_MULTIPART_BODY_BYTES", "1024")
+
+    server, thread = _start_server(runs_dir)
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        code, body = _request_multipart_json(
+            base,
+            "/api/library_index/upload_xml",
+            filename="rekordbox.xml",
+            content=(b"x" * 5000),
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    assert code == 413
+    assert body["ok"] is False
+    assert body["error"] == "payload_too_large"
+    assert int(body["max_bytes"]) == 1024
+
+
+def test_library_rebuild_rejects_dtd_entity_xml(tmp_path: Path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_OPERATOR_KEY", "op-key-123")
+    headers = {"X-ROONIE-OP-KEY": "op-key-123", "X-ROONIE-ACTOR": "art"}
+    xml_with_dtd = (
+        b'<?xml version="1.0" encoding="UTF-8"?>\n'
+        b'<!DOCTYPE DJ_PLAYLISTS [<!ENTITY xxe "blocked">]>\n'
+        b"<DJ_PLAYLISTS>\n"
+        b'  <COLLECTION Entries="1">\n'
+        b'    <TRACK Name="Lamur" Artist="Guy J" TrackID="1" />\n'
+        b"  </COLLECTION>\n"
+        b"</DJ_PLAYLISTS>\n"
+    )
+
+    server, thread = _start_server(runs_dir)
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        upload_code, upload_body = _request_multipart_json(
+            base,
+            "/api/library_index/upload_xml",
+            filename="rekordbox.xml",
+            content=xml_with_dtd,
+            headers=headers,
+        )
+        rebuild_code, rebuild_body = _request_json(
+            base,
+            "/api/library_index/rebuild",
+            method="POST",
+            payload={},
+            headers=headers,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    assert upload_code == 200
+    assert upload_body["ok"] is True
+    assert rebuild_code == 400
+    assert rebuild_body["ok"] is False
+    assert "dtd/entity" in str(rebuild_body.get("detail", "")).lower()
 
 
 def test_library_rebuild_and_search_tiers_with_audit(tmp_path: Path, monkeypatch) -> None:
@@ -962,12 +1358,17 @@ def test_providers_set_active_and_caps_are_audited(tmp_path: Path, monkeypatch) 
     runs_dir = tmp_path / "runs"
     _write_sample_run(runs_dir)
     _set_dashboard_paths(monkeypatch, tmp_path)
-    monkeypatch.setenv("ROONIE_OPERATOR_KEY", "op-key-123")
-    headers = {"X-ROONIE-OP-KEY": "op-key-123", "X-ROONIE-ACTOR": "art"}
 
     server, thread = _start_server(runs_dir)
     try:
         base = f"http://127.0.0.1:{server.server_address[1]}"
+        _, _, login_headers = _request_json_with_headers(
+            base,
+            "/api/auth/login",
+            method="POST",
+            payload={"username": "art", "password": "art-pass-123"},
+        )
+        headers = {"Cookie": _cookie_from_response_headers(login_headers)}
         code_set, set_body = _request_json(
             base,
             "/api/providers/set_active",
@@ -982,8 +1383,8 @@ def test_providers_set_active_and_caps_are_audited(tmp_path: Path, monkeypatch) 
             payload={"daily_requests_max": 3, "hard_stop_on_cap": True},
             headers=headers,
         )
-        _, provider_status = _request_json(base, "/api/providers/status")
-        _, op_log = _request_json(base, "/api/operator_log?limit=20")
+        _, provider_status = _request_json(base, "/api/providers/status", headers=headers)
+        _, op_log = _request_json(base, "/api/operator_log?limit=20", headers=headers)
     finally:
         server.shutdown()
         server.server_close()
@@ -1001,6 +1402,8 @@ def test_providers_set_active_and_caps_are_audited(tmp_path: Path, monkeypatch) 
     assert "PROVIDER_SET_CAPS" in actions
     latest_provider_action = next(item for item in op_log if item["action"] == "PROVIDER_SET_ACTIVE")
     assert latest_provider_action["actor"] == "art"
+    assert latest_provider_action["role"] == "director"
+    assert latest_provider_action["auth_mode"] == "session"
 
 
 def test_status_blocked_by_cost_cap_when_limit_reached(tmp_path: Path, monkeypatch) -> None:
@@ -1823,6 +2226,104 @@ def test_auth_login_me_logout_flow(tmp_path: Path, monkeypatch) -> None:
     assert write_after_logout["ok"] is False
 
 
+def test_sensitive_get_requires_authenticated_session_and_rejects_legacy_key(tmp_path: Path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_OPERATOR_KEY", "op-key-123")
+
+    server, thread = _start_server(runs_dir)
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        no_auth_code, no_auth_body, _ = _raw_request_json(base, "/api/inner_circle")
+        legacy_code, legacy_body, _ = _raw_request_json(
+            base,
+            "/api/inner_circle",
+            headers={"X-ROONIE-OP-KEY": "op-key-123", "X-ROONIE-ACTOR": "jen"},
+        )
+        _, _, login_headers = _request_json_with_headers(
+            base,
+            "/api/auth/login",
+            method="POST",
+            payload={"username": "jen", "password": "jen-pass-123"},
+        )
+        cookie = _cookie_from_response_headers(login_headers)
+        session_code, session_body, _ = _raw_request_json(
+            base,
+            "/api/inner_circle",
+            headers={"Cookie": cookie},
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    assert no_auth_code == 403
+    assert no_auth_body["ok"] is False
+    assert "authenticated session required" in str(no_auth_body.get("detail", "")).lower()
+    assert legacy_code == 403
+    assert legacy_body["ok"] is False
+    assert "authenticated session required" in str(legacy_body.get("detail", "")).lower()
+    assert session_code == 200
+    assert isinstance(session_body, dict)
+    assert "members" in session_body
+
+
+def test_cors_allowlist_blocks_untrusted_origin_and_preflight(tmp_path: Path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    allowed = "http://localhost:5173"
+    blocked = "https://evil.example"
+
+    server, thread = _start_server(runs_dir)
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        allowed_code, _, allowed_headers = _request_json_with_headers(
+            base,
+            "/api/auth/me",
+            headers={"Origin": allowed},
+        )
+        blocked_code, _, blocked_headers = _request_json_with_headers(
+            base,
+            "/api/auth/me",
+            headers={"Origin": blocked},
+        )
+
+        allowed_options = urllib.request.Request(
+            f"{base}/api/auth/me",
+            method="OPTIONS",
+            headers={"Origin": allowed, "Access-Control-Request-Method": "GET"},
+        )
+        with urllib.request.urlopen(allowed_options, timeout=2.0) as response:
+            options_status = response.status
+            options_headers = dict(response.headers.items())
+
+        blocked_options = urllib.request.Request(
+            f"{base}/api/auth/me",
+            method="OPTIONS",
+            headers={"Origin": blocked, "Access-Control-Request-Method": "GET"},
+        )
+        blocked_options_code = None
+        try:
+            with urllib.request.urlopen(blocked_options, timeout=2.0):
+                blocked_options_code = 204
+        except urllib.error.HTTPError as exc:
+            blocked_options_code = exc.code
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    assert allowed_code == 200
+    assert str(allowed_headers.get("Access-Control-Allow-Origin", "")) == allowed
+    assert blocked_code == 200
+    assert all(str(key).lower() != "access-control-allow-origin" for key in blocked_headers.keys())
+    assert options_status == 204
+    assert str(options_headers.get("Access-Control-Allow-Origin", "")) == allowed
+    assert blocked_options_code == 403
+
+
 def test_auth_login_set_cookie_secure_flag_toggle(tmp_path: Path, monkeypatch) -> None:
     runs_dir = tmp_path / "runs"
     _write_sample_run(runs_dir)
@@ -2083,6 +2584,9 @@ def test_director_can_update_hard_stop_cap_and_twitch_auth_endpoints(tmp_path: P
     assert twitch_status["scopes_present"]["chat:edit"] is True
     assert twitch_status["accounts"]["bot"]["connected"] is True
     assert twitch_status["accounts"]["broadcaster"]["connected"] is True
+    assert "auth_state_encryption" in twitch_status
+    assert "enabled" in twitch_status["auth_state_encryption"]
+    assert "backend" in twitch_status["auth_state_encryption"]
     assert reconnect_code == 200
     assert reconnect_body["ok"] is True
     assert str(reconnect_body.get("auth_url", "")).startswith("https://id.twitch.tv/oauth2/authorize?")
@@ -2095,6 +2599,9 @@ def test_director_can_update_hard_stop_cap_and_twitch_auth_endpoints(tmp_path: P
     assert disconnect_body["ok"] is True
     assert disconnect_body["status"]["accounts"]["bot"]["connected"] is False
     assert disconnect_body["status"]["accounts"]["bot"]["reason"] == "NO_TOKEN"
+    assert disconnect_body["revocation"]["enabled"] is True
+    assert disconnect_body["revocation"]["attempted"] == 0
+    assert disconnect_body["revocation"]["revoked"] == 0
 
     provider_caps_entry = next(item for item in op_log if item["action"] == "PROVIDER_SET_CAPS")
     assert provider_caps_entry["username"] == "art"
@@ -2106,6 +2613,141 @@ def test_director_can_update_hard_stop_cap_and_twitch_auth_endpoints(tmp_path: P
     assert connect_entry["username"] == "art"
     disconnect_entry = next(item for item in op_log if item["action"] == "TWITCH_DISCONNECT")
     assert disconnect_entry["username"] == "art"
+
+
+def test_twitch_disconnect_revokes_local_access_and_refresh_tokens(tmp_path: Path, monkeypatch) -> None:
+    from roonie.dashboard_api.storage import DashboardStorage
+
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("TWITCH_CLIENT_ID", "client-id")
+    monkeypatch.setenv("TWITCH_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("TWITCH_REDIRECT_URI", "http://127.0.0.1/callback")
+    monkeypatch.setenv("TWITCH_CHANNEL", "ruleofrune")
+    monkeypatch.setenv("TWITCH_NICK", "RoonieTheCat")
+    monkeypatch.delenv("ROONIE_TWITCH_VALIDATE_REMOTE", raising=False)
+
+    storage = DashboardStorage(runs_dir=runs_dir)
+    auth_state_path = tmp_path / "data" / "twitch_auth_state.json"
+    auth_state = {
+        "version": 1,
+        "accounts": {
+            "bot": {
+                "token": "oauth:tok_abcdefghijklmnopqrstuvwxyz123456",
+                "refresh_token": "ref_abcdefghijklmnopqrstuvwxyz123456",
+                "expires_at": "2027-01-01T00:00:00+00:00",
+                "scopes": ["chat:read", "chat:edit"],
+                "display_name": "RoonieTheCat",
+                "pending_state": None,
+                "updated_at": "2026-02-14T00:00:00+00:00",
+                "disconnected": False,
+            },
+            "broadcaster": {
+                "token": None,
+                "refresh_token": None,
+                "expires_at": None,
+                "scopes": [],
+                "display_name": "RuleOfRune",
+                "pending_state": None,
+                "updated_at": None,
+                "disconnected": False,
+            },
+        },
+    }
+    auth_state_path.write_text(json.dumps(auth_state), encoding="utf-8")
+
+    revoke_calls: list[tuple[str, str]] = []
+
+    def _fake_revoke(self, *, token: str, client_id: str):
+        revoke_calls.append((token, client_id))
+        return {"ok": True}
+
+    monkeypatch.setattr(
+        "roonie.dashboard_api.storage.DashboardStorage._revoke_twitch_token_remote",
+        _fake_revoke,
+        raising=True,
+    )
+
+    result = storage.twitch_disconnect("bot", revoke_remote=True, include_env_tokens=False)
+    assert result["status"]["accounts"]["bot"]["connected"] is False
+    assert result["status"]["accounts"]["bot"]["reason"] == "NO_TOKEN"
+    assert result["revocation"]["enabled"] is True
+    assert result["revocation"]["attempted"] == 2
+    assert result["revocation"]["revoked"] == 2
+    assert result["revocation"]["failed"] == 0
+    assert {item[0] for item in revoke_calls} == {
+        "tok_abcdefghijklmnopqrstuvwxyz123456",
+        "ref_abcdefghijklmnopqrstuvwxyz123456",
+    }
+    assert {item[1] for item in revoke_calls} == {"client-id"}
+
+    saved_state = json.loads(auth_state_path.read_text(encoding="utf-8"))
+    bot_state = saved_state.get("accounts", {}).get("bot", {})
+    assert bot_state.get("token") is None
+    assert bot_state.get("refresh_token") is None
+    assert bot_state.get("disconnected") is True
+
+
+def test_twitch_auth_state_tokens_are_encrypted_at_rest_when_enabled(tmp_path: Path, monkeypatch) -> None:
+    from roonie.dashboard_api.storage import DashboardStorage
+
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("TWITCH_CLIENT_ID", "client-id")
+    monkeypatch.setenv("TWITCH_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("TWITCH_REDIRECT_URI", "http://127.0.0.1/callback")
+    monkeypatch.setenv("TWITCH_CHANNEL", "ruleofrune")
+    monkeypatch.setenv("TWITCH_NICK", "RoonieTheCat")
+    monkeypatch.delenv("ROONIE_TWITCH_VALIDATE_REMOTE", raising=False)
+
+    storage = DashboardStorage(runs_dir=runs_dir)
+    auth_state_path = tmp_path / "data" / "twitch_auth_state.json"
+    auth_state = {
+        "version": 1,
+        "accounts": {
+            "bot": {
+                "token": "abcdefghijklmnopqrstuvwxyz123456",
+                "refresh_token": "ref_abcdefghijklmnopqrstuvwxyz123456",
+                "expires_at": None,
+                "scopes": ["chat:read", "chat:edit"],
+                "display_name": "RoonieTheCat",
+                "pending_state": None,
+                "updated_at": "2026-02-14T00:00:00+00:00",
+                "disconnected": False,
+            },
+            "broadcaster": {
+                "token": None,
+                "refresh_token": None,
+                "expires_at": None,
+                "scopes": [],
+                "display_name": "RuleOfRune",
+                "pending_state": None,
+                "updated_at": None,
+                "disconnected": False,
+            },
+        },
+    }
+    auth_state_path.write_text(json.dumps(auth_state), encoding="utf-8")
+
+    _ = storage.get_twitch_status(force_refresh=True)
+    saved_state = json.loads(auth_state_path.read_text(encoding="utf-8"))
+    bot_state = saved_state.get("accounts", {}).get("bot", {})
+    if storage._twitch_auth_state_encryption_enabled():
+        assert bot_state.get("token") is None
+        assert bot_state.get("refresh_token") is None
+        assert str(bot_state.get("token_enc", "")).startswith("dpapi:")
+        assert str(bot_state.get("refresh_token_enc", "")).startswith("dpapi:")
+    else:
+        assert str(bot_state.get("token", "")).strip() == "abcdefghijklmnopqrstuvwxyz123456"
+        assert str(bot_state.get("refresh_token", "")).strip() == "ref_abcdefghijklmnopqrstuvwxyz123456"
+
+    # Reload from disk to verify runtime can still decrypt and use stored token.
+    storage_reloaded = DashboardStorage(runs_dir=runs_dir)
+    creds = storage_reloaded.get_live_twitch_credentials("bot")
+    assert creds["ok"] is True
+    assert str(creds["oauth_token"]).startswith("oauth:")
 
 
 def test_twitch_status_truth_and_write_auth_requirements(tmp_path: Path, monkeypatch) -> None:
@@ -2351,6 +2993,7 @@ def test_twitch_callback_returns_html_for_browser_accept(tmp_path: Path, monkeyp
     monkeypatch.setenv("TWITCH_REDIRECT_URI", "http://127.0.0.1/callback")
     monkeypatch.setenv("TWITCH_NICK", "RoonieTheCat")
     monkeypatch.setenv("TWITCH_CHANNEL", "ruleofrune")
+    monkeypatch.setenv("ROONIE_DASHBOARD_APP_URL", "http://localhost:5173/")
 
     def _fake_exchange(self, *, code: str, redirect_uri: str, client_id: str, client_secret: str):
         assert code == "abc123"
@@ -2405,6 +3048,81 @@ def test_twitch_callback_returns_html_for_browser_accept(tmp_path: Path, monkeyp
     html = callback_body.decode("utf-8")
     assert "Connected." in html
     assert "Returning to dashboard" in html
+    assert "postMessage" in html
+    assert "http://localhost:5173" in html
+    assert ", '*'" not in html
+    assert ",\"*\"" not in html
+
+
+def test_twitch_callback_html_target_origin_ignores_request_origin(tmp_path: Path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_DASHBOARD_ART_PASSWORD", "art-pass-123")
+    monkeypatch.setenv("ROONIE_DASHBOARD_JEN_PASSWORD", "jen-pass-123")
+    monkeypatch.delenv("ROONIE_OPERATOR_KEY", raising=False)
+    monkeypatch.setenv("TWITCH_CLIENT_ID", "test-client-id")
+    monkeypatch.setenv("TWITCH_CLIENT_SECRET", "test-client-secret")
+    monkeypatch.setenv("TWITCH_REDIRECT_URI", "http://127.0.0.1/callback")
+    monkeypatch.setenv("TWITCH_NICK", "RoonieTheCat")
+    monkeypatch.setenv("TWITCH_CHANNEL", "ruleofrune")
+    monkeypatch.delenv("ROONIE_DASHBOARD_APP_URL", raising=False)
+    monkeypatch.delenv("ROONIE_DASHBOARD_PUBLIC_URL", raising=False)
+
+    def _fake_exchange(self, *, code: str, redirect_uri: str, client_id: str, client_secret: str):
+        assert code == "abc123"
+        assert redirect_uri == "http://127.0.0.1/callback"
+        assert client_id == "test-client-id"
+        assert client_secret == "test-client-secret"
+        return {
+            "ok": True,
+            "access_token": "tok_abcdefghijklmnopqrstuvwxyz123456",
+            "refresh_token": "ref_abcdefghijklmnopqrstuvwxyz123456",
+            "scopes": ["chat:read", "chat:edit"],
+            "expires_at": "2027-01-01T00:00:00+00:00",
+        }
+
+    monkeypatch.setattr(
+        "roonie.dashboard_api.storage.DashboardStorage._exchange_twitch_code",
+        _fake_exchange,
+        raising=True,
+    )
+
+    server, thread = _start_server(runs_dir)
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        _, _, login_headers = _request_json_with_headers(
+            base,
+            "/api/auth/login",
+            method="POST",
+            payload={"username": "art", "password": "art-pass-123"},
+        )
+        cookie = _cookie_from_response_headers(login_headers)
+        headers = {"Cookie": cookie}
+        _, start = _request_json(
+            base,
+            "/api/twitch/connect_start?account=bot",
+            method="POST",
+            payload={},
+            headers=headers,
+        )
+        state = str(start.get("state", ""))
+        callback_code, callback_body, callback_headers = _request_bytes_with_headers(
+            base,
+            f"/api/twitch/callback?code=abc123&state={state}",
+            headers={"Accept": "text/html", "Origin": "https://evil.example"},
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    assert callback_code == 200
+    assert "text/html" in str(callback_headers.get("Content-Type", "")).lower()
+    html = callback_body.decode("utf-8")
+    assert "postMessage" in html
+    assert "http://127.0.0.1:8787" in html
+    assert "https://evil.example" not in html
 
 
 def test_live_twitch_credentials_reads_local_bot_token(tmp_path: Path, monkeypatch) -> None:
@@ -3109,3 +3827,77 @@ def test_send_failure_in_status_response(tmp_path: Path, monkeypatch) -> None:
     assert d["send_fail_count"] == 1
     assert d["send_fail_reason"] == "TIMEOUT"
     assert d["send_fail_at"] is not None
+
+
+def test_retention_default_is_180_days(tmp_path: Path, monkeypatch) -> None:
+    from roonie.dashboard_api.storage import DashboardStorage
+
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.delenv("ROONIE_RETENTION_DAYS", raising=False)
+    monkeypatch.delenv("ROONIE_DATA_RETENTION_DAYS", raising=False)
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+
+    storage = DashboardStorage(runs_dir=runs_dir)
+
+    assert storage._retention_days == 180
+
+
+def test_retention_purges_run_files_and_jsonl_older_than_180_days(tmp_path: Path, monkeypatch) -> None:
+    from roonie.dashboard_api.storage import DashboardStorage
+
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_RETENTION_DAYS", "180")
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    old_run = runs_dir / "old.json"
+    new_run = runs_dir / "new.json"
+    old_run.write_text("{}", encoding="utf-8")
+    new_run.write_text("{}", encoding="utf-8")
+
+    now = datetime.now(timezone.utc)
+    old_ts = (now - timedelta(days=181)).timestamp()
+    new_ts = (now - timedelta(days=20)).timestamp()
+    os.utime(old_run, (old_ts, old_ts))
+    os.utime(new_run, (new_ts, new_ts))
+
+    old_iso = (now - timedelta(days=181)).isoformat()
+    new_iso = (now - timedelta(days=5)).isoformat()
+
+    audit_path = logs_dir / "operator_audit.jsonl"
+    eventsub_path = logs_dir / "eventsub_events.jsonl"
+    audit_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"ts": old_iso, "action": "OLD"}),
+                json.dumps({"ts": new_iso, "action": "NEW"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    eventsub_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"ts": old_iso, "event_type": "CHANNEL_CHAT_MESSAGE"}),
+                json.dumps({"ts": new_iso, "event_type": "CHANNEL_CHAT_MESSAGE"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    _ = DashboardStorage(runs_dir=runs_dir)
+
+    assert not old_run.exists()
+    assert new_run.exists()
+
+    kept_audit = [line for line in audit_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    kept_eventsub = [line for line in eventsub_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(kept_audit) == 1
+    assert len(kept_eventsub) == 1
+    assert json.loads(kept_audit[0])["action"] == "NEW"
+    assert json.loads(kept_eventsub[0])["ts"] == new_iso

@@ -160,6 +160,142 @@ def _build_track_search_key(artist: str, title: str) -> str:
     return _normalize_text(f"{artist} - {title}".strip())
 
 
+class LoginRateLimiter:
+    """In-memory per-key failed attempt tracker with TTL lockout."""
+
+    def __init__(self, max_attempts: int = 5, lockout_seconds: float = 60.0) -> None:
+        self._max_attempts = max(1, int(max_attempts))
+        self._lockout_seconds = max(0.001, float(lockout_seconds))
+        self._attempts: dict[str, list[float]] = {}
+        self._lock = threading.Lock()
+
+    def _recent_attempts(self, key: str, now: float) -> list[float]:
+        cutoff = now - self._lockout_seconds
+        attempts = self._attempts.get(key, [])
+        recent = [t for t in attempts if t > cutoff]
+        self._attempts[key] = recent
+        return recent
+
+    def is_locked_out(self, key: str) -> bool:
+        with self._lock:
+            recent = self._recent_attempts(str(key), time.monotonic())
+            return len(recent) >= self._max_attempts
+
+    def record_failure(self, key: str) -> None:
+        with self._lock:
+            norm_key = str(key)
+            now = time.monotonic()
+            recent = self._recent_attempts(norm_key, now)
+            recent.append(now)
+            self._attempts[norm_key] = recent
+
+    def reset(self, key: str) -> None:
+        with self._lock:
+            self._attempts.pop(str(key), None)
+
+
+if os.name == "nt":
+    import ctypes
+    from ctypes import wintypes
+
+    class _DpapiDataBlob(ctypes.Structure):
+        _fields_ = [
+            ("cbData", wintypes.DWORD),
+            ("pbData", ctypes.POINTER(ctypes.c_ubyte)),
+        ]
+
+    _CRYPTPROTECT_UI_FORBIDDEN = 0x01
+
+    _crypt32 = ctypes.windll.crypt32
+    _kernel32 = ctypes.windll.kernel32
+    _crypt32.CryptProtectData.argtypes = [
+        ctypes.POINTER(_DpapiDataBlob),
+        wintypes.LPCWSTR,
+        ctypes.POINTER(_DpapiDataBlob),
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(_DpapiDataBlob),
+    ]
+    _crypt32.CryptProtectData.restype = wintypes.BOOL
+    _crypt32.CryptUnprotectData.argtypes = [
+        ctypes.POINTER(_DpapiDataBlob),
+        ctypes.POINTER(wintypes.LPWSTR),
+        ctypes.POINTER(_DpapiDataBlob),
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(_DpapiDataBlob),
+    ]
+    _crypt32.CryptUnprotectData.restype = wintypes.BOOL
+    _kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    _kernel32.LocalFree.restype = ctypes.c_void_p
+
+    def _dpapi_blob_from_bytes(raw: bytes) -> Tuple[_DpapiDataBlob, Any]:
+        src = bytes(raw or b"")
+        if src:
+            arr = (ctypes.c_ubyte * len(src)).from_buffer_copy(src)
+            blob = _DpapiDataBlob(len(src), ctypes.cast(arr, ctypes.POINTER(ctypes.c_ubyte)))
+            return blob, arr
+        arr = (ctypes.c_ubyte * 1)()
+        blob = _DpapiDataBlob(0, ctypes.cast(arr, ctypes.POINTER(ctypes.c_ubyte)))
+        return blob, arr
+
+    def _dpapi_protect_bytes(raw: bytes) -> bytes:
+        in_blob, in_buf = _dpapi_blob_from_bytes(raw)
+        out_blob = _DpapiDataBlob()
+        if not _crypt32.CryptProtectData(
+            ctypes.byref(in_blob),
+            "roonie.twitch.auth.state",
+            None,
+            None,
+            None,
+            _CRYPTPROTECT_UI_FORBIDDEN,
+            ctypes.byref(out_blob),
+        ):
+            raise OSError(f"CryptProtectData failed: {ctypes.WinError()}")
+        _ = in_buf
+        try:
+            if not out_blob.pbData or int(out_blob.cbData) <= 0:
+                return b""
+            return ctypes.string_at(out_blob.pbData, int(out_blob.cbData))
+        finally:
+            if out_blob.pbData:
+                _kernel32.LocalFree(out_blob.pbData)
+
+    def _dpapi_unprotect_bytes(raw: bytes) -> bytes:
+        in_blob, in_buf = _dpapi_blob_from_bytes(raw)
+        out_blob = _DpapiDataBlob()
+        descr = wintypes.LPWSTR()
+        if not _crypt32.CryptUnprotectData(
+            ctypes.byref(in_blob),
+            ctypes.byref(descr),
+            None,
+            None,
+            None,
+            _CRYPTPROTECT_UI_FORBIDDEN,
+            ctypes.byref(out_blob),
+        ):
+            raise OSError(f"CryptUnprotectData failed: {ctypes.WinError()}")
+        _ = in_buf
+        try:
+            if not out_blob.pbData or int(out_blob.cbData) <= 0:
+                return b""
+            return ctypes.string_at(out_blob.pbData, int(out_blob.cbData))
+        finally:
+            if out_blob.pbData:
+                _kernel32.LocalFree(out_blob.pbData)
+            if descr:
+                _kernel32.LocalFree(descr)
+else:
+
+    def _dpapi_protect_bytes(raw: bytes) -> bytes:
+        raise RuntimeError("DPAPI is only available on Windows.")
+
+    def _dpapi_unprotect_bytes(raw: bytes) -> bytes:
+        raise RuntimeError("DPAPI is only available on Windows.")
+
+
 def _default_studio_profile(*, updated_by: str) -> Dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
     return {
@@ -212,6 +348,10 @@ class DashboardStorage:
         self._memory_db_path = self.data_dir / "memory.sqlite"
         self._sessions: Dict[str, Dict[str, Any]] = {}
         self._session_ttl_seconds = self._session_ttl_seconds_from_env()
+        self._retention_enabled = self._retention_enabled_from_env()
+        self._retention_days = self._retention_days_from_env()
+        self._retention_check_interval_seconds = self._retention_check_interval_seconds_from_env()
+        self._retention_last_run_monotonic: float = 0.0
         self._kill_switch_env_pinned = any(name in os.environ for name in self._KILL_SWITCH_ENV_NAMES)
         self._kill_switch_env_pinned_true = self._kill_switch_env_pinned and _env_bool(list(self._KILL_SWITCH_ENV_NAMES), False)
         self._dashboard_kill_switch: bool = False
@@ -266,6 +406,7 @@ class DashboardStorage:
         )
         self._prime_status_runtime_from_runs()
         self._sync_env_from_state()
+        self._apply_retention_policy(force=True)
         if isinstance(readiness_state, dict):
             self.set_readiness_state(readiness_state)
 
@@ -300,7 +441,7 @@ class DashboardStorage:
         configured = (os.getenv("ROONIE_OPERATOR_KEY") or "").strip()
         if not configured:
             return False, "API is READ-ONLY: set ROONIE_OPERATOR_KEY to enable write actions."
-        if (header_value or "").strip() != configured:
+        if not secrets.compare_digest((header_value or "").strip(), configured):
             return False, "Forbidden: invalid X-ROONIE-OP-KEY."
         return True, "ok"
 
@@ -338,6 +479,111 @@ class DashboardStorage:
 
     def session_ttl_seconds(self) -> int:
         return int(self._session_ttl_seconds)
+
+    @staticmethod
+    def _retention_enabled_from_env() -> bool:
+        raw = os.getenv("ROONIE_RETENTION_ENABLED", "1")
+        return _to_bool(raw, True)
+
+    @staticmethod
+    def _retention_days_from_env() -> int:
+        raw = os.getenv("ROONIE_RETENTION_DAYS", os.getenv("ROONIE_DATA_RETENTION_DAYS", "180"))
+        try:
+            parsed = int(raw)
+        except (TypeError, ValueError):
+            parsed = 180
+        return max(1, min(parsed, 3650))
+
+    @staticmethod
+    def _retention_check_interval_seconds_from_env() -> float:
+        raw = os.getenv("ROONIE_RETENTION_CHECK_INTERVAL_SECONDS", "300")
+        try:
+            parsed = float(raw)
+        except (TypeError, ValueError):
+            parsed = 300.0
+        return max(1.0, min(parsed, 86400.0))
+
+    def _purge_old_run_files_locked(self, cutoff_dt: datetime) -> int:
+        if not self.runs_dir.exists():
+            return 0
+        removed = 0
+        cutoff_ts = cutoff_dt.timestamp()
+        for path in self.runs_dir.glob("*.json"):
+            if not path.is_file():
+                continue
+            try:
+                if path.stat().st_mtime < cutoff_ts:
+                    path.unlink()
+                    removed += 1
+            except OSError:
+                continue
+        return removed
+
+    def _prune_jsonl_by_ts_locked(self, path: Path, cutoff_dt: datetime) -> int:
+        if not path.exists():
+            return 0
+        try:
+            raw_lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return 0
+
+        dropped = 0
+        kept: List[str] = []
+        for line in raw_lines:
+            text = str(line or "").strip()
+            if not text:
+                continue
+            try:
+                obj = json.loads(text)
+            except json.JSONDecodeError:
+                kept.append(text)
+                continue
+            if not isinstance(obj, dict):
+                kept.append(text)
+                continue
+            ts = _parse_iso(str(obj.get("ts", "")).strip())
+            if ts is not None and ts < cutoff_dt:
+                dropped += 1
+                continue
+            kept.append(text)
+
+        if dropped <= 0:
+            return 0
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        try:
+            payload = ("\n".join(kept) + "\n") if kept else ""
+            tmp.write_text(payload, encoding="utf-8")
+            tmp.replace(path)
+        except OSError:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+            return 0
+        return dropped
+
+    def _apply_retention_policy(self, *, force: bool = False) -> Dict[str, int]:
+        if not self._retention_enabled:
+            return {"runs_removed": 0, "audit_rows_removed": 0, "eventsub_rows_removed": 0}
+        with self._lock:
+            now_mono = time.monotonic()
+            if (
+                (not force)
+                and self._retention_last_run_monotonic > 0.0
+                and (now_mono - self._retention_last_run_monotonic) < self._retention_check_interval_seconds
+            ):
+                return {"runs_removed": 0, "audit_rows_removed": 0, "eventsub_rows_removed": 0}
+            cutoff_dt = datetime.now(timezone.utc) - timedelta(days=self._retention_days)
+            runs_removed = self._purge_old_run_files_locked(cutoff_dt)
+            audit_rows_removed = self._prune_jsonl_by_ts_locked(self._audit_log_path, cutoff_dt)
+            eventsub_rows_removed = self._prune_jsonl_by_ts_locked(self._eventsub_events_log_path, cutoff_dt)
+            self._retention_last_run_monotonic = now_mono
+        return {
+            "runs_removed": runs_removed,
+            "audit_rows_removed": audit_rows_removed,
+            "eventsub_rows_removed": eventsub_rows_removed,
+        }
 
     @staticmethod
     def role_allows(role: Optional[str], required_role: str) -> bool:
@@ -2439,6 +2685,24 @@ class DashboardStorage:
         return "d3-library-v1"
 
     @staticmethod
+    def _max_library_xml_upload_bytes() -> int:
+        raw = os.getenv("ROONIE_MAX_XML_UPLOAD_BYTES", os.getenv("ROONIE_MAX_MULTIPART_BODY_BYTES", "8388608"))
+        try:
+            parsed = int(raw)
+        except (TypeError, ValueError):
+            parsed = 8388608
+        return max(1024, min(parsed, 104857600))
+
+    @staticmethod
+    def _max_library_track_count() -> int:
+        raw = os.getenv("ROONIE_MAX_LIBRARY_TRACKS", "200000")
+        try:
+            parsed = int(raw)
+        except (TypeError, ValueError):
+            parsed = 200000
+        return max(1000, min(parsed, 1000000))
+
+    @staticmethod
     def _hash_bytes(content: bytes) -> str:
         return hashlib.sha256(content).hexdigest()
 
@@ -2496,13 +2760,21 @@ class DashboardStorage:
     def _parse_rekordbox_xml(xml_bytes: bytes) -> List[Dict[str, Any]]:
         if not xml_bytes:
             return []
-        root = ET.fromstring(xml_bytes)
+        max_xml_bytes = DashboardStorage._max_library_xml_upload_bytes()
+        if len(xml_bytes) > max_xml_bytes:
+            raise ValueError(f"XML upload too large. Max {max_xml_bytes} bytes.")
+        header_scan = bytes(xml_bytes[:4096]).lower()
+        if b"<!doctype" in header_scan or b"<!entity" in header_scan:
+            raise ValueError("Invalid Rekordbox XML: DTD/ENTITY declarations are not allowed.")
+
+        max_tracks = DashboardStorage._max_library_track_count()
         tracks: List[Dict[str, Any]] = []
-        for elem in root.iter():
+        for _, elem in ET.iterparse(io.BytesIO(xml_bytes), events=("end",)):
             if elem.tag is None:
                 continue
             tag = str(elem.tag).split("}")[-1].upper()
             if tag != "TRACK":
+                elem.clear()
                 continue
             attrs = {str(k).strip().lower(): (str(v).strip() if v is not None else "") for k, v in elem.attrib.items()}
             artist = attrs.get("artist", "")
@@ -2513,25 +2785,31 @@ class DashboardStorage:
             file_path = attrs.get("location", "") or attrs.get("filepath", "")
             rekordbox_id = attrs.get("trackid", "") or attrs.get("track_id", "") or attrs.get("id", "")
             search_key = _build_track_search_key(artist, title)
-            if not search_key:
-                continue
-            track: Dict[str, Any] = {
-                "artist": artist,
-                "title": title,
-                "mix": mix,
-                "bpm": None,
-                "key": key or None,
-                "file_path": file_path or None,
-                "rekordbox_id": rekordbox_id or None,
-                "search_key": search_key,
-            }
-            if bpm_raw:
-                try:
-                    bpm_val = float(bpm_raw)
-                    track["bpm"] = str(int(round(bpm_val))) if bpm_val.is_integer() else f"{bpm_val:.2f}".rstrip("0").rstrip(".")
-                except ValueError:
-                    track["bpm"] = bpm_raw
-            tracks.append(track)
+            if search_key:
+                track: Dict[str, Any] = {
+                    "artist": artist,
+                    "title": title,
+                    "mix": mix,
+                    "bpm": None,
+                    "key": key or None,
+                    "file_path": file_path or None,
+                    "rekordbox_id": rekordbox_id or None,
+                    "search_key": search_key,
+                }
+                if bpm_raw:
+                    try:
+                        bpm_val = float(bpm_raw)
+                        track["bpm"] = (
+                            str(int(round(bpm_val)))
+                            if bpm_val.is_integer()
+                            else f"{bpm_val:.2f}".rstrip("0").rstrip(".")
+                        )
+                    except ValueError:
+                        track["bpm"] = bpm_raw
+                tracks.append(track)
+                if len(tracks) > max_tracks:
+                    raise ValueError(f"Rekordbox XML track limit exceeded ({max_tracks}).")
+            elem.clear()
         tracks.sort(key=lambda t: (t.get("search_key", ""), t.get("mix", "")))
         return tracks
 
@@ -2546,6 +2824,9 @@ class DashboardStorage:
         content = bytes(xml_bytes or b"")
         if not content:
             raise ValueError("XML upload is empty.")
+        max_xml_bytes = self._max_library_xml_upload_bytes()
+        if len(content) > max_xml_bytes:
+            raise ValueError(f"XML upload too large. Max {max_xml_bytes} bytes.")
         with self._lock:
             self._library_dir.mkdir(parents=True, exist_ok=True)
             tmp = self._library_xml_path.with_suffix(".xml.tmp")
@@ -2714,6 +2995,7 @@ class DashboardStorage:
         except OSError:
             # Keep API functional even if audit write fails; the action result still returns.
             pass
+        self._apply_retention_policy()
         return rec
 
     @staticmethod
@@ -2725,6 +3007,7 @@ class DashboardStorage:
             return 1.5
 
     def _candidate_run_paths(self) -> List[Path]:
+        self._apply_retention_policy()
         if not self.runs_dir.exists():
             return []
         candidates: List[Tuple[float, Path]] = []
@@ -3555,6 +3838,7 @@ class DashboardStorage:
                 fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
         except OSError:
             return
+        self._apply_retention_policy()
 
     @staticmethod
     def _twitch_access_token_without_prefix(token: str) -> str:
@@ -3806,6 +4090,14 @@ class DashboardStorage:
         except (TypeError, ValueError):
             return 2.0
 
+    @staticmethod
+    def _twitch_revoke_timeout_seconds() -> float:
+        raw = os.getenv("ROONIE_TWITCH_REVOKE_TIMEOUT_SECONDS", "4.0")
+        try:
+            return max(1.0, min(float(raw), 15.0))
+        except (TypeError, ValueError):
+            return 4.0
+
     def _invalidate_twitch_status_cache_locked(self) -> None:
         self._twitch_status_cache = None
         self._twitch_status_cache_expiry_ts = 0.0
@@ -3840,13 +4132,54 @@ class DashboardStorage:
                 return value
         return ""
 
+    @staticmethod
+    def _twitch_auth_state_encryption_enabled() -> bool:
+        enabled = _to_bool(os.getenv("ROONIE_ENCRYPT_TWITCH_TOKENS_AT_REST", "1"), True)
+        return bool(enabled) and os.name == "nt"
+
+    @staticmethod
+    def _encode_twitch_secret_for_disk(secret: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+        text = str(secret or "").strip()
+        if not text:
+            return (None, None)
+        if not DashboardStorage._twitch_auth_state_encryption_enabled():
+            return (text, None)
+        try:
+            protected = _dpapi_protect_bytes(text.encode("utf-8"))
+            return (None, "dpapi:" + base64.b64encode(protected).decode("ascii"))
+        except Exception:
+            # Fallback keeps runtime functional if DPAPI is unexpectedly unavailable.
+            return (text, None)
+
+    @staticmethod
+    def _decode_twitch_secret_from_disk(secret: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+        text = str(secret or "").strip()
+        if not text:
+            return (None, None)
+        if not text.lower().startswith("dpapi:"):
+            return (text, None)
+        payload_b64 = text.split(":", 1)[1]
+        if not payload_b64:
+            return (None, text)
+        try:
+            protected = base64.b64decode(payload_b64.encode("ascii"), validate=True)
+            clear = _dpapi_unprotect_bytes(protected).decode("utf-8")
+            clear_text = str(clear).strip()
+            if not clear_text:
+                return (None, text)
+            return (clear_text, text)
+        except Exception:
+            return (None, text)
+
     def _default_twitch_auth_state(self) -> Dict[str, Any]:
         return {
             "version": 1,
             "accounts": {
                 "bot": {
                     "token": None,
+                    "token_enc": None,
                     "refresh_token": None,
+                    "refresh_token_enc": None,
                     "expires_at": None,
                     "scopes": [],
                     "display_name": None,
@@ -3856,7 +4189,9 @@ class DashboardStorage:
                 },
                 "broadcaster": {
                     "token": None,
+                    "token_enc": None,
                     "refresh_token": None,
+                    "refresh_token_enc": None,
                     "expires_at": None,
                     "scopes": [],
                     "display_name": None,
@@ -3878,12 +4213,14 @@ class DashboardStorage:
             row = accounts_raw.get(account, {})
             if not isinstance(row, dict):
                 row = {}
-            token = row.get("token")
-            token_str = str(token).strip() if isinstance(token, str) and token.strip() else None
-            refresh_token = row.get("refresh_token")
-            refresh_token_str = (
-                str(refresh_token).strip() if isinstance(refresh_token, str) and refresh_token.strip() else None
-            )
+            token_plain = row.get("token")
+            token_str, token_enc_decoded = self._decode_twitch_secret_from_disk(token_plain)
+            if token_str is None:
+                token_str, token_enc_decoded = self._decode_twitch_secret_from_disk(row.get("token_enc"))
+            refresh_plain = row.get("refresh_token")
+            refresh_token_str, refresh_enc_decoded = self._decode_twitch_secret_from_disk(refresh_plain)
+            if refresh_token_str is None:
+                refresh_token_str, refresh_enc_decoded = self._decode_twitch_secret_from_disk(row.get("refresh_token_enc"))
             expires_at_raw = row.get("expires_at")
             expires_at = str(expires_at_raw).strip() if isinstance(expires_at_raw, str) and str(expires_at_raw).strip() else None
             display_name_raw = row.get("display_name")
@@ -3904,12 +4241,58 @@ class DashboardStorage:
                 scopes = [str(item).strip() for item in scopes_raw if str(item).strip()]
             accounts[account] = {
                 "token": token_str,
+                "token_enc": token_enc_decoded,
                 "refresh_token": refresh_token_str,
+                "refresh_token_enc": refresh_enc_decoded,
                 "expires_at": expires_at,
                 "scopes": scopes,
                 "display_name": display_name,
                 "pending_state": pending_state,
                 "disconnected": bool(row.get("disconnected", False)),
+                "updated_at": str(row.get("updated_at")).strip() if row.get("updated_at") is not None else None,
+            }
+        return {"version": 1, "accounts": accounts}
+
+    def _serialize_twitch_auth_state_for_disk(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        normalized = self._normalize_twitch_auth_state(payload)
+        accounts_norm = normalized.get("accounts", {}) if isinstance(normalized, dict) else {}
+        accounts: Dict[str, Dict[str, Any]] = {}
+        for account in self._twitch_account_names():
+            row = accounts_norm.get(account, {}) if isinstance(accounts_norm, dict) else {}
+            if not isinstance(row, dict):
+                row = {}
+            disconnected = bool(row.get("disconnected", False))
+            token_plain = str(row.get("token") or "").strip()
+            refresh_plain = str(row.get("refresh_token") or "").strip()
+            existing_token_enc = str(row.get("token_enc") or "").strip()
+            existing_refresh_enc = str(row.get("refresh_token_enc") or "").strip()
+
+            token_disk, token_enc_disk = self._encode_twitch_secret_for_disk(token_plain)
+            refresh_disk, refresh_enc_disk = self._encode_twitch_secret_for_disk(refresh_plain)
+            if not token_plain and existing_token_enc and not disconnected:
+                token_disk = None
+                token_enc_disk = existing_token_enc
+            if not refresh_plain and existing_refresh_enc and not disconnected:
+                refresh_disk = None
+                refresh_enc_disk = existing_refresh_enc
+            if disconnected:
+                token_disk = None
+                token_enc_disk = None
+                refresh_disk = None
+                refresh_enc_disk = None
+
+            scopes_raw = row.get("scopes", [])
+            scopes = [str(item).strip() for item in scopes_raw if str(item).strip()] if isinstance(scopes_raw, list) else []
+            accounts[account] = {
+                "token": token_disk,
+                "token_enc": token_enc_disk,
+                "refresh_token": refresh_disk,
+                "refresh_token_enc": refresh_enc_disk,
+                "expires_at": str(row.get("expires_at")).strip() if row.get("expires_at") is not None else None,
+                "scopes": scopes,
+                "display_name": str(row.get("display_name")).strip() if row.get("display_name") is not None else None,
+                "pending_state": str(row.get("pending_state")).strip() if row.get("pending_state") is not None else None,
+                "disconnected": disconnected,
                 "updated_at": str(row.get("updated_at")).strip() if row.get("updated_at") is not None else None,
             }
         return {"version": 1, "accounts": accounts}
@@ -3920,11 +4303,17 @@ class DashboardStorage:
             payload = self._normalize_twitch_auth_state(raw)
         else:
             payload = self._default_twitch_auth_state()
-        self._write_json_atomic(self._twitch_auth_state_path, payload)
+        self._write_json_atomic(
+            self._twitch_auth_state_path,
+            self._serialize_twitch_auth_state_for_disk(payload),
+        )
         return payload
 
     def _save_twitch_auth_state_locked(self, payload: Dict[str, Any]) -> None:
-        self._write_json_atomic(self._twitch_auth_state_path, self._normalize_twitch_auth_state(payload))
+        self._write_json_atomic(
+            self._twitch_auth_state_path,
+            self._serialize_twitch_auth_state_for_disk(payload),
+        )
 
     @staticmethod
     def _token_looks_valid(token: str) -> bool:
@@ -3986,6 +4375,38 @@ class DashboardStorage:
             "login": login,
             "expires_in": int(expires_in) if isinstance(expires_in, int) else None,
         }
+
+    def _revoke_twitch_token_remote(self, *, token: str, client_id: str) -> Dict[str, Any]:
+        access_token = self._token_without_prefix(token)
+        client_id_text = str(client_id or "").strip()
+        if not client_id_text:
+            return {"ok": False, "error": "CONFIG_MISSING", "detail": "TWITCH_CLIENT_ID is required for token revocation."}
+        if not access_token:
+            return {"ok": False, "error": "MISSING_TOKEN", "detail": "Token is empty."}
+
+        query = urlencode({"client_id": client_id_text, "token": access_token})
+        req = urllib.request.Request(
+            f"https://id.twitch.tv/oauth2/revoke?{query}",
+            data=b"",
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self._twitch_revoke_timeout_seconds()) as response:
+                _ = response.read()
+        except urllib.error.HTTPError as exc:
+            detail = f"Twitch revoke HTTP {getattr(exc, 'code', None)}."
+            try:
+                data = json.loads(exc.read().decode("utf-8"))
+                if isinstance(data, dict):
+                    msg = str(data.get("message") or "").strip()
+                    if msg:
+                        detail = msg
+            except Exception:
+                pass
+            return {"ok": False, "error": "REVOKE_HTTP_ERROR", "detail": detail}
+        except Exception as exc:  # pragma: no cover - network-dependent
+            return {"ok": False, "error": "REVOKE_FAILED", "detail": str(exc)}
+        return {"ok": True}
 
     def _exchange_twitch_code(self, *, code: str, redirect_uri: str, client_id: str, client_secret: str) -> Dict[str, Any]:
         payload = urlencode(
@@ -4259,7 +4680,9 @@ class DashboardStorage:
             accounts = current.setdefault("accounts", {})
             row = accounts.setdefault(account, {})
             row["token"] = str(exchanged.get("access_token", "")).strip() or None
+            row["token_enc"] = None
             row["refresh_token"] = str(exchanged.get("refresh_token", "")).strip() or None
+            row["refresh_token_enc"] = None
             row["expires_at"] = exchanged.get("expires_at")
             row["scopes"] = list(exchanged.get("scopes", []))
             row["display_name"] = row.get("display_name") or self._twitch_account_display(account)
@@ -4288,18 +4711,41 @@ class DashboardStorage:
             "detail": "Connected.",
         }
 
-    def twitch_disconnect(self, account: str) -> Dict[str, Any]:
+    def twitch_disconnect(
+        self,
+        account: str,
+        *,
+        revoke_remote: bool = True,
+        include_env_tokens: bool = False,
+    ) -> Dict[str, Any]:
         acc = str(account or "").strip().lower()
         if acc not in self._twitch_account_names():
             raise ValueError("account must be one of: bot, broadcaster")
 
+        local_tokens_to_revoke: List[Dict[str, str]] = []
+        client_id = ""
         checked_at = datetime.now(timezone.utc).isoformat()
         with self._lock:
             state = self._load_twitch_auth_state_locked()
+            runtime_config = self._twitch_runtime_config_locked()
+            client_id = str(runtime_config.get("client_id", "")).strip()
             accounts = state.setdefault("accounts", {})
             row = accounts.setdefault(acc, {})
+            local_token = str(row.get("token") or "").strip()
+            local_refresh_token = str(row.get("refresh_token") or "").strip()
+            if local_token:
+                local_tokens_to_revoke.append({"source": "local_access", "token": local_token})
+            if local_refresh_token:
+                local_tokens_to_revoke.append({"source": "local_refresh", "token": local_refresh_token})
+            if include_env_tokens:
+                for env_name in self._twitch_token_env_names(acc):
+                    env_token = str(os.getenv(env_name, "")).strip()
+                    if env_token:
+                        local_tokens_to_revoke.append({"source": f"env:{env_name}", "token": env_token})
             row["token"] = None
+            row["token_enc"] = None
             row["refresh_token"] = None
+            row["refresh_token_enc"] = None
             row["expires_at"] = None
             row["scopes"] = []
             row["disconnected"] = True
@@ -4312,7 +4758,56 @@ class DashboardStorage:
                     os.environ.pop(env_name, None)
             self._invalidate_twitch_status_cache_locked()
 
-        return self.get_twitch_status(force_refresh=True)
+        revocation: Dict[str, Any] = {
+            "enabled": bool(revoke_remote),
+            "attempted": 0,
+            "revoked": 0,
+            "failed": 0,
+            "details": [],
+        }
+        if not revoke_remote:
+            revocation["skipped_reason"] = "disabled"
+        else:
+            seen_tokens: set[str] = set()
+            for item in local_tokens_to_revoke:
+                token = self._token_without_prefix(item.get("token"))
+                source = str(item.get("source") or "unknown")
+                if not token or token in seen_tokens:
+                    continue
+                seen_tokens.add(token)
+                revocation["attempted"] = int(revocation.get("attempted", 0)) + 1
+                if not client_id:
+                    revocation["failed"] = int(revocation.get("failed", 0)) + 1
+                    revocation["details"].append(
+                        {
+                            "source": source,
+                            "ok": False,
+                            "error": "CONFIG_MISSING",
+                            "detail": "TWITCH_CLIENT_ID is required for token revocation.",
+                        }
+                    )
+                    continue
+                result = self._revoke_twitch_token_remote(token=token, client_id=client_id)
+                ok = bool(result.get("ok"))
+                if ok:
+                    revocation["revoked"] = int(revocation.get("revoked", 0)) + 1
+                else:
+                    revocation["failed"] = int(revocation.get("failed", 0)) + 1
+                revocation["details"].append(
+                    {
+                        "source": source,
+                        "ok": ok,
+                        "error": result.get("error"),
+                        "detail": result.get("detail"),
+                    }
+                )
+            if revocation["attempted"] == 0:
+                revocation["skipped_reason"] = "no_local_tokens"
+
+        return {
+            "status": self.get_twitch_status(force_refresh=True),
+            "revocation": revocation,
+        }
 
     def get_twitch_status(self, *, force_refresh: bool = False) -> Dict[str, Any]:
         checked_at = datetime.now(timezone.utc).isoformat()
@@ -4354,6 +4849,7 @@ class DashboardStorage:
         merged_scopes = sorted(scope_set)
         missing_fields = list(runtime_config.get("missing_config_fields", []))
         primary_channel = str(runtime_config.get("primary_channel", "")).strip() or None
+        encryption_enabled = self._twitch_auth_state_encryption_enabled()
         payload = {
             # Legacy compatibility fields.
             "connected": bool(bot_status.get("connected", False) or broadcaster_status.get("connected", False)),
@@ -4367,6 +4863,10 @@ class DashboardStorage:
             "primary_channel": primary_channel,
             "missing_config_fields": missing_fields,
             "config_ready": len(missing_fields) == 0,
+            "auth_state_encryption": {
+                "enabled": encryption_enabled,
+                "backend": ("dpapi" if encryption_enabled else "plaintext"),
+            },
             # D15 truthful account-level status.
             "last_checked_ts": checked_at,
             "accounts": accounts,
@@ -4564,6 +5064,7 @@ class DashboardStorage:
         return items
 
     def _read_all_operator_log_records(self) -> List[OperatorLogResponse]:
+        self._apply_retention_policy()
         if not self._audit_log_path.exists():
             return []
         records: List[OperatorLogResponse] = []

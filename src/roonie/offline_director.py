@@ -4,24 +4,8 @@ import re
 from typing import Dict, Optional
 
 from .offline_responders import classify_safe_info_category, library_availability_response, respond
+from .safety_policy import classify_message_safety
 from .types import DecisionRecord, Env, Event
-
-
-_REFUSE_PATTERNS = [
-    r"where do you live",
-    r"address",
-    r"phone number",
-    r"real name",
-    r"dox",
-    r"ip",
-]
-
-_SENSITIVE_PATTERNS = [
-    r"depressed",
-    r"suicidal",
-    r"self harm",
-    r"kill myself",
-]
 
 _DIRECT_VERBS = (
     "fix",
@@ -98,13 +82,7 @@ class OfflineDirector:
             if "?" in message:
                 ambiguity_detected = True
 
-        refusal_reason_code = None
-        safety_classification = "allowed"
-        if any(re.search(pat, message_lower) for pat in _REFUSE_PATTERNS):
-            safety_classification = "refuse"
-            refusal_reason_code = "REF_PRIVATE_INFO_DOXXING"
-        elif any(re.search(pat, message_lower) for pat in _SENSITIVE_PATTERNS):
-            safety_classification = "sensitive_no_followup"
+        safety_classification, refusal_reason_code = classify_message_safety(message_stripped)
         live_greeting = addressed_to_roonie and trigger_type == "banter" and self._is_live_greeting(message_lower, event)
 
         noop_bias_applied = True
@@ -131,7 +109,7 @@ class OfflineDirector:
                 routing_reason_codes.append("ROUTE_REFUSAL_SAFETY")
             elif safety_classification == "sensitive_no_followup":
                 action = "RESPOND_PUBLIC"
-                route = "responder:neutral_ack"
+                route = "responder:sensitive_ack"
                 selected_responder = route
                 routing_reason_codes.append("ROUTE_SENSITIVE_NO_FOLLOWUP")
             elif ambiguity_detected:

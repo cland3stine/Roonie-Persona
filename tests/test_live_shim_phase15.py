@@ -29,6 +29,67 @@ def test_run_payload_writes_to_dashboard_runs_dir_env(tmp_path, monkeypatch) -> 
     assert out_path.exists()
 
 
+def test_run_payload_strips_inner_circle_from_persisted_inputs(tmp_path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runtime-runs"
+    monkeypatch.setenv("ROONIE_DASHBOARD_RUNS_DIR", str(runs_dir))
+
+    payload = {
+        "session_id": "live-shim-strip-inner-circle",
+        "inputs": [
+            {
+                "event_id": "evt-1",
+                "message": "@RoonieTheCat hello",
+                "metadata": {
+                    "user": "ruleofrune",
+                    "is_direct_mention": True,
+                    "inner_circle": [{"username": "jen", "display_name": "Jen"}],
+                },
+            },
+            {
+                "event_id": "evt-2",
+                "message": "@RoonieTheCat hi again",
+                "metadata": {
+                    "user": "ruleofrune",
+                    "inner_circle": [{"username": "art", "display_name": "Art"}],
+                },
+            },
+        ],
+    }
+
+    out_path = run_payload(payload, emit_outputs=False)
+    doc = json.loads(out_path.read_text(encoding="utf-8"))
+    for inp in doc["inputs"]:
+        metadata = inp.get("metadata", {})
+        assert "inner_circle" not in metadata
+        assert metadata.get("user") == "ruleofrune"
+
+
+def test_run_payload_strip_does_not_mutate_original_metadata(tmp_path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runtime-runs"
+    monkeypatch.setenv("ROONIE_DASHBOARD_RUNS_DIR", str(runs_dir))
+
+    inner_circle = [{"username": "jen", "display_name": "Jen", "role": "mod"}]
+    metadata = {
+        "user": "ruleofrune",
+        "is_direct_mention": True,
+        "inner_circle": inner_circle,
+    }
+    payload = {
+        "session_id": "live-shim-strip-no-mutate",
+        "inputs": [
+            {
+                "event_id": "evt-1",
+                "message": "@RoonieTheCat hello",
+                "metadata": metadata,
+            }
+        ],
+    }
+
+    _ = run_payload(payload, emit_outputs=False)
+    assert "inner_circle" in payload["inputs"][0]["metadata"]
+    assert payload["inputs"][0]["metadata"]["inner_circle"] == inner_circle
+
+
 def test_live_direct_greeting_routes_to_ack() -> None:
     director = OfflineDirector()
     env = Env(offline=False)

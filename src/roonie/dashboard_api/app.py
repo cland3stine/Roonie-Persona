@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import cgi
 import json
+import logging
 import mimetypes
 import os
 from http.cookies import SimpleCookie
@@ -13,14 +14,108 @@ from typing import Any, Dict, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from .models import serialize_many
-from .storage import DashboardStorage
+from .storage import DashboardStorage, LoginRateLimiter
 
 
-def _cors_origin(handler: BaseHTTPRequestHandler) -> str:
-    origin = handler.headers.get("Origin")
-    if isinstance(origin, str) and origin.strip():
-        return origin.strip()
-    return "*"
+logger = logging.getLogger(__name__)
+
+
+_SENSITIVE_GET_REQUIRED_ROLE: Dict[str, str] = {
+    "/api/status": "operator",
+    "/api/events": "operator",
+    "/api/suppressions": "operator",
+    "/api/operator_log": "operator",
+    "/api/queue": "operator",
+    "/api/twitch/channel_emotes": "operator",
+    "/api/studio_profile": "operator",
+    "/api/inner_circle": "operator",
+    "/api/providers/status": "operator",
+    "/api/system/readiness": "operator",
+    "/api/system/health": "operator",
+    "/api/system/export": "director",
+    "/api/routing/status": "operator",
+    "/api/senses/status": "operator",
+    "/api/memory/cultural": "operator",
+    "/api/memory/viewers": "operator",
+    "/api/memory/pending": "operator",
+    "/api/auth/twitch_status": "operator",
+    "/api/twitch/status": "operator",
+    "/api/library_index/status": "operator",
+    "/api/library_index/search": "operator",
+    "/api/logs/events": "operator",
+    "/api/logs/suppressions": "operator",
+    "/api/logs/operator": "operator",
+}
+
+
+def _normalize_origin(value: Any) -> Optional[str]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    parsed = urlparse(text)
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    host = str(parsed.netloc or "").strip().lower()
+    if not host:
+        return None
+    return f"{parsed.scheme.lower()}://{host}"
+
+
+def _cors_allowlist() -> set[str]:
+    allowlist: set[str] = {
+        "http://127.0.0.1:8787",
+        "http://localhost:8787",
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+        "http://127.0.0.1:8080",
+        "http://localhost:8080",
+    }
+    raw = str(os.getenv("ROONIE_CORS_ALLOWED_ORIGINS", "")).strip()
+    if raw:
+        for token in raw.replace(",", " ").split():
+            normalized = _normalize_origin(token)
+            if normalized:
+                allowlist.add(normalized)
+    for env_name in ("ROONIE_DASHBOARD_APP_URL", "ROONIE_DASHBOARD_PUBLIC_URL"):
+        normalized = _normalize_origin(os.getenv(env_name))
+        if normalized:
+            allowlist.add(normalized)
+    return allowlist
+
+
+def _cors_origin(handler: BaseHTTPRequestHandler) -> Optional[str]:
+    origin = _normalize_origin(handler.headers.get("Origin"))
+    if not origin:
+        return None
+    if origin in _cors_allowlist():
+        return origin
+    return None
+
+
+def _set_cors_headers(handler: BaseHTTPRequestHandler, *, origin: Optional[str] = None) -> None:
+    allowed_origin = origin or _cors_origin(handler)
+    if not allowed_origin:
+        return
+    handler.send_header("Access-Control-Allow-Origin", allowed_origin)
+    handler.send_header("Vary", "Origin")
+    handler.send_header("Access-Control-Allow-Credentials", "true")
+    handler.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+    handler.send_header(
+        "Access-Control-Allow-Headers",
+        "Content-Type, X-ROONIE-OP-KEY, X-ROONIE-ACTOR, X-ROONIE-OP-ACTOR",
+    )
+
+
+def _required_role_for_sensitive_get(path: str) -> Optional[str]:
+    return _SENSITIVE_GET_REQUIRED_ROLE.get(str(path or "").strip())
+
+
+def _resolve_postmessage_target_origin(handler: BaseHTTPRequestHandler, app_url: str) -> str:
+    explicit = _normalize_origin(app_url)
+    if explicit:
+        return explicit
+    # Keep fallback deterministic; never reflect request headers into postMessage target.
+    return "http://127.0.0.1:8787"
 
 
 def _json_response(
@@ -33,14 +128,7 @@ def _json_response(
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header("Content-Length", str(len(body)))
-    handler.send_header("Access-Control-Allow-Origin", _cors_origin(handler))
-    handler.send_header("Vary", "Origin")
-    handler.send_header("Access-Control-Allow-Credentials", "true")
-    handler.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-    handler.send_header(
-        "Access-Control-Allow-Headers",
-        "Content-Type, X-ROONIE-OP-KEY, X-ROONIE-ACTOR, X-ROONIE-OP-ACTOR",
-    )
+    _set_cors_headers(handler)
     for key, value in (extra_headers or {}).items():
         handler.send_header(key, value)
     handler.end_headers()
@@ -59,14 +147,7 @@ def _bytes_response(
     handler.send_response(status)
     handler.send_header("Content-Type", content_type)
     handler.send_header("Content-Length", str(len(body)))
-    handler.send_header("Access-Control-Allow-Origin", _cors_origin(handler))
-    handler.send_header("Vary", "Origin")
-    handler.send_header("Access-Control-Allow-Credentials", "true")
-    handler.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-    handler.send_header(
-        "Access-Control-Allow-Headers",
-        "Content-Type, X-ROONIE-OP-KEY, X-ROONIE-ACTOR, X-ROONIE-OP-ACTOR",
-    )
+    _set_cors_headers(handler)
     for key, value in (extra_headers or {}).items():
         handler.send_header(key, value)
     handler.end_headers()
@@ -84,14 +165,7 @@ def _html_response(
     handler.send_response(status)
     handler.send_header("Content-Type", "text/html; charset=utf-8")
     handler.send_header("Content-Length", str(len(body)))
-    handler.send_header("Access-Control-Allow-Origin", _cors_origin(handler))
-    handler.send_header("Vary", "Origin")
-    handler.send_header("Access-Control-Allow-Credentials", "true")
-    handler.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-    handler.send_header(
-        "Access-Control-Allow-Headers",
-        "Content-Type, X-ROONIE-OP-KEY, X-ROONIE-ACTOR, X-ROONIE-OP-ACTOR",
-    )
+    _set_cors_headers(handler)
     for key, value in (extra_headers or {}).items():
         handler.send_header(key, value)
     handler.end_headers()
@@ -152,6 +226,17 @@ def _parse_active_only(query: Dict[str, Any], default: bool = True) -> bool:
     return bool(default)
 
 
+def _bool_from_any(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 def _query_opt(query: Dict[str, Any], key: str) -> str | None:
     raw = query.get(key, [None])
     value = raw[0] if isinstance(raw, list) and raw else None
@@ -162,28 +247,73 @@ def _query_opt(query: Dict[str, Any], key: str) -> str | None:
 
 
 def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
+    raw_max_attempts = os.getenv("ROONIE_AUTH_RATE_LIMIT_MAX_ATTEMPTS", "5")
+    raw_lockout_seconds = os.getenv("ROONIE_AUTH_RATE_LIMIT_LOCKOUT_SECONDS", "60")
+    raw_max_json_body_bytes = os.getenv("ROONIE_MAX_JSON_BODY_BYTES", "1048576")
+    raw_max_multipart_body_bytes = os.getenv("ROONIE_MAX_MULTIPART_BODY_BYTES", "8388608")
+    try:
+        max_attempts = max(1, int(raw_max_attempts))
+    except (TypeError, ValueError):
+        max_attempts = 5
+    try:
+        lockout_seconds = max(0.001, float(raw_lockout_seconds))
+    except (TypeError, ValueError):
+        lockout_seconds = 60.0
+    try:
+        max_json_body_bytes = max(1024, int(raw_max_json_body_bytes))
+    except (TypeError, ValueError):
+        max_json_body_bytes = 1048576
+    try:
+        max_multipart_body_bytes = max(1024, int(raw_max_multipart_body_bytes))
+    except (TypeError, ValueError):
+        max_multipart_body_bytes = 8388608
+    _login_limiter = LoginRateLimiter(max_attempts=max_attempts, lockout_seconds=lockout_seconds)
+
     class DashboardHandler(BaseHTTPRequestHandler):
         def log_message(self, fmt: str, *args: Any) -> None:
             # Quiet by default for local polling.
             return
 
-        def do_OPTIONS(self) -> None:  # noqa: N802
-            self.send_response(HTTPStatus.NO_CONTENT)
-            self.send_header("Access-Control-Allow-Origin", _cors_origin(self))
-            self.send_header("Vary", "Origin")
-            self.send_header("Access-Control-Allow-Credentials", "true")
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-            self.send_header(
-                "Access-Control-Allow-Headers",
-                "Content-Type, X-ROONIE-OP-KEY, X-ROONIE-ACTOR, X-ROONIE-OP-ACTOR",
+        def _content_length(self) -> Optional[int]:
+            try:
+                value = int(self.headers.get("Content-Length", "0"))
+            except (TypeError, ValueError):
+                return None
+            if value < 0:
+                return None
+            return value
+
+        def _reject_payload_too_large(self, *, max_bytes: int, detail: str) -> bool:
+            content_length = self._content_length()
+            if content_length is None or content_length <= max_bytes:
+                return False
+            _json_response(
+                self,
+                {
+                    "ok": False,
+                    "error": "payload_too_large",
+                    "detail": detail,
+                    "max_bytes": max_bytes,
+                },
+                status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
             )
+            return True
+
+        def do_OPTIONS(self) -> None:  # noqa: N802
+            origin = _cors_origin(self)
+            if not origin:
+                self.send_response(HTTPStatus.FORBIDDEN)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.send_response(HTTPStatus.NO_CONTENT)
+            _set_cors_headers(self, origin=origin)
             self.end_headers()
 
         def _read_json_body(self) -> tuple[bool, Dict[str, Any]]:
-            try:
-                content_length = int(self.headers.get("Content-Length", "0"))
-            except (TypeError, ValueError):
-                content_length = 0
+            content_length = self._content_length() or 0
+            if content_length > max_json_body_bytes:
+                return False, {}
             if content_length <= 0:
                 return True, {}
             raw = self.rfile.read(content_length)
@@ -212,6 +342,9 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
             ctype = self.headers.get("Content-Type", "")
             if "multipart/form-data" not in ctype.lower():
                 return False, None, "Expected multipart/form-data upload."
+            content_length = self._content_length()
+            if content_length is not None and content_length > max_multipart_body_bytes:
+                return False, None, f"Payload too large. Max multipart body is {max_multipart_body_bytes} bytes."
             environ = {
                 "REQUEST_METHOD": "POST",
                 "CONTENT_TYPE": ctype,
@@ -353,11 +486,53 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
                 return None
 
             # Backward compatibility: operator key fallback if no authenticated session.
+            rate_key = f"opkey:{self.client_address[0]}"
+            if _login_limiter.is_locked_out(rate_key):
+                msg = "Forbidden: too many failed operator-key attempts. Try again later."
+                storage.record_operator_action(
+                    operator=identity["operator"],
+                    action=action,
+                    payload=payload,
+                    result=f"DENIED: {msg}",
+                    actor=identity["actor"],
+                    username=identity.get("username"),
+                    role=identity.get("role"),
+                    auth_mode=identity.get("auth_mode"),
+                )
+                _json_response(
+                    self,
+                    {"ok": False, "error": "forbidden", "detail": msg},
+                    status=HTTPStatus.FORBIDDEN,
+                )
+                return None
+
             key = self.headers.get("X-ROONIE-OP-KEY")
             ok, msg = storage.validate_operator_key(key)
             if ok:
+                _login_limiter.reset(rate_key)
                 identity["auth_mode"] = "legacy_key"
+                identity["role"] = "operator"
+                logger.warning("SEC-007: Legacy operator-key auth used. Consider migrating to session auth.")
+                if not storage.role_allows("operator", required_role):
+                    msg = f"Forbidden: {required_role} role required."
+                    storage.record_operator_action(
+                        operator=identity["operator"],
+                        action=action,
+                        payload=payload,
+                        result=f"DENIED: {msg}",
+                        actor=identity["actor"],
+                        username=identity.get("username"),
+                        role=identity.get("role"),
+                        auth_mode=identity.get("auth_mode"),
+                    )
+                    _json_response(
+                        self,
+                        {"ok": False, "error": "forbidden", "detail": msg},
+                        status=HTTPStatus.FORBIDDEN,
+                    )
+                    return None
                 return identity
+            _login_limiter.record_failure(rate_key)
             storage.record_operator_action(
                 operator=identity["operator"],
                 action=action,
@@ -507,6 +682,7 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
                     ).strip() or "/"
                     if not (app_url.startswith("http://") or app_url.startswith("https://") or app_url.startswith("/")):
                         app_url = "/"
+                    postmessage_target_origin = _resolve_postmessage_target_origin(self, app_url)
                     status_text = "Connected." if ok else "Connection failed."
                     safe_detail = detail.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                     safe_status = status_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -524,8 +700,9 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
                         "<script>"
                         "var __hasOpener = false;"
                         "try { __hasOpener = !!(window.opener && !window.opener.closed); } catch (e) { __hasOpener = false; }"
+                        f"var __targetOrigin = {json.dumps(postmessage_target_origin)};"
                         "if (__hasOpener) {"
-                        f"  try {{ window.opener.postMessage({json.dumps({'type': 'ROONIE_TWITCH_AUTH_COMPLETE', 'ok': ok, 'account': account})}, '*'); }} catch (e) {{}}"
+                        f"  try {{ window.opener.postMessage({json.dumps({'type': 'ROONIE_TWITCH_AUTH_COMPLETE', 'ok': ok, 'account': account})}, __targetOrigin); }} catch (e) {{}}"
                         "  try { window.opener.focus(); } catch (e) {}"
                         "  setTimeout(function(){ try { window.close(); } catch (e) {} }, 250);"
                         "} else {"
@@ -539,6 +716,11 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
                 status = HTTPStatus.OK if bool(result.get("ok")) else HTTPStatus.BAD_REQUEST
                 _json_response(self, result, status=status)
                 return
+            required_role = _required_role_for_sensitive_get(path)
+            if required_role:
+                identity = self._require_authenticated_session(required_role=required_role)
+                if identity is None:
+                    return
             if path == "/api/status":
                 _json_response(self, storage.get_status().to_dict())
                 return
@@ -820,6 +1002,19 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
             query = parse_qs(parsed.query)
             path = parsed.path
 
+            if path == "/api/library_index/upload_xml":
+                if self._reject_payload_too_large(
+                    max_bytes=max_multipart_body_bytes,
+                    detail=f"Payload too large. Max multipart body is {max_multipart_body_bytes} bytes.",
+                ):
+                    return
+            else:
+                if self._reject_payload_too_large(
+                    max_bytes=max_json_body_bytes,
+                    detail=f"Payload too large. Max JSON body is {max_json_body_bytes} bytes.",
+                ):
+                    return
+
             if path == "/api/auth/login":
                 ok_body, payload = self._read_json_body()
                 if not ok_body:
@@ -831,14 +1026,28 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
                     return
                 username = str(payload.get("username", "")).strip().lower()
                 password = str(payload.get("password", ""))
+                rate_key = f"login:{username}"
+                if _login_limiter.is_locked_out(rate_key):
+                    _json_response(
+                        self,
+                        {
+                            "ok": False,
+                            "error": "rate_limited",
+                            "detail": "Too many failed attempts. Try again later.",
+                        },
+                        status=HTTPStatus.TOO_MANY_REQUESTS,
+                    )
+                    return
                 auth = storage.login_dashboard_user(username, password)
                 if not auth:
+                    _login_limiter.record_failure(rate_key)
                     _json_response(
                         self,
                         {"ok": False, "error": "unauthorized", "detail": "Invalid username or password."},
                         status=HTTPStatus.UNAUTHORIZED,
                     )
                     return
+                _login_limiter.reset(rate_key)
                 cookie_value = self._build_session_cookie(
                     auth["session_id"],
                     max_age=storage.session_ttl_seconds(),
@@ -997,8 +1206,14 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
                     .lower()
                     or "bot"
                 )
+                revoke_remote = _bool_from_any(payload.get("revoke_remote"), True)
+                include_env_tokens = _bool_from_any(payload.get("include_env_tokens"), False)
                 try:
-                    status_payload = storage.twitch_disconnect(account)
+                    disconnect_result = storage.twitch_disconnect(
+                        account,
+                        revoke_remote=revoke_remote,
+                        include_env_tokens=include_env_tokens,
+                    )
                 except ValueError as exc:
                     storage.record_operator_action(
                         operator=identity["operator"],
@@ -1019,14 +1234,31 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
                 storage.record_operator_action(
                     operator=identity["operator"],
                     action="TWITCH_DISCONNECT",
-                    payload={"account": account},
-                    result="OK",
+                    payload={
+                        "account": account,
+                        "revoke_remote": revoke_remote,
+                        "include_env_tokens": include_env_tokens,
+                    },
+                    result=(
+                        "OK "
+                        f"revoked={disconnect_result.get('revocation', {}).get('revoked', 0)}/"
+                        f"{disconnect_result.get('revocation', {}).get('attempted', 0)} "
+                        f"failed={disconnect_result.get('revocation', {}).get('failed', 0)}"
+                    ),
                     actor=identity["actor"],
                     username=identity.get("username"),
                     role=identity.get("role"),
                     auth_mode=identity.get("auth_mode"),
                 )
-                _json_response(self, {"ok": True, "status": status_payload, "account": account})
+                _json_response(
+                    self,
+                    {
+                        "ok": True,
+                        "status": disconnect_result.get("status", {}),
+                        "account": account,
+                        "revocation": disconnect_result.get("revocation", {}),
+                    },
+                )
                 return
 
             if path == "/api/senses/enable":
@@ -1479,10 +1711,15 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
                     return
                 ok_upload, xml_bytes, detail = self._read_multipart_upload()
                 if not ok_upload or xml_bytes is None:
+                    status = (
+                        HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+                        if "too large" in str(detail or "").lower()
+                        else HTTPStatus.BAD_REQUEST
+                    )
                     _json_response(
                         self,
                         {"ok": False, "error": "bad_request", "detail": detail or "Invalid upload."},
-                        status=HTTPStatus.BAD_REQUEST,
+                        status=status,
                     )
                     return
                 try:
@@ -1793,6 +2030,11 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
 
         def do_PUT(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
+            if self._reject_payload_too_large(
+                max_bytes=max_json_body_bytes,
+                detail=f"Payload too large. Max JSON body is {max_json_body_bytes} bytes.",
+            ):
+                return
             if parsed.path == "/api/studio_profile":
                 self._handle_studio_profile_write(patch=False)
                 return
@@ -1807,6 +2049,11 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
 
         def do_PATCH(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
+            if self._reject_payload_too_large(
+                max_bytes=max_json_body_bytes,
+                detail=f"Payload too large. Max JSON body is {max_json_body_bytes} bytes.",
+            ):
+                return
             if parsed.path == "/api/studio_profile":
                 self._handle_studio_profile_write(patch=True)
                 return
@@ -2193,7 +2440,7 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
 
 def create_server(
     *,
-    host: str = "0.0.0.0",
+    host: str = "127.0.0.1",
     port: int = 8787,
     runs_dir: Path | None = None,
     readiness_state: Dict[str, Any] | None = None,

@@ -4,7 +4,7 @@
     "event_id": "evt-303",
     "action": "RESPOND_PUBLIC",
     "route": "responder:refusal",
-    "response_text": "Can’t help with that.",
+    "response_text": "keeping that one to myself.",
     "trace": {
       "gates": {
         "addressed_to_roonie": true,

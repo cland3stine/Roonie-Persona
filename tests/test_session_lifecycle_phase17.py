@@ -6,6 +6,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List
+from urllib.parse import urlparse
 
 from live_shim.record_run import run_payload
 from roonie.dashboard_api.app import create_server
@@ -16,6 +17,58 @@ def _set_dashboard_paths(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("ROONIE_DASHBOARD_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("ROONIE_PROVIDERS_CONFIG_PATH", str(tmp_path / "data" / "providers_config.json"))
     monkeypatch.setenv("ROONIE_ROUTING_CONFIG_PATH", str(tmp_path / "data" / "routing_config.json"))
+    monkeypatch.setenv("ROONIE_DASHBOARD_ART_PASSWORD", "art-pass-123")
+    monkeypatch.setenv("ROONIE_DASHBOARD_JEN_PASSWORD", "jen-pass-123")
+    _SESSION_COOKIE_CACHE.clear()
+
+
+_AUTO_AUTH_GET_PATHS = {
+    "/api/status",
+    "/api/operator_log",
+    "/api/twitch/status",
+}
+
+_SESSION_COOKIE_CACHE: Dict[str, str] = {}
+
+
+def _path_only(path: str) -> str:
+    return str(urlparse(str(path or "")).path or "")
+
+
+def _login_cookie(base: str) -> str:
+    cached = _SESSION_COOKIE_CACHE.get(base)
+    if cached:
+        return cached
+    payload = json.dumps({"username": "jen", "password": "jen-pass-123"}).encode("utf-8")
+    request = urllib.request.Request(
+        f"{base}/api/auth/login",
+        data=payload,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=2.0) as response:
+            raw = str(response.headers.get("Set-Cookie", "")).strip()
+    except urllib.error.HTTPError:
+        return ""
+    cookie = raw.split(";", 1)[0].strip() if raw else ""
+    if cookie:
+        _SESSION_COOKIE_CACHE[base] = cookie
+    return cookie
+
+
+def _with_auto_cookie(base: str, path: str, method: str, headers: Dict[str, str] | None) -> Dict[str, str]:
+    req_headers = dict(headers or {})
+    if str(method or "GET").upper() != "GET":
+        return req_headers
+    if "Cookie" in req_headers or "X-ROONIE-OP-KEY" in req_headers:
+        return req_headers
+    if _path_only(path) not in _AUTO_AUTH_GET_PATHS:
+        return req_headers
+    cookie = _login_cookie(base)
+    if cookie:
+        req_headers["Cookie"] = cookie
+    return req_headers
 
 
 def _request_json(
@@ -27,7 +80,7 @@ def _request_json(
     headers: Dict[str, str] | None = None,
 ) -> tuple[int, Dict[str, Any] | List[Dict[str, Any]]]:
     body = None
-    req_headers = dict(headers or {})
+    req_headers = _with_auto_cookie(base, path, method, headers)
     if payload is not None:
         body = json.dumps(payload).encode("utf-8")
         req_headers.setdefault("Content-Type", "application/json")

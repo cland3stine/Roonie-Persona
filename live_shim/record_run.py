@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import copy
 import json
 import os
 import subprocess
@@ -149,13 +150,21 @@ def run_payload(
             )
         )
 
+    # Strip inner_circle from persisted inputs to avoid identity leakage (SEC-006).
+    sanitized_inputs = copy.deepcopy(inputs)
+    for inp in sanitized_inputs:
+        if isinstance(inp, dict):
+            meta = inp.get("metadata")
+            if isinstance(meta, dict):
+                meta.pop("inner_circle", None)
+
     output = {
         "schema_version": "run-v1",
         "session_id": session_id,
         "director_commit": _git_head_sha(),
         "started_at": datetime.now(timezone.utc).isoformat(),
         "active_director": active_director,
-        "inputs": inputs,
+        "inputs": sanitized_inputs,
         "decisions": decisions,
     }
     if emit_outputs:

@@ -26,6 +26,7 @@ from providers.router import (
 )
 from roonie.context.context_buffer import ContextBuffer
 from roonie.prompting import build_roonie_prompt
+from roonie.safety_policy import classify_message_safety
 from roonie.types import DecisionRecord, Env, Event
 
 
@@ -570,6 +571,7 @@ class ProviderDirector:
         topic_anchor: str,
         library_block: str,
         music_fact_question: bool,
+        safety_classification: str = "allowed",
     ) -> str:
         base_prompt = build_roonie_prompt(
             message=event.message,
@@ -612,11 +614,29 @@ class ProviderDirector:
                 "Memory hints (do not treat as factual claims):\n"
                 f"{memory_hints}"
             )
+        safety_block = ""
+        if safety_classification == "refuse":
+            safety_block = (
+                "\n\n"
+                "IMPORTANT — This message may be asking for private or identifying information. "
+                "Deflect casually and stay fully in character. Never reveal real addresses, "
+                "phone numbers, full names, email addresses, IP addresses, or other identifying "
+                "details about yourself or your people. If asked about location, say \"DC area\" "
+                "and nothing more specific. Keep it brief and natural."
+            )
+        elif safety_classification == "sensitive_no_followup":
+            safety_block = (
+                "\n\n"
+                "IMPORTANT — This viewer may be expressing emotional distress. "
+                "Respond with brief warmth and care, staying in character. "
+                "Do not ask follow-up questions about their emotional state. "
+                "Do not play therapist or counselor. A short, genuine acknowledgment is enough."
+            )
         if not self._persona_policy_text:
-            return f"{base_prompt}\n\n{behavior_block}{grounding_block}{music_fact_block}{memory_block}\n"
+            return f"{base_prompt}\n\n{behavior_block}{grounding_block}{music_fact_block}{memory_block}{safety_block}\n"
         return (
             f"{base_prompt}\n\n"
-            f"{behavior_block}{grounding_block}{music_fact_block}{memory_block}\n\n"
+            f"{behavior_block}{grounding_block}{music_fact_block}{memory_block}{safety_block}\n\n"
             "Canonical Persona Policy (do not violate):\n"
             f"{self._persona_policy_text}\n"
         )
@@ -635,6 +655,7 @@ class ProviderDirector:
         addressed = self._is_direct_address(event)
         category = classify_behavior_category(message=event.message, metadata=metadata)
         trigger = (category != CATEGORY_OTHER) or self._is_trigger_message(event.message)
+        safety_classification, refusal_reason_code = classify_message_safety(event.message)
         approved_emotes = self._approved_emotes(metadata)
         now_playing = self._now_playing_text(metadata)
         now_playing_available = bool(now_playing)
@@ -716,7 +737,6 @@ class ProviderDirector:
                 max_chars=900,
                 max_items=10,
             )
-
         if not addressed or not trigger:
             return DecisionRecord(
                 case_id=str(event.metadata.get("case_id", "live")),
@@ -743,6 +763,10 @@ class ProviderDirector:
                         "chars_used": memory_result.chars_used,
                         "items_used": memory_result.items_used,
                         "dropped_count": memory_result.dropped_count,
+                    },
+                    "policy": {
+                        "safety_classification": safety_classification,
+                        "refusal_reason_code": refusal_reason_code,
                     },
                     "proposal": {
                         "text": None,
@@ -775,6 +799,7 @@ class ProviderDirector:
             topic_anchor=topic_anchor,
             library_block=library_block,
             music_fact_question=bool(music_fact_question),
+            safety_classification=safety_classification,
         )
         context: Dict[str, Any] = {
             "use_provider_config": True,
@@ -859,6 +884,10 @@ class ProviderDirector:
                 "items_used": memory_result.items_used,
                 "dropped_count": memory_result.dropped_count,
             },
+            "policy": {
+                "safety_classification": safety_classification,
+                "refusal_reason_code": refusal_reason_code,
+            },
             "routing": {
                 "routing_enabled": bool(context.get("routing_enabled", False)),
                 "routing_class": str(context.get("routing_class", "general")),
@@ -896,3 +925,4 @@ class ProviderDirector:
             context_active=context_active,
             context_turns_used=context_turns_used,
         )
+

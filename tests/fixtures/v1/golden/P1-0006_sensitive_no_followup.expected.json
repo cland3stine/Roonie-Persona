@@ -1,16 +1,16 @@
 [
   {
     "action": "RESPOND_PUBLIC",
-    "response_text": "Got it.",
+    "response_text": "I hear you. take care of yourself tonight.",
     "event_id": "evt-6",
-    "route": "responder:neutral_ack",
+    "route": "responder:sensitive_ack",
     "case_id": "P1-0006_sensitive_no_followup",
     "trace": {
       "routing": {
         "routing_reason_codes": [
           "ROUTE_SENSITIVE_NO_FOLLOWUP"
         ],
-        "selected_responder": "responder:neutral_ack"
+        "selected_responder": "responder:sensitive_ack"
       },
       "policy": {
         "refusal_reason_code": null,

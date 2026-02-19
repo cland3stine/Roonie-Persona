@@ -15,7 +15,8 @@ from .types import DecisionRecord, Event
 _RESPONSES = {
     "responder:neutral_ack": "Got it.",
     "responder:clarify": "Quick check—are you asking me, and what exactly do you mean?",
-    "responder:refusal": "Can’t help with that.",
+    "responder:refusal": "keeping that one to myself.",
+    "responder:sensitive_ack": "I hear you. take care of yourself tonight.",
     "responder:policy_safe_info": "Camera: (configured gear).",
 }
 

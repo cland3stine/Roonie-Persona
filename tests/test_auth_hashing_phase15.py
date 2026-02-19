@@ -94,3 +94,34 @@ def test_login_uses_resolved_storage_data_dir(tmp_path: Path, monkeypatch) -> No
     assert storage.login_dashboard_user("art", "roonie") is not None
     assert storage.login_dashboard_user("jen", "jen-pass-123") is not None
     assert storage.login_dashboard_user("art", "wrong-pass") is None
+
+
+def test_validate_operator_key_accepts_valid_value(monkeypatch) -> None:
+    monkeypatch.setenv("ROONIE_OPERATOR_KEY", "op-key-123")
+    ok, msg = DashboardStorage.validate_operator_key("op-key-123")
+    assert ok is True
+    assert msg == "ok"
+
+
+def test_validate_operator_key_rejects_invalid_value(monkeypatch) -> None:
+    monkeypatch.setenv("ROONIE_OPERATOR_KEY", "op-key-123")
+    ok, msg = DashboardStorage.validate_operator_key("wrong-key")
+    assert ok is False
+    assert msg == "Forbidden: invalid X-ROONIE-OP-KEY."
+
+
+def test_validate_operator_key_rejects_empty_or_none(monkeypatch) -> None:
+    monkeypatch.setenv("ROONIE_OPERATOR_KEY", "op-key-123")
+    ok_empty, msg_empty = DashboardStorage.validate_operator_key("")
+    ok_none, msg_none = DashboardStorage.validate_operator_key(None)
+    assert ok_empty is False
+    assert ok_none is False
+    assert msg_empty == "Forbidden: invalid X-ROONIE-OP-KEY."
+    assert msg_none == "Forbidden: invalid X-ROONIE-OP-KEY."
+
+
+def test_validate_operator_key_read_only_when_unset(monkeypatch) -> None:
+    monkeypatch.delenv("ROONIE_OPERATOR_KEY", raising=False)
+    ok, msg = DashboardStorage.validate_operator_key("anything")
+    assert ok is False
+    assert msg == "API is READ-ONLY: set ROONIE_OPERATOR_KEY to enable write actions."

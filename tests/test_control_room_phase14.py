@@ -4,30 +4,84 @@ import json
 import os
 import socket
 import threading
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict
+from urllib.parse import urlparse
 
 from roonie.control_room.preflight import resolve_runtime_paths, run_preflight
+from roonie.dashboard_api.app import _arg_parser as _dashboard_api_arg_parser
 from roonie.dashboard_api.app import create_server
 from roonie.dashboard_api.storage import DashboardStorage
 from roonie.run_control_room import (
     _apply_safe_start_defaults,
+    _arg_parser as _control_room_arg_parser,
     _load_secrets_env_into_process,
     main as run_control_room_main,
 )
 
 
 def _get_json(base: str, path: str) -> Dict[str, Any]:
-    with urllib.request.urlopen(f"{base}{path}", timeout=2.0) as response:
+    headers = _with_auto_cookie(base, path)
+    request = urllib.request.Request(
+        f"{base}{path}",
+        method="GET",
+        headers=headers,
+    )
+    with urllib.request.urlopen(request, timeout=2.0) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
 def _start_server(runs_dir: Path, readiness_state: Dict[str, Any]):
+    os.environ.setdefault("ROONIE_DASHBOARD_ART_PASSWORD", "art-pass-123")
+    os.environ.setdefault("ROONIE_DASHBOARD_JEN_PASSWORD", "jen-pass-123")
+    _SESSION_COOKIE_CACHE.clear()
     server = create_server(host="127.0.0.1", port=0, runs_dir=runs_dir, readiness_state=readiness_state)
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True)
     thread.start()
     return server, thread
+
+
+_AUTO_AUTH_GET_PATHS = {
+    "/api/status",
+    "/api/system/readiness",
+}
+
+_SESSION_COOKIE_CACHE: Dict[str, str] = {}
+
+
+def _path_only(path: str) -> str:
+    return str(urlparse(str(path or "")).path or "")
+
+
+def _login_cookie(base: str) -> str:
+    cached = _SESSION_COOKIE_CACHE.get(base)
+    if cached:
+        return cached
+    payload = json.dumps({"username": "jen", "password": "jen-pass-123"}).encode("utf-8")
+    request = urllib.request.Request(
+        f"{base}/api/auth/login",
+        data=payload,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=2.0) as response:
+            raw = str(response.headers.get("Set-Cookie", "")).strip()
+    except urllib.error.HTTPError:
+        return ""
+    cookie = raw.split(";", 1)[0].strip() if raw else ""
+    if cookie:
+        _SESSION_COOKIE_CACHE[base] = cookie
+    return cookie
+
+
+def _with_auto_cookie(base: str, path: str) -> Dict[str, str]:
+    if _path_only(path) not in _AUTO_AUTH_GET_PATHS:
+        return {}
+    cookie = _login_cookie(base)
+    return {"Cookie": cookie} if cookie else {}
 
 
 def _write_persona_policy(path: Path, content: str) -> None:
@@ -261,6 +315,14 @@ def test_run_control_room_refuses_start_when_port_already_in_use(tmp_path: Path,
     finally:
         listener.close()
     assert rc == 3
+
+
+def test_dashboard_host_defaults_to_all_interfaces(monkeypatch) -> None:
+    monkeypatch.delenv("ROONIE_DASHBOARD_HOST", raising=False)
+    control_args = _control_room_arg_parser().parse_args([])
+    dashboard_args = _dashboard_api_arg_parser().parse_args([])
+    assert str(control_args.host) == "0.0.0.0"
+    assert str(dashboard_args.host) == "0.0.0.0"
 
 
 def test_load_secrets_env_into_process_sets_missing_values(tmp_path: Path, monkeypatch) -> None:

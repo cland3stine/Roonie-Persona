@@ -20,6 +20,20 @@ _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 _BEARER_RE = re.compile(r"\bbearer\s+[A-Za-z0-9._\-]{8,}\b", re.IGNORECASE)
 _OAUTH_RE = re.compile(r"\boauth:[A-Za-z0-9._\-]{8,}\b", re.IGNORECASE)
+_PHONE_RE = re.compile(r"(?<!\d)(?:\+?1[\s.\-]?)?(?:\(\d{3}\)|\d{3})[\s.\-]?\d{3}[\s.\-]?\d{4}(?!\d)")
+_ADDRESS_KEYWORD_RE = re.compile(r"\b(?:home|house|street|mailing)\s+address\b", re.IGNORECASE)
+_STREET_ADDRESS_RE = re.compile(
+    r"\b\d{1,6}\s+[A-Za-z0-9][A-Za-z0-9\s.\-]{1,60}\s"
+    r"(?:st|street|ave|avenue|rd|road|blvd|boulevard|dr|drive|ln|lane|ct|court|way|pkwy|parkway)\b",
+    re.IGNORECASE,
+)
+_NAME_DISCLOSURE_RE = re.compile(
+    r"\b(?:real|full|legal)\s+name\s*(?:is|:)\s*[A-Za-z]+(?:\s+[A-Za-z]+){1,2}\b",
+    re.IGNORECASE,
+)
+_PROVIDER_KEY_RE = re.compile(
+    r"\b(?:sk-ant-[A-Za-z0-9_-]{10,}|xai-[A-Za-z0-9_-]{10,}|ghp_[A-Za-z0-9]{20,}|sk-proj-[A-Za-z0-9_-]{10,})\b"
+)
 _TOKEN_ASSIGN_RE = re.compile(
     r"\b(?:token|secret|api[_\-]?key)\s*[:=]\s*\S+",
     re.IGNORECASE,
@@ -56,6 +70,11 @@ def _contains_pii(text: str) -> bool:
         or _IPV4_RE.search(value)
         or _BEARER_RE.search(value)
         or _OAUTH_RE.search(value)
+        or _PHONE_RE.search(value)
+        or _ADDRESS_KEYWORD_RE.search(value)
+        or _STREET_ADDRESS_RE.search(value)
+        or _NAME_DISCLOSURE_RE.search(value)
+        or _PROVIDER_KEY_RE.search(value)
         or _TOKEN_ASSIGN_RE.search(value)
     )
 

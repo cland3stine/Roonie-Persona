@@ -141,6 +141,62 @@ def test_safe_injection_drops_pii_and_counts_drops(tmp_path: Path) -> None:
     assert out.dropped_count >= 2
 
 
+def test_safe_injection_drops_expanded_pii_patterns_and_provider_keys(tmp_path: Path) -> None:
+    db_path = tmp_path / "memory.sqlite"
+    _insert_cultural_note(
+        db_path,
+        note_id="1",
+        note="Call me at (202) 555-0199 after stream.",
+        tags=["stream_norms"],
+    )
+    _insert_cultural_note(
+        db_path,
+        note_id="2",
+        note="My home address is 123 Main Street.",
+        tags=["stream_norms"],
+    )
+    _insert_cultural_note(
+        db_path,
+        note_id="3",
+        note="real name is john doe.",
+        tags=["stream_norms"],
+    )
+    _insert_cultural_note(
+        db_path,
+        note_id="4",
+        note="backup key: xai-abcdefghijklmnopqrstuvwxyz123456",
+        tags=["stream_norms"],
+    )
+    _insert_cultural_note(
+        db_path,
+        note_id="5",
+        note="git token ghp_abcdefghijklmnopqrstuvwxyz123456",
+        tags=["stream_norms"],
+    )
+    _insert_cultural_note(
+        db_path,
+        note_id="6",
+        note="Keep responses crisp and upbeat.",
+        tags=["stream_norms"],
+    )
+
+    out = get_safe_injection(
+        db_path=db_path,
+        max_chars=1000,
+        max_items=10,
+        allowed_keys=["stream_norms"],
+    )
+
+    text = out.text_snippet.lower()
+    assert "555-0199" not in text
+    assert "home address" not in text
+    assert "real name is" not in text
+    assert "xai-" not in text
+    assert "ghp_" not in text
+    assert "keep responses crisp and upbeat." in text
+    assert out.dropped_count >= 5
+
+
 def test_provider_director_prompt_memory_hints_only_when_allowed_entries(tmp_path: Path, monkeypatch) -> None:
     db_allowed = tmp_path / "allowed.sqlite"
     _insert_cultural_note(

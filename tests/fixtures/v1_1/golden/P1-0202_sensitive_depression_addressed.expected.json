@@ -3,8 +3,8 @@
     "case_id": "P1-0202_sensitive_depression_addressed",
     "event_id": "evt-202",
     "action": "RESPOND_PUBLIC",
-    "route": "responder:neutral_ack",
-    "response_text": "Got it.",
+    "route": "responder:sensitive_ack",
+    "response_text": "I hear you. take care of yourself tonight.",
     "trace": {
       "gates": {
         "addressed_to_roonie": true,
@@ -17,7 +17,7 @@
         "refusal_reason_code": null
       },
       "routing": {
-        "selected_responder": "responder:neutral_ack",
+        "selected_responder": "responder:sensitive_ack",
         "routing_reason_codes": [
           "ROUTE_SENSITIVE_NO_FOLLOWUP"
         ]
