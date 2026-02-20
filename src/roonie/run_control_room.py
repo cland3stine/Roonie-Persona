@@ -5,6 +5,7 @@ import json
 import os
 import socket
 import sys
+import threading
 import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
@@ -133,6 +134,15 @@ def _port_is_in_use(host: str, port: int) -> bool:
             pass
 
 
+def _twitch_refresh_loop_interval_seconds() -> float:
+    raw = os.getenv("ROONIE_TWITCH_REFRESH_LOOP_SECONDS", "60")
+    try:
+        parsed = float(raw)
+    except (TypeError, ValueError):
+        parsed = 60.0
+    return max(5.0, min(parsed, 900.0))
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _arg_parser().parse_args(argv)
     repo_root = Path.cwd()
@@ -250,6 +260,50 @@ def main(argv: list[str] | None = None) -> int:
 
     live_bridge = None
     eventsub_bridge = None
+    refresh_thread = None
+    refresh_stop = threading.Event()
+    if bool(args.start_live_chat) and storage is not None and hasattr(storage, "refresh_twitch_tokens_if_needed"):
+        refresh_interval = _twitch_refresh_loop_interval_seconds()
+
+        def _refresh_loop() -> None:
+            while not refresh_stop.is_set():
+                try:
+                    refresh_result = storage.refresh_twitch_tokens_if_needed(force=False)
+                    accounts = refresh_result.get("accounts", {}) if isinstance(refresh_result, dict) else {}
+                    refreshed = [
+                        name
+                        for name, payload in accounts.items()
+                        if isinstance(payload, dict) and bool(payload.get("refreshed", False))
+                    ]
+                    failures = [
+                        f"{name}:{str(payload.get('error', 'UNKNOWN')).strip() or 'UNKNOWN'}"
+                        for name, payload in accounts.items()
+                        if isinstance(payload, dict) and bool(payload.get("attempted", False)) and payload.get("error")
+                    ]
+                    if refreshed:
+                        _append_log(
+                            paths.control_log_path,
+                            "TWITCH_REFRESH: refreshed=" + ",".join(refreshed),
+                        )
+                    if failures:
+                        _append_log(
+                            paths.control_log_path,
+                            "TWITCH_REFRESH: failures=" + ",".join(failures),
+                        )
+                except Exception as exc:
+                    _append_log(paths.control_log_path, f"TWITCH_REFRESH: loop_error={exc}")
+                refresh_stop.wait(refresh_interval)
+
+        refresh_thread = threading.Thread(
+            target=_refresh_loop,
+            name="roonie-twitch-refresh",
+            daemon=True,
+        )
+        refresh_thread.start()
+        _append_log(
+            paths.control_log_path,
+            f"TWITCH_REFRESH: loop_started interval_seconds={int(refresh_interval)}",
+        )
     if bool(args.start_live_chat) and storage is not None:
         from roonie.control_room.live_chat import LiveChatBridge
         from roonie.control_room.eventsub_bridge import EventSubBridge
@@ -291,6 +345,9 @@ def main(argv: list[str] | None = None) -> int:
         if live_bridge is not None:
             live_bridge.stop()
             live_bridge.join(timeout=2.0)
+        if refresh_thread is not None:
+            refresh_stop.set()
+            refresh_thread.join(timeout=2.0)
         _append_log(paths.control_log_path, "SHUTDOWN")
         server.server_close()
     return 0

@@ -3873,6 +3873,11 @@ class DashboardStorage:
         return user_id or None
 
     def get_eventsub_runtime_credentials(self) -> Dict[str, Any]:
+        if self._twitch_auto_refresh_enabled():
+            try:
+                self.refresh_twitch_tokens_if_needed(force=False)
+            except Exception:
+                pass
         checked_at = datetime.now(timezone.utc).isoformat()
         with self._lock:
             runtime_config = self._twitch_runtime_config_locked()
@@ -4054,6 +4059,7 @@ class DashboardStorage:
 
     def _twitch_runtime_config_locked(self) -> Dict[str, Any]:
         config = self._read_or_create_twitch_config_locked()
+        auth_flow = self._twitch_auth_flow()
         client_id = str(os.getenv("TWITCH_CLIENT_ID", "")).strip()
         client_secret = str(os.getenv("TWITCH_CLIENT_SECRET", "")).strip()
         redirect_uri = str(os.getenv("TWITCH_REDIRECT_URI", "")).strip()
@@ -4064,13 +4070,15 @@ class DashboardStorage:
         missing: List[str] = []
         if not client_id:
             missing.append("TWITCH_CLIENT_ID")
-        if not client_secret:
-            missing.append("TWITCH_CLIENT_SECRET")
-        if not redirect_uri:
-            missing.append("TWITCH_REDIRECT_URI")
+        if auth_flow == "authorization_code":
+            if not client_secret:
+                missing.append("TWITCH_CLIENT_SECRET")
+            if not redirect_uri:
+                missing.append("TWITCH_REDIRECT_URI")
         if not primary_channel:
             missing.append("PRIMARY_CHANNEL")
         return {
+            "auth_flow": auth_flow,
             "client_id": client_id,
             "client_secret": client_secret,
             "redirect_uri": redirect_uri,
@@ -4097,6 +4105,27 @@ class DashboardStorage:
             return max(1.0, min(float(raw), 15.0))
         except (TypeError, ValueError):
             return 4.0
+
+    @staticmethod
+    def _twitch_auto_refresh_enabled() -> bool:
+        raw = os.getenv("ROONIE_TWITCH_AUTO_REFRESH", "1")
+        return _to_bool(raw, True)
+
+    @staticmethod
+    def _twitch_refresh_lead_seconds() -> int:
+        raw = os.getenv("ROONIE_TWITCH_REFRESH_LEAD_SECONDS", "900")
+        try:
+            parsed = int(raw)
+        except (TypeError, ValueError):
+            parsed = 900
+        return max(60, min(parsed, 86_400))
+
+    @staticmethod
+    def _twitch_auth_flow() -> str:
+        raw = str(os.getenv("ROONIE_TWITCH_AUTH_FLOW", "authorization_code")).strip().lower()
+        if raw in {"device", "device_code", "device-code", "oauth_device_code"}:
+            return "device_code"
+        return "authorization_code"
 
     def _invalidate_twitch_status_cache_locked(self) -> None:
         self._twitch_status_cache = None
@@ -4131,6 +4160,14 @@ class DashboardStorage:
             if value:
                 return value
         return ""
+
+    @staticmethod
+    def _normalize_twitch_scopes(scopes_raw: Any) -> List[str]:
+        if isinstance(scopes_raw, list):
+            return [str(item).strip() for item in scopes_raw if str(item).strip()]
+        if isinstance(scopes_raw, str):
+            return sorted({token.strip() for token in re.split(r"[,\s]+", scopes_raw) if token.strip()})
+        return []
 
     @staticmethod
     def _twitch_auth_state_encryption_enabled() -> bool:
@@ -4184,6 +4221,12 @@ class DashboardStorage:
                     "scopes": [],
                     "display_name": None,
                     "pending_state": None,
+                    "pending_device_code": None,
+                    "pending_user_code": None,
+                    "pending_verification_uri": None,
+                    "pending_device_expires_at": None,
+                    "pending_poll_interval_seconds": None,
+                    "pending_poll_next_at": None,
                     "updated_at": None,
                     "disconnected": False,
                 },
@@ -4196,6 +4239,12 @@ class DashboardStorage:
                     "scopes": [],
                     "display_name": None,
                     "pending_state": None,
+                    "pending_device_code": None,
+                    "pending_user_code": None,
+                    "pending_verification_uri": None,
+                    "pending_device_expires_at": None,
+                    "pending_poll_interval_seconds": None,
+                    "pending_poll_next_at": None,
                     "updated_at": None,
                     "disconnected": False,
                 },
@@ -4235,6 +4284,42 @@ class DashboardStorage:
                 if isinstance(pending_state_raw, str) and str(pending_state_raw).strip()
                 else None
             )
+            pending_device_code_raw = row.get("pending_device_code")
+            pending_device_code = (
+                str(pending_device_code_raw).strip()
+                if isinstance(pending_device_code_raw, str) and str(pending_device_code_raw).strip()
+                else None
+            )
+            pending_user_code_raw = row.get("pending_user_code")
+            pending_user_code = (
+                str(pending_user_code_raw).strip()
+                if isinstance(pending_user_code_raw, str) and str(pending_user_code_raw).strip()
+                else None
+            )
+            pending_verification_uri_raw = row.get("pending_verification_uri")
+            pending_verification_uri = (
+                str(pending_verification_uri_raw).strip()
+                if isinstance(pending_verification_uri_raw, str) and str(pending_verification_uri_raw).strip()
+                else None
+            )
+            pending_device_expires_at_raw = row.get("pending_device_expires_at")
+            pending_device_expires_at = (
+                str(pending_device_expires_at_raw).strip()
+                if isinstance(pending_device_expires_at_raw, str) and str(pending_device_expires_at_raw).strip()
+                else None
+            )
+            pending_poll_interval_raw = row.get("pending_poll_interval_seconds")
+            pending_poll_interval_seconds: Optional[int]
+            if isinstance(pending_poll_interval_raw, int):
+                pending_poll_interval_seconds = pending_poll_interval_raw if pending_poll_interval_raw > 0 else None
+            else:
+                pending_poll_interval_seconds = None
+            pending_poll_next_at_raw = row.get("pending_poll_next_at")
+            pending_poll_next_at = (
+                str(pending_poll_next_at_raw).strip()
+                if isinstance(pending_poll_next_at_raw, str) and str(pending_poll_next_at_raw).strip()
+                else None
+            )
             scopes_raw = row.get("scopes", [])
             scopes: List[str] = []
             if isinstance(scopes_raw, list):
@@ -4248,6 +4333,12 @@ class DashboardStorage:
                 "scopes": scopes,
                 "display_name": display_name,
                 "pending_state": pending_state,
+                "pending_device_code": pending_device_code,
+                "pending_user_code": pending_user_code,
+                "pending_verification_uri": pending_verification_uri,
+                "pending_device_expires_at": pending_device_expires_at,
+                "pending_poll_interval_seconds": pending_poll_interval_seconds,
+                "pending_poll_next_at": pending_poll_next_at,
                 "disconnected": bool(row.get("disconnected", False)),
                 "updated_at": str(row.get("updated_at")).strip() if row.get("updated_at") is not None else None,
             }
@@ -4292,6 +4383,36 @@ class DashboardStorage:
                 "scopes": scopes,
                 "display_name": str(row.get("display_name")).strip() if row.get("display_name") is not None else None,
                 "pending_state": str(row.get("pending_state")).strip() if row.get("pending_state") is not None else None,
+                "pending_device_code": (
+                    str(row.get("pending_device_code")).strip()
+                    if row.get("pending_device_code") is not None
+                    else None
+                ),
+                "pending_user_code": (
+                    str(row.get("pending_user_code")).strip()
+                    if row.get("pending_user_code") is not None
+                    else None
+                ),
+                "pending_verification_uri": (
+                    str(row.get("pending_verification_uri")).strip()
+                    if row.get("pending_verification_uri") is not None
+                    else None
+                ),
+                "pending_device_expires_at": (
+                    str(row.get("pending_device_expires_at")).strip()
+                    if row.get("pending_device_expires_at") is not None
+                    else None
+                ),
+                "pending_poll_interval_seconds": (
+                    int(row.get("pending_poll_interval_seconds"))
+                    if isinstance(row.get("pending_poll_interval_seconds"), int)
+                    else None
+                ),
+                "pending_poll_next_at": (
+                    str(row.get("pending_poll_next_at")).strip()
+                    if row.get("pending_poll_next_at") is not None
+                    else None
+                ),
                 "disconnected": disconnected,
                 "updated_at": str(row.get("updated_at")).strip() if row.get("updated_at") is not None else None,
             }
@@ -4314,6 +4435,21 @@ class DashboardStorage:
             self._twitch_auth_state_path,
             self._serialize_twitch_auth_state_for_disk(payload),
         )
+
+    @staticmethod
+    def _clear_twitch_pending_auth_locked(row: Dict[str, Any]) -> None:
+        row["pending_state"] = None
+        row["pending_device_code"] = None
+        row["pending_user_code"] = None
+        row["pending_verification_uri"] = None
+        row["pending_device_expires_at"] = None
+        row["pending_poll_interval_seconds"] = None
+        row["pending_poll_next_at"] = None
+
+    @staticmethod
+    def _twitch_device_scope_list() -> List[str]:
+        scopes = str(os.getenv("TWITCH_REQUEST_SCOPES", "chat:read chat:edit")).strip() or "chat:read chat:edit"
+        return DashboardStorage._normalize_twitch_scopes(scopes)
 
     @staticmethod
     def _token_looks_valid(token: str) -> bool:
@@ -4445,8 +4581,7 @@ class DashboardStorage:
         access_token = str(data.get("access_token", "")).strip()
         if not access_token:
             return {"ok": False, "error": "TOKEN_EXCHANGE_FAILED", "detail": "Missing access token."}
-        scopes_raw = data.get("scope", [])
-        scopes = [str(item).strip() for item in scopes_raw if str(item).strip()] if isinstance(scopes_raw, list) else []
+        scopes = self._normalize_twitch_scopes(data.get("scope", []))
         refresh_token = str(data.get("refresh_token", "")).strip() or None
         expires_in = data.get("expires_in")
         expires_at = None
@@ -4457,6 +4592,199 @@ class DashboardStorage:
             "access_token": access_token,
             "refresh_token": refresh_token,
             "scopes": scopes,
+            "expires_at": expires_at,
+        }
+
+    def _start_twitch_device_code(self, *, client_id: str, scopes: List[str]) -> Dict[str, Any]:
+        client_id_text = str(client_id or "").strip()
+        if not client_id_text:
+            return {"ok": False, "error": "CONFIG_MISSING", "detail": "TWITCH_CLIENT_ID is required."}
+        scope_text = " ".join([str(item).strip() for item in scopes if str(item).strip()])
+        payload_dict: Dict[str, str] = {"client_id": client_id_text}
+        if scope_text:
+            payload_dict["scopes"] = scope_text
+        payload = urlencode(payload_dict).encode("utf-8")
+        req = urllib.request.Request(
+            "https://id.twitch.tv/oauth2/device",
+            data=payload,
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=6.0) as response:
+                raw = response.read()
+        except urllib.error.HTTPError as exc:
+            detail = "Device authorization request failed."
+            oauth_error = ""
+            try:
+                data = json.loads(exc.read().decode("utf-8"))
+                if isinstance(data, dict):
+                    oauth_error = str(data.get("error", "")).strip().lower()
+                    message = str(data.get("message", "")).strip()
+                    if message:
+                        detail = message
+            except Exception:
+                pass
+            return {
+                "ok": False,
+                "error": "DEVICE_START_FAILED",
+                "oauth_error": oauth_error or None,
+                "detail": detail,
+            }
+        except Exception as exc:  # pragma: no cover - network-dependent
+            return {"ok": False, "error": "DEVICE_START_FAILED", "detail": str(exc)}
+
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except Exception:
+            return {"ok": False, "error": "DEVICE_START_FAILED", "detail": "Invalid Twitch device response."}
+
+        device_code = str(data.get("device_code", "")).strip()
+        user_code = str(data.get("user_code", "")).strip()
+        verification_uri = str(data.get("verification_uri", "")).strip()
+        verification_uri_complete = str(data.get("verification_uri_complete", "")).strip() or None
+        if not device_code or not user_code or not verification_uri:
+            return {
+                "ok": False,
+                "error": "DEVICE_START_FAILED",
+                "detail": "Missing required fields in Twitch device response.",
+            }
+
+        expires_at: Optional[str] = None
+        expires_in_raw = data.get("expires_in")
+        if isinstance(expires_in_raw, int) and expires_in_raw > 0:
+            expires_at = (datetime.now(timezone.utc) + timedelta(seconds=expires_in_raw)).isoformat()
+        interval_raw = data.get("interval")
+        interval_seconds = int(interval_raw) if isinstance(interval_raw, int) and interval_raw > 0 else 5
+        interval_seconds = max(1, min(interval_seconds, 60))
+        return {
+            "ok": True,
+            "device_code": device_code,
+            "user_code": user_code,
+            "verification_uri": verification_uri,
+            "verification_uri_complete": verification_uri_complete,
+            "expires_at": expires_at,
+            "interval_seconds": interval_seconds,
+        }
+
+    def _exchange_twitch_device_code(self, *, client_id: str, device_code: str) -> Dict[str, Any]:
+        payload = urlencode(
+            {
+                "client_id": str(client_id or "").strip(),
+                "device_code": str(device_code or "").strip(),
+                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            "https://id.twitch.tv/oauth2/token",
+            data=payload,
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=6.0) as response:
+                raw = response.read()
+        except urllib.error.HTTPError as exc:
+            detail = "Device token exchange failed."
+            oauth_error = ""
+            try:
+                data = json.loads(exc.read().decode("utf-8"))
+                if isinstance(data, dict):
+                    oauth_error = str(data.get("error", "")).strip().lower()
+                    message = str(data.get("message", "")).strip()
+                    if message:
+                        detail = message
+            except Exception:
+                pass
+            return {
+                "ok": False,
+                "error": "DEVICE_TOKEN_EXCHANGE_FAILED",
+                "oauth_error": oauth_error or None,
+                "detail": detail,
+            }
+        except Exception as exc:  # pragma: no cover - network-dependent
+            return {"ok": False, "error": "DEVICE_TOKEN_EXCHANGE_FAILED", "detail": str(exc)}
+
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except Exception:
+            return {"ok": False, "error": "DEVICE_TOKEN_EXCHANGE_FAILED", "detail": "Invalid token response."}
+        access_token = str(data.get("access_token", "")).strip()
+        if not access_token:
+            return {"ok": False, "error": "DEVICE_TOKEN_EXCHANGE_FAILED", "detail": "Missing access token."}
+        scopes = self._normalize_twitch_scopes(data.get("scope", []))
+        refresh_token = str(data.get("refresh_token", "")).strip() or None
+        expires_in = data.get("expires_in")
+        expires_at = None
+        if isinstance(expires_in, int) and expires_in > 0:
+            expires_at = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
+        return {
+            "ok": True,
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "scopes": scopes,
+            "expires_at": expires_at,
+        }
+
+    def _refresh_twitch_access_token(
+        self,
+        *,
+        refresh_token: str,
+        client_id: str,
+        client_secret: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        payload_data: Dict[str, str] = {
+            "client_id": str(client_id or "").strip(),
+            "refresh_token": str(refresh_token or "").strip(),
+            "grant_type": "refresh_token",
+        }
+        client_secret_text = str(client_secret or "").strip()
+        if client_secret_text:
+            payload_data["client_secret"] = client_secret_text
+        payload = urlencode(payload_data).encode("utf-8")
+        req = urllib.request.Request(
+            "https://id.twitch.tv/oauth2/token",
+            data=payload,
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=6.0) as response:
+                raw = response.read()
+        except urllib.error.HTTPError as exc:
+            detail = "Token refresh failed."
+            try:
+                data = json.loads(exc.read().decode("utf-8"))
+                if isinstance(data, dict):
+                    message = str(data.get("message", "")).strip()
+                    if message:
+                        detail = message
+            except Exception:
+                pass
+            low = detail.lower()
+            if "invalid refresh token" in low or "refresh token is invalid" in low:
+                return {"ok": False, "error": "INVALID_REFRESH_TOKEN", "detail": detail}
+            return {"ok": False, "error": "TOKEN_REFRESH_FAILED", "detail": detail}
+        except Exception as exc:  # pragma: no cover - network-dependent
+            return {"ok": False, "error": "TOKEN_REFRESH_FAILED", "detail": str(exc)}
+
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except Exception:
+            return {"ok": False, "error": "TOKEN_REFRESH_FAILED", "detail": "Invalid token response."}
+        access_token = str(data.get("access_token", "")).strip()
+        if not access_token:
+            return {"ok": False, "error": "TOKEN_REFRESH_FAILED", "detail": "Missing access token."}
+
+        expires_at = None
+        expires_in = data.get("expires_in")
+        if isinstance(expires_in, int) and expires_in > 0:
+            expires_at = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
+        return {
+            "ok": True,
+            "access_token": access_token,
+            "refresh_token": str(data.get("refresh_token", "")).strip() or None,
+            "scopes": self._normalize_twitch_scopes(data.get("scope", [])),
             "expires_at": expires_at,
         }
 
@@ -4507,9 +4835,27 @@ class DashboardStorage:
             else runtime_config.get("broadcaster_account_name")
         )
         display_name = str(row.get("display_name", "")).strip() or str(configured_name or self._twitch_account_display(account))
+        auth_flow = str(runtime_config.get("auth_flow", "authorization_code")).strip() or "authorization_code"
         primary_channel = str(runtime_config.get("primary_channel", "")).strip()
         missing_fields = list(runtime_config.get("missing_config_fields", []))
         missing_set = {str(item).strip().upper() for item in missing_fields if str(item).strip()}
+        pending_device_code = str(row.get("pending_device_code") or "").strip()
+        pending_user_code = str(row.get("pending_user_code") or "").strip()
+        pending_verification_uri = str(row.get("pending_verification_uri") or "").strip()
+        pending_device_expires_at = str(row.get("pending_device_expires_at") or "").strip()
+        pending_poll_interval_seconds_raw = row.get("pending_poll_interval_seconds")
+        pending_poll_interval_seconds = (
+            int(pending_poll_interval_seconds_raw)
+            if isinstance(pending_poll_interval_seconds_raw, int) and pending_poll_interval_seconds_raw > 0
+            else None
+        )
+        pending_expires_dt = _parse_iso(pending_device_expires_at)
+        pending_expired = bool(
+            pending_expires_dt is not None and pending_expires_dt <= datetime.now(timezone.utc)
+        )
+        pending_auth_active = bool(
+            pending_device_code and pending_user_code and pending_verification_uri and not pending_expired
+        )
 
         reason = "NO_TOKEN"
         connected = False
@@ -4521,7 +4867,9 @@ class DashboardStorage:
             reason_detail = "Set twitch_config.primary_channel (or TWITCH_CHANNEL) before connecting."
             token_source = "none" if not token else ("local" if local_token else "env")
         elif not token:
-            reason = "NO_TOKEN"
+            reason = "PENDING_AUTH" if pending_auth_active else "NO_TOKEN"
+            if pending_auth_active:
+                reason_detail = "Open Twitch device verification page and approve the code to finish connecting."
             token_source = "none"
         elif not self._token_looks_valid(token):
             reason = "INVALID_TOKEN"
@@ -4532,8 +4880,13 @@ class DashboardStorage:
             if account == "bot":
                 nick = self._twitch_env_value(["TWITCH_BOT_NICK", "TWITCH_NICK"])
                 if not nick:
-                    reason = "CONFIG_MISSING"
-                    reason_detail = "TWITCH_NICK required for bot account."
+                    derived_nick = str(row.get("display_name") or self._twitch_account_display("bot")).strip()
+                    if derived_nick:
+                        os.environ.setdefault("TWITCH_BOT_NICK", derived_nick)
+                        os.environ.setdefault("TWITCH_NICK", derived_nick)
+                    else:
+                        reason = "CONFIG_MISSING"
+                        reason_detail = "TWITCH_NICK required for bot account."
 
             oauth_required = [field for field in missing_fields if field != "PRIMARY_CHANNEL"]
             if not reason and oauth_required:
@@ -4562,6 +4915,7 @@ class DashboardStorage:
 
         return {
             "account": account,
+            "auth_flow": auth_flow,
             "display_name": display_name,
             "role": self._twitch_account_role(account),
             "connected": connected,
@@ -4574,6 +4928,17 @@ class DashboardStorage:
             "connect_available": len(missing_fields) == 0,
             "disconnect_available": bool(local_token or env_token) and not disconnected,
             "primary_channel": primary_channel or None,
+            "pending_auth": (
+                {
+                    "active": pending_auth_active,
+                    "user_code": pending_user_code or None,
+                    "verification_uri": pending_verification_uri or None,
+                    "expires_at": pending_device_expires_at or None,
+                    "poll_interval_seconds": pending_poll_interval_seconds,
+                }
+                if pending_auth_active
+                else None
+            ),
         }
 
     def twitch_connect_start(self, account: str) -> Dict[str, Any]:
@@ -4582,6 +4947,7 @@ class DashboardStorage:
             raise ValueError("account must be one of: bot, broadcaster")
 
         config = self._twitch_required_config()
+        auth_flow = str(config.get("auth_flow", "authorization_code")).strip() or "authorization_code"
         client_id = str(config.get("client_id", "")).strip()
         redirect_uri = str(config.get("redirect_uri", "")).strip()
         missing = list(config.get("missing_config_fields", []))
@@ -4589,6 +4955,7 @@ class DashboardStorage:
             return {
                 "ok": False,
                 "account": acc,
+                "flow": auth_flow,
                 "error": "CONFIG_MISSING",
                 "detail": f"Missing required config: {', '.join(missing)}",
                 "missing": missing,
@@ -4597,17 +4964,62 @@ class DashboardStorage:
                 "state": None,
             }
 
-        scopes = str(os.getenv("TWITCH_REQUEST_SCOPES", "chat:read chat:edit")).strip() or "chat:read chat:edit"
         checked_at = datetime.now(timezone.utc).isoformat()
+        if auth_flow == "device_code":
+            started = self._start_twitch_device_code(
+                client_id=client_id,
+                scopes=self._twitch_device_scope_list(),
+            )
+            if not bool(started.get("ok", False)):
+                return {
+                    "ok": False,
+                    "account": acc,
+                    "flow": auth_flow,
+                    "error": str(started.get("error") or "DEVICE_START_FAILED"),
+                    "detail": str(started.get("detail") or "Could not start Twitch device authorization."),
+                }
+            interval_seconds = int(started.get("interval_seconds") or 5)
+            interval_seconds = max(1, min(interval_seconds, 60))
+            poll_next_at = datetime.now(timezone.utc).isoformat()
+            with self._lock:
+                state = self._load_twitch_auth_state_locked()
+                accounts = state.setdefault("accounts", {})
+                row = accounts.setdefault(acc, {})
+                row["disconnected"] = False
+                self._clear_twitch_pending_auth_locked(row)
+                row["pending_device_code"] = str(started.get("device_code") or "").strip() or None
+                row["pending_user_code"] = str(started.get("user_code") or "").strip() or None
+                row["pending_verification_uri"] = str(started.get("verification_uri") or "").strip() or None
+                row["pending_device_expires_at"] = str(started.get("expires_at") or "").strip() or None
+                row["pending_poll_interval_seconds"] = interval_seconds
+                row["pending_poll_next_at"] = poll_next_at
+                row["updated_at"] = checked_at
+                self._save_twitch_auth_state_locked(state)
+                self._invalidate_twitch_status_cache_locked()
+            return {
+                "ok": True,
+                "account": acc,
+                "flow": "device_code",
+                "user_code": str(started.get("user_code") or "").strip() or None,
+                "verification_uri": str(started.get("verification_uri") or "").strip() or None,
+                "verification_uri_complete": str(started.get("verification_uri_complete") or "").strip() or None,
+                "expires_at": str(started.get("expires_at") or "").strip() or None,
+                "poll_interval_seconds": interval_seconds,
+                "detail": "Open Twitch verification URL and enter the code to connect this account.",
+            }
+
+        scopes = str(os.getenv("TWITCH_REQUEST_SCOPES", "chat:read chat:edit")).strip() or "chat:read chat:edit"
         state_token = secrets.token_urlsafe(24)
         with self._lock:
             state = self._load_twitch_auth_state_locked()
             accounts = state.setdefault("accounts", {})
             row = accounts.setdefault(acc, {})
             row["disconnected"] = False
+            self._clear_twitch_pending_auth_locked(row)
             row["pending_state"] = state_token
             row["updated_at"] = checked_at
             self._save_twitch_auth_state_locked(state)
+            self._invalidate_twitch_status_cache_locked()
 
         params = {
             "client_id": client_id,
@@ -4621,6 +5033,7 @@ class DashboardStorage:
         return {
             "ok": True,
             "account": acc,
+            "flow": "authorization_code",
             "auth_url": auth_url,
             "redirect_uri_used": redirect_uri,
             "state": state_token,
@@ -4636,6 +5049,13 @@ class DashboardStorage:
             return {"ok": False, "error": "BAD_REQUEST", "detail": "Missing state parameter."}
 
         config = self._twitch_required_config()
+        auth_flow = str(config.get("auth_flow", "authorization_code")).strip() or "authorization_code"
+        if auth_flow != "authorization_code":
+            return {
+                "ok": False,
+                "error": "FLOW_NOT_ENABLED",
+                "detail": "OAuth callback flow is disabled when ROONIE_TWITCH_AUTH_FLOW=device_code.",
+            }
         client_id = str(config.get("client_id", "")).strip()
         client_secret = str(config.get("client_secret", "")).strip()
         redirect_uri = str(config.get("redirect_uri", "")).strip()
@@ -4688,7 +5108,7 @@ class DashboardStorage:
             row["display_name"] = row.get("display_name") or self._twitch_account_display(account)
             row["disconnected"] = False
             row["updated_at"] = now_iso
-            row.pop("pending_state", None)
+            self._clear_twitch_pending_auth_locked(row)
             self._save_twitch_auth_state_locked(current)
             self._invalidate_twitch_status_cache_locked()
 
@@ -4706,6 +5126,181 @@ class DashboardStorage:
         return {
             "ok": True,
             "account": account,
+            "flow": "authorization_code",
+            "connected": bool(account_status.get("connected", False)),
+            "status": status_payload,
+            "detail": "Connected.",
+        }
+
+    def twitch_connect_poll(self, account: str) -> Dict[str, Any]:
+        acc = str(account or "").strip().lower()
+        if acc not in self._twitch_account_names():
+            raise ValueError("account must be one of: bot, broadcaster")
+
+        checked_at = datetime.now(timezone.utc).isoformat()
+        config = self._twitch_required_config()
+        auth_flow = str(config.get("auth_flow", "authorization_code")).strip() or "authorization_code"
+        client_id = str(config.get("client_id", "")).strip()
+        if auth_flow != "device_code":
+            return {
+                "ok": False,
+                "account": acc,
+                "flow": auth_flow,
+                "error": "FLOW_NOT_ENABLED",
+                "detail": "Device-code polling is only available when ROONIE_TWITCH_AUTH_FLOW=device_code.",
+            }
+        if not client_id:
+            return {
+                "ok": False,
+                "account": acc,
+                "flow": auth_flow,
+                "error": "CONFIG_MISSING",
+                "detail": "Missing required config: TWITCH_CLIENT_ID",
+            }
+
+        pending_device_code = ""
+        pending_user_code = ""
+        pending_verification_uri = ""
+        pending_device_expires_at = ""
+        poll_interval_seconds = 5
+        poll_next_at_raw = ""
+        with self._lock:
+            state = self._load_twitch_auth_state_locked()
+            accounts = state.setdefault("accounts", {})
+            row = accounts.setdefault(acc, {})
+            pending_device_code = str(row.get("pending_device_code") or "").strip()
+            pending_user_code = str(row.get("pending_user_code") or "").strip()
+            pending_verification_uri = str(row.get("pending_verification_uri") or "").strip()
+            pending_device_expires_at = str(row.get("pending_device_expires_at") or "").strip()
+            poll_interval_raw = row.get("pending_poll_interval_seconds")
+            if isinstance(poll_interval_raw, int) and poll_interval_raw > 0:
+                poll_interval_seconds = poll_interval_raw
+            poll_next_at_raw = str(row.get("pending_poll_next_at") or "").strip()
+
+        if not pending_device_code:
+            return {
+                "ok": False,
+                "account": acc,
+                "flow": auth_flow,
+                "error": "NO_PENDING_DEVICE_AUTH",
+                "detail": "No pending device-code authorization for this account.",
+            }
+
+        now_utc = datetime.now(timezone.utc)
+        expires_at_dt = _parse_iso(pending_device_expires_at)
+        if expires_at_dt is not None and expires_at_dt <= now_utc:
+            with self._lock:
+                state = self._load_twitch_auth_state_locked()
+                accounts = state.setdefault("accounts", {})
+                row = accounts.setdefault(acc, {})
+                self._clear_twitch_pending_auth_locked(row)
+                row["updated_at"] = checked_at
+                self._save_twitch_auth_state_locked(state)
+                self._invalidate_twitch_status_cache_locked()
+            return {
+                "ok": False,
+                "account": acc,
+                "flow": auth_flow,
+                "error": "DEVICE_CODE_EXPIRED",
+                "detail": "Device code expired. Start connection again.",
+            }
+
+        poll_next_at_dt = _parse_iso(poll_next_at_raw)
+        if poll_next_at_dt is not None and now_utc < poll_next_at_dt:
+            retry_after = int(max(1, (poll_next_at_dt - now_utc).total_seconds()))
+            return {
+                "ok": True,
+                "account": acc,
+                "flow": auth_flow,
+                "pending": True,
+                "connected": False,
+                "retry_after_seconds": retry_after,
+                "user_code": pending_user_code or None,
+                "verification_uri": pending_verification_uri or None,
+                "expires_at": pending_device_expires_at or None,
+                "detail": "Authorization still pending.",
+            }
+
+        exchanged = self._exchange_twitch_device_code(client_id=client_id, device_code=pending_device_code)
+        if not bool(exchanged.get("ok", False)):
+            oauth_error = str(exchanged.get("oauth_error") or "").strip().lower()
+            if oauth_error in {"authorization_pending", "slow_down"}:
+                next_interval = poll_interval_seconds
+                if oauth_error == "slow_down":
+                    next_interval = min(60, poll_interval_seconds + 5)
+                next_poll_at = (datetime.now(timezone.utc) + timedelta(seconds=next_interval)).isoformat()
+                with self._lock:
+                    state = self._load_twitch_auth_state_locked()
+                    accounts = state.setdefault("accounts", {})
+                    row = accounts.setdefault(acc, {})
+                    if str(row.get("pending_device_code") or "").strip() == pending_device_code:
+                        row["pending_poll_interval_seconds"] = next_interval
+                        row["pending_poll_next_at"] = next_poll_at
+                        row["updated_at"] = checked_at
+                        self._save_twitch_auth_state_locked(state)
+                        self._invalidate_twitch_status_cache_locked()
+                return {
+                    "ok": True,
+                    "account": acc,
+                    "flow": auth_flow,
+                    "pending": True,
+                    "connected": False,
+                    "retry_after_seconds": next_interval,
+                    "user_code": pending_user_code or None,
+                    "verification_uri": pending_verification_uri or None,
+                    "expires_at": pending_device_expires_at or None,
+                    "detail": "Authorization still pending.",
+                }
+
+            terminal_error = oauth_error in {"expired_token", "access_denied", "invalid_device_code"}
+            if terminal_error:
+                with self._lock:
+                    state = self._load_twitch_auth_state_locked()
+                    accounts = state.setdefault("accounts", {})
+                    row = accounts.setdefault(acc, {})
+                    self._clear_twitch_pending_auth_locked(row)
+                    row["updated_at"] = checked_at
+                    self._save_twitch_auth_state_locked(state)
+                    self._invalidate_twitch_status_cache_locked()
+            return {
+                "ok": False,
+                "account": acc,
+                "flow": auth_flow,
+                "error": str(exchanged.get("error") or "DEVICE_TOKEN_EXCHANGE_FAILED"),
+                "detail": str(exchanged.get("detail") or "Device authorization failed."),
+            }
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            current = self._load_twitch_auth_state_locked()
+            accounts = current.setdefault("accounts", {})
+            row = accounts.setdefault(acc, {})
+            row["token"] = str(exchanged.get("access_token", "")).strip() or None
+            row["token_enc"] = None
+            row["refresh_token"] = str(exchanged.get("refresh_token", "")).strip() or None
+            row["refresh_token_enc"] = None
+            row["expires_at"] = exchanged.get("expires_at")
+            row["scopes"] = list(exchanged.get("scopes", []))
+            row["display_name"] = row.get("display_name") or self._twitch_account_display(acc)
+            row["disconnected"] = False
+            row["updated_at"] = now_iso
+            self._clear_twitch_pending_auth_locked(row)
+            self._save_twitch_auth_state_locked(current)
+            self._invalidate_twitch_status_cache_locked()
+
+            new_token = str(row.get("token") or "").strip()
+            if new_token:
+                oauth_val = new_token if new_token.lower().startswith("oauth:") else f"oauth:{new_token}"
+                for env_name in self._twitch_token_env_names(acc):
+                    os.environ[env_name] = oauth_val
+
+        status_payload = self.get_twitch_status(force_refresh=True)
+        account_status = status_payload.get("accounts", {}).get(acc, {})
+        return {
+            "ok": True,
+            "account": acc,
+            "flow": auth_flow,
+            "pending": False,
             "connected": bool(account_status.get("connected", False)),
             "status": status_payload,
             "detail": "Connected.",
@@ -4751,7 +5346,7 @@ class DashboardStorage:
             row["disconnected"] = True
             row["updated_at"] = checked_at
             row["display_name"] = self._twitch_account_display(acc)
-            row.pop("pending_state", None)
+            self._clear_twitch_pending_auth_locked(row)
             self._save_twitch_auth_state_locked(state)
             for env_name in self._twitch_token_env_names(acc):
                 if env_name in os.environ:
@@ -4809,6 +5404,160 @@ class DashboardStorage:
             "revocation": revocation,
         }
 
+    def refresh_twitch_tokens_if_needed(self, *, force: bool = False) -> Dict[str, Any]:
+        checked_at = datetime.now(timezone.utc).isoformat()
+        enabled = self._twitch_auto_refresh_enabled()
+        if not enabled and not force:
+            return {
+                "ok": True,
+                "enabled": False,
+                "checked_at": checked_at,
+                "refreshed_any": False,
+                "accounts": {},
+            }
+
+        lead_seconds = self._twitch_refresh_lead_seconds()
+        result: Dict[str, Any] = {
+            "ok": True,
+            "enabled": True,
+            "checked_at": checked_at,
+            "lead_seconds": lead_seconds,
+            "refreshed_any": False,
+            "accounts": {},
+        }
+        changed = False
+        now_utc = datetime.now(timezone.utc)
+        with self._lock:
+            runtime_config = self._twitch_runtime_config_locked()
+            state = self._load_twitch_auth_state_locked()
+            accounts = state.get("accounts", {}) if isinstance(state, dict) else {}
+            if not isinstance(accounts, dict):
+                accounts = {}
+                state["accounts"] = accounts
+            auth_flow = str(runtime_config.get("auth_flow", "authorization_code")).strip() or "authorization_code"
+            client_id = str(runtime_config.get("client_id", "")).strip()
+            client_secret = str(runtime_config.get("client_secret", "")).strip()
+            for account in self._twitch_account_names():
+                row = accounts.get(account, {})
+                if not isinstance(row, dict):
+                    row = {}
+                    accounts[account] = row
+                token = str(row.get("token") or "").strip()
+                refresh_token = str(row.get("refresh_token") or "").strip()
+                expires_at_text = str(row.get("expires_at") or "").strip()
+                expires_at_dt = _parse_iso(expires_at_text)
+                if expires_at_dt is not None and expires_at_dt.tzinfo is None:
+                    expires_at_dt = expires_at_dt.replace(tzinfo=timezone.utc)
+                seconds_until_expiry = (
+                    (expires_at_dt.astimezone(timezone.utc) - now_utc).total_seconds()
+                    if expires_at_dt is not None
+                    else None
+                )
+                account_result: Dict[str, Any] = {
+                    "account": account,
+                    "attempted": False,
+                    "refreshed": False,
+                    "error": None,
+                    "detail": None,
+                    "expires_at_before": expires_at_text or None,
+                    "seconds_until_expiry": seconds_until_expiry,
+                }
+                disconnected = bool(row.get("disconnected", False))
+                if disconnected:
+                    account_result["skip_reason"] = "DISCONNECTED"
+                    result["accounts"][account] = account_result
+                    continue
+                if not refresh_token:
+                    account_result["skip_reason"] = "NO_REFRESH_TOKEN"
+                    result["accounts"][account] = account_result
+                    continue
+                if not force:
+                    if expires_at_dt is None:
+                        account_result["skip_reason"] = "NO_EXPIRY"
+                        result["accounts"][account] = account_result
+                        continue
+                    if seconds_until_expiry is not None and seconds_until_expiry > float(lead_seconds):
+                        account_result["skip_reason"] = "NOT_DUE"
+                        result["accounts"][account] = account_result
+                        continue
+                if not token and not self._token_looks_valid(self._twitch_env_value(self._twitch_token_env_names(account))):
+                    account_result["skip_reason"] = "NO_TOKEN"
+                    result["accounts"][account] = account_result
+                    continue
+                needs_client_secret = auth_flow == "authorization_code"
+                if (not client_id) or (needs_client_secret and not client_secret):
+                    account_result["attempted"] = True
+                    account_result["error"] = "CONFIG_MISSING"
+                    missing = []
+                    if not client_id:
+                        missing.append("TWITCH_CLIENT_ID")
+                    if needs_client_secret and not client_secret:
+                        missing.append("TWITCH_CLIENT_SECRET")
+                    account_result["detail"] = f"Missing required config: {', '.join(missing)}"
+                    result["accounts"][account] = account_result
+                    result["ok"] = False
+                    continue
+
+                account_result["attempted"] = True
+                refreshed = self._refresh_twitch_access_token(
+                    refresh_token=refresh_token,
+                    client_id=client_id,
+                    client_secret=(client_secret if client_secret else None),
+                )
+                if not bool(refreshed.get("ok", False)):
+                    account_result["error"] = str(refreshed.get("error") or "TOKEN_REFRESH_FAILED")
+                    account_result["detail"] = str(refreshed.get("detail") or "Token refresh failed.")
+                    result["accounts"][account] = account_result
+                    result["ok"] = False
+                    os.environ["TWITCH_LAST_ERROR"] = f"{account}:{account_result['error']}"
+                    continue
+
+                new_access_token = str(refreshed.get("access_token", "")).strip()
+                if not new_access_token:
+                    account_result["error"] = "TOKEN_REFRESH_FAILED"
+                    account_result["detail"] = "Missing access token in refresh response."
+                    result["accounts"][account] = account_result
+                    result["ok"] = False
+                    continue
+
+                new_refresh_token = str(refreshed.get("refresh_token") or "").strip() or refresh_token
+                new_expires_at = str(refreshed.get("expires_at") or "").strip() or None
+                new_scopes_raw = refreshed.get("scopes", [])
+                new_scopes = (
+                    [str(item).strip() for item in new_scopes_raw if str(item).strip()]
+                    if isinstance(new_scopes_raw, list)
+                    else []
+                )
+                row["token"] = new_access_token
+                row["token_enc"] = None
+                row["refresh_token"] = new_refresh_token
+                row["refresh_token_enc"] = None
+                row["expires_at"] = new_expires_at
+                if new_scopes:
+                    row["scopes"] = new_scopes
+                row["disconnected"] = False
+                row["updated_at"] = checked_at
+                self._clear_twitch_pending_auth_locked(row)
+                oauth_value = (
+                    new_access_token
+                    if new_access_token.lower().startswith("oauth:")
+                    else f"oauth:{new_access_token}"
+                )
+                for env_name in self._twitch_token_env_names(account):
+                    os.environ[env_name] = oauth_value
+                if account == "bot" and new_expires_at:
+                    os.environ["TWITCH_TOKEN_EXPIRES_AT"] = new_expires_at
+                os.environ["TWITCH_LAST_ERROR"] = ""
+                account_result["refreshed"] = True
+                account_result["expires_at_after"] = new_expires_at
+                result["accounts"][account] = account_result
+                changed = True
+                result["refreshed_any"] = True
+            if changed:
+                self._save_twitch_auth_state_locked(state)
+                self._invalidate_twitch_status_cache_locked()
+        return result
+
     def get_twitch_status(self, *, force_refresh: bool = False) -> Dict[str, Any]:
         checked_at = datetime.now(timezone.utc).isoformat()
         scopes_payload = self._twitch_scopes_payload()
@@ -4847,6 +5596,7 @@ class DashboardStorage:
                     if text:
                         scope_set.add(text)
         merged_scopes = sorted(scope_set)
+        auth_flow = str(runtime_config.get("auth_flow", "authorization_code")).strip() or "authorization_code"
         missing_fields = list(runtime_config.get("missing_config_fields", []))
         primary_channel = str(runtime_config.get("primary_channel", "")).strip() or None
         encryption_enabled = self._twitch_auth_state_encryption_enabled()
@@ -4860,6 +5610,7 @@ class DashboardStorage:
             },
             "token_expiry": os.getenv("TWITCH_TOKEN_EXPIRES_AT"),
             "last_error": os.getenv("TWITCH_LAST_ERROR"),
+            "auth_flow": auth_flow,
             "primary_channel": primary_channel,
             "missing_config_fields": missing_fields,
             "config_ready": len(missing_fields) == 0,
@@ -4877,6 +5628,11 @@ class DashboardStorage:
         return payload
 
     def get_live_twitch_credentials(self, account: str = "bot") -> Dict[str, Any]:
+        if self._twitch_auto_refresh_enabled():
+            try:
+                self.refresh_twitch_tokens_if_needed(force=False)
+            except Exception:
+                pass
         acc = str(account or "").strip().lower() or "bot"
         if acc not in self._twitch_account_names():
             return {

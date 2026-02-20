@@ -1153,6 +1153,34 @@ function useDashboardData(activePage) {
     }
   };
 
+  const twitchConnectPoll = async (account) => {
+    const headers = buildOperatorHeaders({ json: true });
+    const payload = { account: String(account || "bot").toLowerCase() };
+    try {
+      const response = await apiFetch(`${API_BASE}/api/twitch/connect_poll`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+      });
+      let body = {};
+      try {
+        body = await response.json();
+      } catch (_err) {
+        body = {};
+      }
+      const success = Boolean(response.ok && body?.ok !== false);
+      if (!success) {
+        setTwitchNotice(String(body?.detail || body?.error || "Unable to poll Twitch device auth."));
+      }
+      await refreshTwitchStatus();
+      return { ok: success, body };
+    } catch (err) {
+      setTwitchNotice(String(err || "Unable to poll Twitch device auth."));
+      await refreshTwitchStatus();
+      return { ok: false, body: { detail: String(err || "poll error") } };
+    }
+  };
+
   const twitchDisconnect = async (account) => {
     const headers = buildOperatorHeaders({ json: true });
     const payload = { account: String(account || "bot").toLowerCase() };
@@ -1262,6 +1290,7 @@ function useDashboardData(activePage) {
     loginDashboard,
     logoutDashboard,
     twitchConnectStart,
+    twitchConnectPoll,
     twitchDisconnect,
     fetchChannelEmotes: async () => {
       try {
@@ -2098,10 +2127,11 @@ function ProvidersPage({ statusData, providersStatusData, routingStatusData, sys
 
 // --- PAGE: AUTH & ACCOUNTS ---
 
-function AuthPage({ twitchStatusData, twitchConnectStart, twitchDisconnect, twitchNotice, setTwitchNotice }) {
+function AuthPage({ twitchStatusData, twitchConnectStart, twitchConnectPoll, twitchDisconnect, twitchNotice, setTwitchNotice }) {
   const accounts = twitchStatusData?.accounts || {};
   const bot = accounts.bot || {};
   const broadcaster = accounts.broadcaster || {};
+  const authFlow = String(twitchStatusData?.auth_flow || "authorization_code").trim().toLowerCase() || "authorization_code";
   const scopesPresent = twitchStatusData?.scopes_present || {};
   const missingConfigFields = Array.isArray(twitchStatusData?.missing_config_fields) ? twitchStatusData.missing_config_fields : [];
   const primaryChannelRaw = String(twitchStatusData?.primary_channel || "").trim();
@@ -2116,6 +2146,50 @@ function AuthPage({ twitchStatusData, twitchConnectStart, twitchDisconnect, twit
   const healthOk = Boolean(bot.connected || broadcaster.connected);
   const healthLabel = healthOk ? "OK" : "Not connected";
 
+  useEffect(() => {
+    if (authFlow !== "device_code") return undefined;
+    const pendingAccounts = [bot, broadcaster].filter((acct) => Boolean(acct?.pending_auth?.active));
+    if (!pendingAccounts.length) return undefined;
+    let cancelled = false;
+    const poll = async () => {
+      for (const acct of pendingAccounts) {
+        const accountId = String(acct?.account || "").toLowerCase();
+        if (!accountId) continue;
+        const result = await twitchConnectPoll(accountId);
+        if (cancelled) return;
+        if (!result?.ok) {
+          const detail = String(result?.body?.detail || result?.body?.error || "Device authorization failed.");
+          setTwitchNotice(detail);
+          continue;
+        }
+        if (result?.body?.connected) {
+          setTwitchNotice(`${accountId} connected.`);
+        } else if (result?.body?.pending) {
+          const code = String(result?.body?.user_code || acct?.pending_auth?.user_code || "").trim();
+          if (code) {
+            setTwitchNotice(`Waiting for Twitch approval. Enter code ${code}.`);
+          }
+        }
+      }
+    };
+    const interval = setInterval(poll, 3000);
+    poll();
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [
+    authFlow,
+    bot?.account,
+    bot?.pending_auth?.active,
+    bot?.pending_auth?.user_code,
+    broadcaster?.account,
+    broadcaster?.pending_auth?.active,
+    broadcaster?.pending_auth?.user_code,
+    twitchConnectPoll,
+    setTwitchNotice,
+  ]);
+
   const AcctRow = ({ account }) => {
     const hasConnectedState = typeof account?.connected === "boolean";
     const connected = hasConnectedState ? account.connected : null;
@@ -2126,6 +2200,10 @@ function AuthPage({ twitchStatusData, twitchConnectStart, twitchDisconnect, twit
     const accountId = String(account?.account || "").toLowerCase();
     const canDisconnect = Boolean(account?.disconnect_available && accountId);
     const canConnect = Boolean(account?.connect_available && accountId);
+    const pendingAuth = account?.pending_auth && account.pending_auth.active ? account.pending_auth : null;
+    const flowLabel = String(account?.auth_flow || authFlow || "authorization_code")
+      .toUpperCase()
+      .replaceAll("_", " ");
     const statusLabel = connected === true ? "CONNECTED" : (connected === false ? "DISCONNECTED" : "UNKNOWN");
     return (
       <div style={{ marginBottom: 16 }}>
@@ -2142,6 +2220,20 @@ function AuthPage({ twitchStatusData, twitchConnectStart, twitchDisconnect, twit
         <div style={{ ...TEXT_STYLES.meta, marginBottom: 8 }}>
           {connected === true ? "Status verified by backend." : (connected === false ? `Reason: ${reasonText || "\u2014"}` : "Status unknown")}
         </div>
+        <div style={{ ...TEXT_STYLES.meta, marginBottom: 8 }}>
+          FLOW: {flowLabel}
+        </div>
+        {pendingAuth ? (
+          <div style={{ background: "#111114", border: "1px solid #2a2a2e", borderRadius: 2, padding: "8px 10px", marginBottom: 8 }}>
+            <div style={{ ...TEXT_STYLES.meta, marginBottom: 4 }}>DEVICE CODE</div>
+            <div style={{ fontSize: 14, color: "#7faacc", fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, letterSpacing: 1 }}>
+              {String(pendingAuth.user_code || "\u2014")}
+            </div>
+            <div style={{ ...TEXT_STYLES.meta, marginTop: 4 }}>
+              {String(pendingAuth.verification_uri || "").trim() || "Open Twitch activation page to approve."}
+            </div>
+          </div>
+        ) : null}
         <div style={{ display: "flex", gap: 8 }}>
           <RackButton
             label={canConnect ? (connected === true ? "RECONNECT" : "CONNECT") : "NOT AVAILABLE"}
@@ -2150,6 +2242,7 @@ function AuthPage({ twitchStatusData, twitchConnectStart, twitchDisconnect, twit
             onClick={async () => {
               const result = await twitchConnectStart(accountId);
               const authUrl = result?.body?.auth_url;
+              const flow = String(result?.body?.flow || "").toLowerCase();
               if (authUrl) {
                 const popup = window.open(authUrl, "_blank", "popup,width=560,height=760");
                 if (!popup) {
@@ -2157,10 +2250,39 @@ function AuthPage({ twitchStatusData, twitchConnectStart, twitchDisconnect, twit
                 } else {
                   setTwitchNotice("Twitch authorization started in a new tab.");
                 }
+              } else if (result?.ok && flow === "device_code") {
+                const verificationUri = String(result?.body?.verification_uri_complete || result?.body?.verification_uri || "").trim();
+                const userCode = String(result?.body?.user_code || "").trim();
+                if (verificationUri) {
+                  window.open(verificationUri, "_blank", "popup,width=560,height=760");
+                }
+                if (userCode && verificationUri) {
+                  setTwitchNotice(`Device auth started. Enter code ${userCode} at ${verificationUri}.`);
+                } else if (userCode) {
+                  setTwitchNotice(`Device auth started. Enter code ${userCode} on Twitch activation page.`);
+                } else {
+                  setTwitchNotice("Device auth started. Complete approval in Twitch.");
+                }
               } else if (!result?.ok) {
                 const detail = String(result?.body?.detail || result?.body?.error || "Unknown error");
                 setTwitchNotice(detail);
                 console.error(`[Dashboard Twitch] reconnect unavailable for ${accountId}:`, detail);
+              }
+            }}
+          />
+          <RackButton
+            label={pendingAuth ? "CHECK APPROVAL" : "CHECK"}
+            color="#ff851b"
+            disabled={!pendingAuth}
+            onClick={async () => {
+              const result = await twitchConnectPoll(accountId);
+              if (!result?.ok) {
+                const detail = String(result?.body?.detail || result?.body?.error || "Device authorization failed.");
+                setTwitchNotice(detail);
+              } else if (result?.body?.connected) {
+                setTwitchNotice(`${accountId} connected.`);
+              } else {
+                setTwitchNotice("Authorization still pending.");
               }
             }}
           />
@@ -2670,6 +2792,7 @@ export default function RoonieControlRoom() {
     loginDashboard,
     logoutDashboard,
     twitchConnectStart,
+    twitchConnectPoll,
     twitchDisconnect,
     fetchChannelEmotes,
   } = useDashboardData(activePage);
@@ -2708,7 +2831,7 @@ export default function RoonieControlRoom() {
       case "nowplaying": return <NowPlayingPage />;
       case "logs": return <LogsPage eventsData={logsEventsData} suppressionsData={logsSuppressionsData} operatorLogData={logsOperatorData} />;
       case "providers": return <ProvidersPage statusData={statusData} providersStatusData={providersStatusData} routingStatusData={routingStatusData} systemHealthData={systemHealthData} readinessData={readinessData} setProviderActive={setProviderActive} setProviderCaps={setProviderCaps} setRoutingEnabled={setRoutingEnabled} setActiveDirector={setActiveDirector} setDryRunEnabled={setDryRunEnabled} />;
-      case "auth": return <AuthPage twitchStatusData={twitchStatusData} twitchConnectStart={twitchConnectStart} twitchDisconnect={twitchDisconnect} twitchNotice={twitchNotice} setTwitchNotice={setTwitchNotice} />;
+      case "auth": return <AuthPage twitchStatusData={twitchStatusData} twitchConnectStart={twitchConnectStart} twitchConnectPoll={twitchConnectPoll} twitchDisconnect={twitchDisconnect} twitchNotice={twitchNotice} setTwitchNotice={setTwitchNotice} />;
       case "culture": return <CulturePage culturalNotesData={culturalNotesData} viewerNotesData={viewerNotesData} memoryPendingData={memoryPendingData} saveCulturalNote={saveCulturalNote} deleteCulturalNote={deleteCulturalNote} saveViewerNote={saveViewerNote} deleteViewerNote={deleteViewerNote} reviewMemoryPending={reviewMemoryPending} />;
       case "innercircle": return <InnerCirclePage innerCircleData={innerCircleData} saveInnerCircle={saveInnerCircle} />;
       case "snapshot": return <CulturalSnapshotPage logsEventsData={logsEventsData} logsSuppressionsData={logsSuppressionsData} statusData={statusData} />;
@@ -2829,6 +2952,3 @@ export default function RoonieControlRoom() {
     </div>
   );
 }
-
-
-

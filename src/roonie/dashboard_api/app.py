@@ -1214,6 +1214,41 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
                 _json_response(self, result)
                 return
 
+            if path == "/api/twitch/connect_poll":
+                ok_body, payload = self._read_json_body()
+                if not ok_body:
+                    _json_response(
+                        self,
+                        {"ok": False, "error": "bad_request", "detail": "Invalid JSON body."},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                identity = self._authorize_write(
+                    action="TWITCH_CONNECT_POLL",
+                    payload=payload,
+                    required_role="operator",
+                )
+                if identity is None:
+                    return
+                account = (
+                    str(_query_opt(query, "account") or payload.get("account", "bot"))
+                    .strip()
+                    .lower()
+                    or "bot"
+                )
+                try:
+                    result = storage.twitch_connect_poll(account)
+                except ValueError as exc:
+                    _json_response(
+                        self,
+                        {"ok": False, "error": "bad_request", "detail": str(exc)},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                status_code = HTTPStatus.OK if bool(result.get("ok", False)) else HTTPStatus.BAD_REQUEST
+                _json_response(self, result, status=status_code)
+                return
+
             if path == "/api/twitch/disconnect":
                 ok_body, payload = self._read_json_body()
                 if not ok_body:
