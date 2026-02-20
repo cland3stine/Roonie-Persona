@@ -2751,6 +2751,61 @@ def test_twitch_disconnect_revokes_local_access_and_refresh_tokens(tmp_path: Pat
     assert bot_state.get("disconnected") is True
 
 
+def test_twitch_device_connect_start_keeps_disconnected_state_until_poll_success(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from roonie.dashboard_api.storage import DashboardStorage
+
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_TWITCH_AUTH_FLOW", "device_code")
+    monkeypatch.setenv("TWITCH_CLIENT_ID", "test-client-id")
+    monkeypatch.delenv("TWITCH_CLIENT_SECRET", raising=False)
+    monkeypatch.delenv("TWITCH_REDIRECT_URI", raising=False)
+    monkeypatch.setenv("TWITCH_CHANNEL", "ruleofrune")
+    monkeypatch.setenv("TWITCH_NICK", "RoonieTheCat")
+
+    def _fake_start_device(self, *, client_id: str, scopes: list[str]):
+        assert client_id == "test-client-id"
+        assert "chat:read" in scopes
+        return {
+            "ok": True,
+            "device_code": "device-code-123",
+            "user_code": "ABCD-EFGH",
+            "verification_uri": "https://www.twitch.tv/activate",
+            "verification_uri_complete": "https://www.twitch.tv/activate?device-code-123",
+            "expires_at": "2027-01-01T00:00:00+00:00",
+            "interval_seconds": 5,
+        }
+
+    monkeypatch.setattr(
+        "roonie.dashboard_api.storage.DashboardStorage._start_twitch_device_code",
+        _fake_start_device,
+        raising=True,
+    )
+
+    storage = DashboardStorage(runs_dir=runs_dir)
+    storage.twitch_disconnect("bot", revoke_remote=False)
+    # Simulate stale env token; connect_start should not make status connected yet.
+    monkeypatch.setenv("TWITCH_OAUTH_TOKEN", "oauth:tok_abcdefghijklmnopqrstuvwxyz123456")
+
+    started = storage.twitch_connect_start("bot")
+    status = storage.get_twitch_status(force_refresh=True)
+    bot_status = status.get("accounts", {}).get("bot", {})
+
+    auth_state_path = tmp_path / "data" / "twitch_auth_state.json"
+    auth_state = json.loads(auth_state_path.read_text(encoding="utf-8"))
+    bot_row = auth_state.get("accounts", {}).get("bot", {})
+
+    assert started["ok"] is True
+    assert started["flow"] == "device_code"
+    assert bot_row.get("disconnected") is True
+    assert bot_status.get("connected") is False
+    assert bot_status.get("reason") == "PENDING_AUTH"
+    assert bool((bot_status.get("pending_auth") or {}).get("active")) is True
+
+
 def test_twitch_auth_state_tokens_are_encrypted_at_rest_when_enabled(tmp_path: Path, monkeypatch) -> None:
     from roonie.dashboard_api.storage import DashboardStorage
 
@@ -3035,6 +3090,90 @@ def test_twitch_auto_refresh_device_flow_allows_missing_client_secret(tmp_path: 
     monkeypatch.setenv("ROONIE_TWITCH_AUTH_FLOW", "device_code")
     monkeypatch.setenv("TWITCH_CLIENT_ID", "client-id")
     monkeypatch.delenv("TWITCH_CLIENT_SECRET", raising=False)
+    monkeypatch.delenv("TWITCH_REDIRECT_URI", raising=False)
+    monkeypatch.setenv("TWITCH_CHANNEL", "ruleofrune")
+    monkeypatch.setenv("TWITCH_NICK", "RoonieTheCat")
+    monkeypatch.setenv("ROONIE_TWITCH_AUTO_REFRESH", "1")
+    monkeypatch.setenv("ROONIE_TWITCH_REFRESH_LEAD_SECONDS", "900")
+
+    storage = DashboardStorage(runs_dir=runs_dir)
+    auth_state_path = tmp_path / "data" / "twitch_auth_state.json"
+    expired = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    auth_state_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "accounts": {
+                    "bot": {
+                        "token": "tok_old_abcdefghijklmnopqrstuvwxyz123456",
+                        "refresh_token": "ref_old_abcdefghijklmnopqrstuvwxyz123456",
+                        "expires_at": expired,
+                        "scopes": ["chat:read", "chat:edit"],
+                        "display_name": "RoonieTheCat",
+                        "pending_state": None,
+                        "updated_at": "2026-02-14T00:00:00+00:00",
+                        "disconnected": False,
+                    },
+                    "broadcaster": {
+                        "token": None,
+                        "refresh_token": None,
+                        "expires_at": None,
+                        "scopes": [],
+                        "display_name": "RuleOfRune",
+                        "pending_state": None,
+                        "updated_at": None,
+                        "disconnected": False,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    calls: list[dict[str, Any]] = []
+
+    def _fake_refresh(self, *, refresh_token: str, client_id: str, client_secret: Optional[str] = None):
+        calls.append(
+            {
+                "refresh_token": refresh_token,
+                "client_id": client_id,
+                "client_secret": client_secret,
+            }
+        )
+        return {
+            "ok": True,
+            "access_token": "tok_new_abcdefghijklmnopqrstuvwxyz123456",
+            "refresh_token": "ref_new_abcdefghijklmnopqrstuvwxyz123456",
+            "scopes": ["chat:read", "chat:edit"],
+            "expires_at": (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat(),
+        }
+
+    monkeypatch.setattr(
+        "roonie.dashboard_api.storage.DashboardStorage._refresh_twitch_access_token",
+        _fake_refresh,
+        raising=True,
+    )
+
+    refresh_result = storage.refresh_twitch_tokens_if_needed(force=False)
+    bot_refresh = refresh_result.get("accounts", {}).get("bot", {})
+    assert refresh_result["ok"] is True
+    assert refresh_result["refreshed_any"] is True
+    assert bot_refresh.get("attempted") is True
+    assert bot_refresh.get("refreshed") is True
+    assert len(calls) == 1
+    assert calls[0]["client_id"] == "client-id"
+    assert calls[0]["client_secret"] in {None, ""}
+
+
+def test_twitch_auto_refresh_device_flow_ignores_present_client_secret(tmp_path: Path, monkeypatch) -> None:
+    from roonie.dashboard_api.storage import DashboardStorage
+
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_TWITCH_AUTH_FLOW", "device_code")
+    monkeypatch.setenv("TWITCH_CLIENT_ID", "client-id")
+    monkeypatch.setenv("TWITCH_CLIENT_SECRET", "stale-secret-should-not-be-used")
     monkeypatch.delenv("TWITCH_REDIRECT_URI", raising=False)
     monkeypatch.setenv("TWITCH_CHANNEL", "ruleofrune")
     monkeypatch.setenv("TWITCH_NICK", "RoonieTheCat")

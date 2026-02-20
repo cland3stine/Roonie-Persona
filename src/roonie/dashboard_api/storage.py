@@ -4985,7 +4985,8 @@ class DashboardStorage:
                 state = self._load_twitch_auth_state_locked()
                 accounts = state.setdefault("accounts", {})
                 row = accounts.setdefault(acc, {})
-                row["disconnected"] = False
+                # Preserve explicit disconnect state until device auth is actually completed.
+                # This prevents stale env tokens from making status look connected mid-flow.
                 self._clear_twitch_pending_auth_locked(row)
                 row["pending_device_code"] = str(started.get("device_code") or "").strip() or None
                 row["pending_user_code"] = str(started.get("user_code") or "").strip() or None
@@ -5014,7 +5015,7 @@ class DashboardStorage:
             state = self._load_twitch_auth_state_locked()
             accounts = state.setdefault("accounts", {})
             row = accounts.setdefault(acc, {})
-            row["disconnected"] = False
+            # Preserve explicit disconnect state until callback completes.
             self._clear_twitch_pending_auth_locked(row)
             row["pending_state"] = state_token
             row["updated_at"] = checked_at
@@ -5502,7 +5503,7 @@ class DashboardStorage:
                 refreshed = self._refresh_twitch_access_token(
                     refresh_token=refresh_token,
                     client_id=client_id,
-                    client_secret=(client_secret if client_secret else None),
+                    client_secret=(client_secret if (needs_client_secret and client_secret) else None),
                 )
                 if not bool(refreshed.get("ok", False)):
                     account_result["error"] = str(refreshed.get("error") or "TOKEN_REFRESH_FAILED")
