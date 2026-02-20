@@ -213,6 +213,15 @@ def _load_persona_policy_text() -> str:
     cleaned = text.strip()
     if not cleaned:
         return ""
+    # Skip injection if file is pure YAML config (no behavioral prose).
+    # A line is "config-only" if blank or looks like a YAML key/value/list/frontmatter.
+    _yaml_line = re.compile(r"^(?:---|\s*[\w_]+\s*:.*|\s*-\s+.*)$")
+    has_prose = any(
+        line.strip() and not _yaml_line.match(line)
+        for line in cleaned.splitlines()
+    )
+    if not has_prose:
+        return ""
     return cleaned
 
 

@@ -4,7 +4,7 @@
     "event_id": "evt-102",
     "action": "RESPOND_PUBLIC",
     "route": "responder:clarify",
-    "response_text": "Quick check—are you asking me, and what exactly do you mean?",
+    "response_text": "Wait, are you asking me? What do you mean exactly?",
     "trace": {
       "gates": {
         "addressed_to_roonie": true,

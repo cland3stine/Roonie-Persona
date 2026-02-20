@@ -110,8 +110,8 @@ class ContextBuffer:
         count = max(0, min(int(max_turns), self._max_turns))
         if count == 0:
             return []
-        # Newest first for deterministic prompt packing.
-        return list(reversed(list(self._turns)[-count:]))
+        # Chronological order (oldest first) so the LLM reads conversation naturally.
+        return list(self._turns)[-count:]
 
     def clear(self) -> None:
         self._turns.clear()

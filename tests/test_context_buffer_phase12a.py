@@ -26,8 +26,8 @@ def test_context_buffer_never_exceeds_n() -> None:
 
     turns = buf.get_context(max_turns=3)
     assert len(turns) == 3
-    assert turns[0].text == "what is track 4?"
-    assert turns[2].text == "what is track 2?"
+    assert turns[0].text == "what is track 2?"
+    assert turns[2].text == "what is track 4?"
 
 
 def test_irrelevant_chatter_is_not_stored() -> None:

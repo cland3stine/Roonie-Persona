@@ -1,7 +1,7 @@
 [
   {
     "action": "RESPOND_PUBLIC",
-    "response_text": "Quick check\u2014are you asking me, and what exactly do you mean?",
+    "response_text": "Wait, are you asking me? What do you mean exactly?",
     "event_id": "evt-4",
     "route": "responder:clarify",
     "case_id": "P1-0004_ambiguity_unclear_intent",

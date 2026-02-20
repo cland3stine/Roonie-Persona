@@ -97,10 +97,11 @@ def behavior_guidance(
         if topic_anchor:
             lines.append(f"Recent topic: {topic_anchor}. Pick up the thread if relevant.")
         lines.append("Chat naturally. Be warm, react to what they actually said. Light teasing is welcome if the moment is right.")
+        lines.append("If the recent chat shows you repeating the same joke or theme, drop it and respond fresh to what the viewer just said.")
     if topic_anchor and category != CATEGORY_BANTER:
         lines.append(f"Recent topic: {topic_anchor}. Pick up the thread if relevant.")
     if approved_emotes:
-        lines.append(f"Approved emotes: {', '.join(approved_emotes)}. One per message maximum, at the END only. Most messages: no emote.")
+        lines.append(f"Approved emotes: {', '.join(approved_emotes)}")
     return "\n".join(lines) if lines else ""
 
 

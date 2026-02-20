@@ -1,7 +1,7 @@
 [
   {
     "action": "RESPOND_PUBLIC",
-    "response_text": "I hear you. take care of yourself tonight.",
+    "response_text": "I hear you. Take care of yourself.",
     "event_id": "evt-6",
     "route": "responder:sensitive_ack",
     "case_id": "P1-0006_sensitive_no_followup",

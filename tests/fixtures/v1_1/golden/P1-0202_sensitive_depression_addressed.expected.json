@@ -4,7 +4,7 @@
     "event_id": "evt-202",
     "action": "RESPOND_PUBLIC",
     "route": "responder:sensitive_ack",
-    "response_text": "I hear you. take care of yourself tonight.",
+    "response_text": "I hear you. Take care of yourself.",
     "trace": {
       "gates": {
         "addressed_to_roonie": true,
