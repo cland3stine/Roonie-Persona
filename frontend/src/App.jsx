@@ -1144,11 +1144,11 @@ function useDashboardData(activePage) {
       if (!success) {
         setTwitchNotice(String(body?.detail || body?.error || "Unable to start Twitch auth."));
       }
-      await refreshTwitchStatus();
+      void refreshTwitchStatus();
       return { ok: success, body };
     } catch (err) {
       setTwitchNotice(String(err || "Unable to start Twitch auth."));
-      await refreshTwitchStatus();
+      void refreshTwitchStatus();
       return { ok: false, body: { detail: String(err || "connect error") } };
     }
   };
@@ -1172,11 +1172,11 @@ function useDashboardData(activePage) {
       if (!success) {
         setTwitchNotice(String(body?.detail || body?.error || "Unable to poll Twitch device auth."));
       }
-      await refreshTwitchStatus();
+      void refreshTwitchStatus();
       return { ok: success, body };
     } catch (err) {
       setTwitchNotice(String(err || "Unable to poll Twitch device auth."));
-      await refreshTwitchStatus();
+      void refreshTwitchStatus();
       return { ok: false, body: { detail: String(err || "poll error") } };
     }
   };
@@ -2131,6 +2131,10 @@ function AuthPage({ twitchStatusData, twitchConnectStart, twitchConnectPoll, twi
   const accounts = twitchStatusData?.accounts || {};
   const bot = accounts.bot || {};
   const broadcaster = accounts.broadcaster || {};
+  const [connectingAccounts, setConnectingAccounts] = useState({});
+  const [disconnectingAccounts, setDisconnectingAccounts] = useState({});
+  const connectInFlightRef = useRef({ bot: false, broadcaster: false });
+  const devicePopupRefs = useRef({ bot: null, broadcaster: null });
   const authFlow = String(twitchStatusData?.auth_flow || "authorization_code").trim().toLowerCase() || "authorization_code";
   const scopesPresent = twitchStatusData?.scopes_present || {};
   const missingConfigFields = Array.isArray(twitchStatusData?.missing_config_fields) ? twitchStatusData.missing_config_fields : [];
@@ -2146,6 +2150,30 @@ function AuthPage({ twitchStatusData, twitchConnectStart, twitchConnectPoll, twi
   const healthOk = Boolean(bot.connected || broadcaster.connected);
   const healthLabel = healthOk ? "OK" : "Not connected";
 
+  const setAccountConnecting = (accountId, connecting) => {
+    const normalized = String(accountId || "").toLowerCase();
+    if (!normalized) return;
+    setConnectingAccounts((prev) => ({ ...prev, [normalized]: Boolean(connecting) }));
+  };
+
+  const setAccountDisconnecting = (accountId, disconnecting) => {
+    const normalized = String(accountId || "").toLowerCase();
+    if (!normalized) return;
+    setDisconnectingAccounts((prev) => ({ ...prev, [normalized]: Boolean(disconnecting) }));
+  };
+
+  const closePopupForAccount = (accountId) => {
+    const normalized = String(accountId || "").toLowerCase();
+    if (!normalized) return;
+    const popup = devicePopupRefs.current[normalized];
+    try {
+      if (popup && !popup.closed) popup.close();
+    } catch (_e) {
+      // cross-origin access can throw after redirect; ignore
+    }
+    devicePopupRefs.current[normalized] = null;
+  };
+
   useEffect(() => {
     if (authFlow !== "device_code") return undefined;
     const pendingAccounts = [bot, broadcaster].filter((acct) => Boolean(acct?.pending_auth?.active));
@@ -2160,10 +2188,16 @@ function AuthPage({ twitchStatusData, twitchConnectStart, twitchConnectPoll, twi
         if (!result?.ok) {
           const detail = String(result?.body?.detail || result?.body?.error || "Device authorization failed.");
           setTwitchNotice(detail);
+          connectInFlightRef.current[accountId] = false;
+          setAccountConnecting(accountId, false);
+          closePopupForAccount(accountId);
           continue;
         }
         if (result?.body?.connected) {
           setTwitchNotice(`${accountId} connected.`);
+          connectInFlightRef.current[accountId] = false;
+          setAccountConnecting(accountId, false);
+          closePopupForAccount(accountId);
         } else if (result?.body?.pending) {
           const code = String(result?.body?.user_code || acct?.pending_auth?.user_code || "").trim();
           if (code) {
@@ -2190,6 +2224,18 @@ function AuthPage({ twitchStatusData, twitchConnectStart, twitchConnectPoll, twi
     setTwitchNotice,
   ]);
 
+  // Clear in-flight guard when account status flips to connected.
+  useEffect(() => {
+    for (const accountId of ["bot", "broadcaster"]) {
+      const acct = accounts?.[accountId];
+      if (acct?.connected === true && connectInFlightRef.current[accountId]) {
+        connectInFlightRef.current[accountId] = false;
+        setAccountConnecting(accountId, false);
+        closePopupForAccount(accountId);
+      }
+    }
+  }, [accounts]);
+
   const AcctRow = ({ account }) => {
     const hasConnectedState = typeof account?.connected === "boolean";
     const connected = hasConnectedState ? account.connected : null;
@@ -2201,6 +2247,10 @@ function AuthPage({ twitchStatusData, twitchConnectStart, twitchConnectPoll, twi
     const canDisconnect = Boolean(account?.disconnect_available && accountId);
     const canConnect = Boolean(account?.connect_available && accountId);
     const pendingAuth = account?.pending_auth && account.pending_auth.active ? account.pending_auth : null;
+    const isConnecting = Boolean(connectingAccounts[accountId]);
+    const isDisconnecting = Boolean(disconnectingAccounts[accountId]);
+    const connectDisabled = !canConnect || Boolean(pendingAuth) || isConnecting || isDisconnecting;
+    const disconnectDisabled = !canDisconnect || isDisconnecting || isConnecting;
     const flowLabel = String(account?.auth_flow || authFlow || "authorization_code")
       .toUpperCase()
       .replaceAll("_", " ");
@@ -2236,37 +2286,61 @@ function AuthPage({ twitchStatusData, twitchConnectStart, twitchConnectPoll, twi
         ) : null}
         <div style={{ display: "flex", gap: 8 }}>
           <RackButton
-            label={canConnect ? (connected === true ? "RECONNECT" : "CONNECT") : "NOT AVAILABLE"}
+            label={
+              isConnecting
+                ? "CONNECTING..."
+                : (pendingAuth
+                  ? "PENDING APPROVAL"
+                  : (canConnect ? (connected === true ? "RECONNECT" : "CONNECT") : "NOT AVAILABLE"))
+            }
             color="#7faacc"
-            disabled={!canConnect}
+            disabled={connectDisabled}
             onClick={async () => {
-              const result = await twitchConnectStart(accountId);
-              const authUrl = result?.body?.auth_url;
-              const flow = String(result?.body?.flow || "").toLowerCase();
-              if (authUrl) {
-                const popup = window.open(authUrl, "_blank", "popup,width=560,height=760");
-                if (!popup) {
-                  setTwitchNotice(`Popup blocked. Open this URL manually: ${authUrl}`);
-                } else {
+              if (connectInFlightRef.current[accountId]) return;
+              connectInFlightRef.current[accountId] = true;
+              setAccountConnecting(accountId, true);
+              // Open placeholder popup immediately (synchronous) to avoid popup blockers
+              const placeholder = window.open("about:blank", "_blank", "popup,width=560,height=760");
+              devicePopupRefs.current[accountId] = placeholder;
+              try {
+                const result = await twitchConnectStart(accountId);
+                const authUrl = result?.body?.auth_url;
+                const flow = String(result?.body?.flow || "").toLowerCase();
+                if (authUrl) {
+                  if (placeholder && !placeholder.closed) {
+                    placeholder.location = authUrl;
+                  } else {
+                    setTwitchNotice(`Popup blocked. Open this URL manually: ${authUrl}`);
+                  }
                   setTwitchNotice("Twitch authorization started in a new tab.");
+                } else if (result?.ok && flow === "device_code") {
+                  const verificationUri = String(result?.body?.verification_uri_complete || result?.body?.verification_uri || "").trim();
+                  const userCode = String(result?.body?.user_code || "").trim();
+                  if (verificationUri && placeholder && !placeholder.closed) {
+                    placeholder.location = verificationUri;
+                  } else if (verificationUri) {
+                    window.open(verificationUri, "_blank", "popup,width=560,height=760");
+                  }
+                  if (userCode && verificationUri) {
+                    setTwitchNotice(`Device auth started. Enter code ${userCode} at ${verificationUri}.`);
+                  } else if (userCode) {
+                    setTwitchNotice(`Device auth started. Enter code ${userCode} on Twitch activation page.`);
+                  } else {
+                    setTwitchNotice("Device auth started. Complete approval in Twitch.");
+                  }
+                } else if (!result?.ok) {
+                  const detail = String(result?.body?.detail || result?.body?.error || "Unknown error");
+                  setTwitchNotice(detail);
+                  console.error(`[Dashboard Twitch] reconnect unavailable for ${accountId}:`, detail);
+                  connectInFlightRef.current[accountId] = false;
+                  setAccountConnecting(accountId, false);
+                  closePopupForAccount(accountId);
                 }
-              } else if (result?.ok && flow === "device_code") {
-                const verificationUri = String(result?.body?.verification_uri_complete || result?.body?.verification_uri || "").trim();
-                const userCode = String(result?.body?.user_code || "").trim();
-                if (verificationUri) {
-                  window.open(verificationUri, "_blank", "popup,width=560,height=760");
-                }
-                if (userCode && verificationUri) {
-                  setTwitchNotice(`Device auth started. Enter code ${userCode} at ${verificationUri}.`);
-                } else if (userCode) {
-                  setTwitchNotice(`Device auth started. Enter code ${userCode} on Twitch activation page.`);
-                } else {
-                  setTwitchNotice("Device auth started. Complete approval in Twitch.");
-                }
-              } else if (!result?.ok) {
-                const detail = String(result?.body?.detail || result?.body?.error || "Unknown error");
-                setTwitchNotice(detail);
-                console.error(`[Dashboard Twitch] reconnect unavailable for ${accountId}:`, detail);
+              } catch (err) {
+                setTwitchNotice(String(err || "Unable to start Twitch auth."));
+                connectInFlightRef.current[accountId] = false;
+                setAccountConnecting(accountId, false);
+                closePopupForAccount(accountId);
               }
             }}
           />
@@ -2279,18 +2353,35 @@ function AuthPage({ twitchStatusData, twitchConnectStart, twitchConnectPoll, twi
               if (!result?.ok) {
                 const detail = String(result?.body?.detail || result?.body?.error || "Device authorization failed.");
                 setTwitchNotice(detail);
+                connectInFlightRef.current[accountId] = false;
+                setAccountConnecting(accountId, false);
+                closePopupForAccount(accountId);
               } else if (result?.body?.connected) {
                 setTwitchNotice(`${accountId} connected.`);
+                connectInFlightRef.current[accountId] = false;
+                setAccountConnecting(accountId, false);
+                closePopupForAccount(accountId);
               } else {
                 setTwitchNotice("Authorization still pending.");
               }
             }}
           />
           <RackButton
-            label={canDisconnect ? "DISCONNECT" : "NOT AVAILABLE"}
+            label={isDisconnecting ? "DISCONNECTING..." : (canDisconnect ? "DISCONNECT" : "NOT AVAILABLE")}
             color="#ff4136"
-            disabled={!canDisconnect}
-            onClick={() => twitchDisconnect(accountId)}
+            disabled={disconnectDisabled}
+            onClick={async () => {
+              if (isDisconnecting) return;
+              setAccountDisconnecting(accountId, true);
+              try {
+                await twitchDisconnect(accountId);
+              } finally {
+                connectInFlightRef.current[accountId] = false;
+                setAccountConnecting(accountId, false);
+                setAccountDisconnecting(accountId, false);
+                closePopupForAccount(accountId);
+              }
+            }}
           />
         </div>
       </div>
