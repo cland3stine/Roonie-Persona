@@ -264,6 +264,144 @@ def test_track_id_without_now_playing_goes_through_llm(tmp_path, monkeypatch) ->
     assert "Don't guess track names" in prompt or "don't have track info" in prompt.lower()
 
 
+def test_trigger_word_boundaries_prevent_prefix_false_positives(tmp_path, monkeypatch) -> None:
+    _set_runtime_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_OUTPUT_DISABLED", "0")
+
+    called = {"count": 0}
+
+    def _stub_route_generate(**kwargs):
+        called["count"] += 1
+        kwargs["context"]["provider_selected"] = "openai"
+        kwargs["context"]["moderation_result"] = "allow"
+        return "unexpected trigger"
+
+    monkeypatch.setattr("roonie.provider_director.route_generate", _stub_route_generate)
+
+    msg_dojo = (
+        "dojo grooves locked in tonight and the room is staying steady through every transition "
+        "while the camera angle holds the booth view, the crowd clips keep cycling, and the pacing feels smooth "
+        "from intro section through the long break without any sudden shifts."
+    )
+    msg_showing = (
+        "showing support all stream and the vibe is stable from first drop to last blend "
+        "with everyone hanging through the long section while lights, overlays, and chat pace stay balanced "
+        "across the full run without extra prompts or interruptions."
+    )
+
+    out_path = run_payload(
+        {
+            "session_id": "phase19-trigger-boundary-noop",
+            "active_director": "ProviderDirector",
+            "inputs": [
+                _live_input("evt-1", msg_dojo),
+                _live_input("evt-2", msg_showing),
+            ],
+        },
+        emit_outputs=False,
+    )
+    run_doc = json.loads(out_path.read_text(encoding="utf-8"))
+    decisions = run_doc["decisions"]
+    assert decisions[0]["action"] == "NOOP"
+    assert decisions[1]["action"] == "NOOP"
+    assert decisions[0]["trace"]["director"]["trigger"] is False
+    assert decisions[1]["trace"]["director"]["trigger"] is False
+    assert decisions[0]["trace"]["behavior"]["category"] == "OTHER"
+    assert decisions[1]["trace"]["behavior"]["category"] == "OTHER"
+    assert decisions[0]["trace"]["behavior"]["short_ack_preferred"] is False
+    assert decisions[1]["trace"]["behavior"]["short_ack_preferred"] is False
+    assert called["count"] == 0
+
+
+def test_trigger_word_boundaries_still_allow_direct_request(tmp_path, monkeypatch) -> None:
+    _set_runtime_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_OUTPUT_DISABLED", "0")
+
+    captured: Dict[str, Any] = {}
+
+    def _stub_route_generate(**kwargs):
+        captured["prompt"] = kwargs.get("prompt", "")
+        kwargs["context"]["provider_selected"] = "openai"
+        kwargs["context"]["moderation_result"] = "allow"
+        return "on it"
+
+    monkeypatch.setattr("roonie.provider_director.route_generate", _stub_route_generate)
+
+    msg_show = (
+        "show everyone the angle and keep the sequence moving while the booth cam stays centered, "
+        "chat remains calm, and the long transition keeps rolling with the same lane from one section to the next "
+        "without breaking focus on the current energy."
+    )
+
+    out_path = run_payload(
+        {
+            "session_id": "phase19-trigger-boundary-direct",
+            "active_director": "ProviderDirector",
+            "inputs": [_live_input("evt-1", msg_show)],
+        },
+        emit_outputs=False,
+    )
+    run_doc = json.loads(out_path.read_text(encoding="utf-8"))
+    decision = run_doc["decisions"][0]
+    assert decision["action"] == "RESPOND_PUBLIC"
+    assert decision["trace"]["director"]["trigger"] is True
+    assert decision["trace"]["behavior"]["category"] == "OTHER"
+    assert decision["trace"]["behavior"]["short_ack_preferred"] is False
+    assert decision["response_text"] == "on it"
+    assert "show everyone the angle" in str(captured.get("prompt", "")).lower()
+
+
+def test_direct_address_long_statement_prefers_short_ack_and_emits(tmp_path, monkeypatch) -> None:
+    import responders.output_gate as output_gate
+
+    _set_runtime_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_OUTPUT_DISABLED", "0")
+    monkeypatch.setenv("ROONIE_DRY_RUN", "0")
+    monkeypatch.setenv("ROONIE_OUTPUT_RATE_LIMIT_SECONDS", "0")
+    output_gate._LAST_EMIT_TS = 0.0
+    output_gate._LAST_EMIT_BY_KEY.clear()
+
+    sent_calls: List[Dict[str, Any]] = []
+    captured: Dict[str, Any] = {}
+
+    def _spy_handle_output(self, output: Dict[str, Any], metadata: Dict[str, Any]) -> None:
+        sent_calls.append({"output": dict(output), "metadata": dict(metadata)})
+
+    def _stub_route_generate(**kwargs):
+        captured["prompt"] = kwargs.get("prompt", "")
+        kwargs["context"]["provider_selected"] = "openai"
+        kwargs["context"]["moderation_result"] = "allow"
+        return "@ruleofrune got you. hang here as long as you need."
+
+    monkeypatch.setattr("adapters.twitch_output.TwitchOutputAdapter.handle_output", _spy_handle_output)
+    monkeypatch.setattr("roonie.provider_director.route_generate", _stub_route_generate)
+
+    out_path = run_payload(
+        {
+            "session_id": "phase19-direct-status-ack",
+            "active_director": "ProviderDirector",
+            "inputs": [
+                _live_input(
+                    "evt-1",
+                    "@RoonieTheCat thats pretty cool. I'm getting ready for work, but can chill for a bit if you dont mind",
+                )
+            ],
+        },
+        emit_outputs=True,
+    )
+    run_doc = json.loads(out_path.read_text(encoding="utf-8"))
+    decision = run_doc["decisions"][0]
+    output = run_doc["outputs"][0]
+    assert decision["action"] == "RESPOND_PUBLIC"
+    assert decision["trace"]["behavior"]["category"] == "BANTER"
+    assert decision["trace"]["behavior"]["short_ack_preferred"] is True
+    assert output["emitted"] is True
+    assert output["reason"] == "EMITTED"
+    assert len(sent_calls) == 1
+    prompt = str(captured.get("prompt", ""))
+    assert "short acknowledgment sentence" in prompt
+
+
 def test_disallowed_emote_is_suppressed_when_allow_list_present(tmp_path, monkeypatch) -> None:
     import responders.output_gate as output_gate
 

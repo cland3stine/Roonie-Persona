@@ -49,38 +49,65 @@ def _decision_approved_emotes(decision: Dict[str, Any]) -> List[str]:
     if not isinstance(raw, list):
         return []
     out: List[str] = []
+    seen: set[str] = set()
     for item in raw[:24]:
         if isinstance(item, dict):
             if item.get("denied", False):
                 continue
             name = str(item.get("name") or "").strip()
             if name:
-                out.append(name)
+                normalized = _normalize_emote_name(name)
+                if normalized and normalized not in seen:
+                    seen.add(normalized)
+                    out.append(normalized)
         else:
-            text = str(item or "").strip()
-            if text:
-                out.append(text)
+            normalized = _normalize_emote_name(item)
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                out.append(normalized)
     return out
 
 
-def _looks_like_emote(token: str) -> bool:
+def _normalize_emote_name(raw: Any) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    # Accept either plain names ("ruleof6Cheshire") or decorated entries
+    # ("ruleof6Cheshire (cheshire grin)") and normalize to bare names.
+    match = re.match(r"^([A-Za-z][A-Za-z0-9_]{2,31})\b", text)
+    if not match:
+        return ""
+    return str(match.group(1)).strip()
+
+
+def _looks_like_emote_token(token: str) -> bool:
     text = str(token or "").strip()
     if not text:
         return False
     if "_" in text:
         return True
     for idx in range(1, len(text)):
-        if text[idx].isupper() and text[idx - 1].islower():
+        curr = text[idx]
+        prev = text[idx - 1]
+        if curr.isupper() and (prev.islower() or prev.isdigit()):
+            return True
+        if curr.isdigit() and prev.isalpha():
             return True
     return False
 
 
 def _disallowed_emote_in_text(text: str, allowed: List[str]) -> str | None:
-    allowed_set = {item.strip() for item in allowed if item.strip()}
+    allowed_set = {
+        normalized
+        for normalized in (_normalize_emote_name(item) for item in allowed)
+        if normalized
+    }
     if not allowed_set:
         return None
     for token in _TOKEN_RE.findall(str(text or "")):
-        if _looks_like_emote(token) and token not in allowed_set:
+        if token in allowed_set:
+            continue
+        if _looks_like_emote_token(token):
             return token
     return None
 

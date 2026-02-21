@@ -81,6 +81,7 @@ def behavior_guidance(
     approved_emotes: List[str],
     now_playing_available: bool,
     topic_anchor: str = "",
+    short_ack_preferred: bool = False,
 ) -> str:
     lines: List[str] = []
     if category == CATEGORY_TRACK_ID:
@@ -94,6 +95,9 @@ def behavior_guidance(
     elif category == CATEGORY_GREETING:
         lines.append("Greet them like a friend you're happy to see. Match their energy or bring it up a notch.")
     elif category == CATEGORY_BANTER:
+        if short_ack_preferred:
+            lines.append("Viewer shared a status update without a question. Reply with one short acknowledgment sentence.")
+            lines.append("Do not force a follow-up question unless it's clearly needed.")
         if topic_anchor:
             lines.append(f"Recent topic: {topic_anchor}. Pick up the thread if relevant.")
         lines.append("Chat naturally. Be warm, react to what they actually said. Light teasing is welcome if the moment is right.")

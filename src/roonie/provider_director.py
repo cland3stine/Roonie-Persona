@@ -45,6 +45,10 @@ _DIRECT_VERBS = (
     "restart",
     "help",
 )
+_SHORT_ACK_MAX_CHARS = 220
+_DIRECT_VERB_PREFIX_RE = re.compile(
+    r"^(?:" + "|".join(re.escape(verb) for verb in _DIRECT_VERBS) + r")(?:\s|$)"
+)
 
 _TOPIC_ANCHOR_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9]*(?:\s+[A-Za-z0-9]+){0,2}\s+\d{1,3})\b")
 _TOPIC_ANCHOR_PHRASE_RE = re.compile(r"\b([A-Z][A-Za-z0-9]*(?:\s+[A-Za-z0-9][A-Za-z0-9']*){1,5})\b")
@@ -371,11 +375,33 @@ class ProviderDirector:
             return False
         if "?" in text:
             return True
-        if text.startswith(_DIRECT_VERBS):
+        if _DIRECT_VERB_PREFIX_RE.match(text):
             return True
         if len(text) <= 3:
             return True
         return False
+
+    @staticmethod
+    def _should_short_ack_direct_address(*, addressed: bool, category: str, message: str) -> bool:
+        if not addressed:
+            return False
+        if str(category or "").strip().upper() != CATEGORY_OTHER:
+            return False
+        text = str(message or "").strip()
+        if not text:
+            return False
+        if "?" in text:
+            return False
+        # Strip leading mention before measuring substance.
+        stripped = re.sub(r"^@\w+\s*", "", text).strip()
+        if not stripped:
+            return False
+        if len(stripped) > _SHORT_ACK_MAX_CHARS:
+            return False
+        # Avoid turning tiny acknowledgments into forced replies.
+        if len(stripped.split()) < 5 and "," not in stripped and "." not in stripped:
+            return False
+        return True
 
     @staticmethod
     def _approved_emotes(metadata: Dict[str, Any]) -> List[str]:
@@ -580,6 +606,7 @@ class ProviderDirector:
         topic_anchor: str,
         library_block: str,
         music_fact_question: bool,
+        short_ack_preferred: bool = False,
         safety_classification: str = "allowed",
     ) -> str:
         base_prompt = build_roonie_prompt(
@@ -599,6 +626,7 @@ class ProviderDirector:
             approved_emotes=approved_emotes,
             now_playing_available=now_playing_available,
             topic_anchor=topic_anchor,
+            short_ack_preferred=short_ack_preferred,
         )
         grounding_block = ""
         if library_block:
@@ -663,6 +691,13 @@ class ProviderDirector:
         metadata = event.metadata if isinstance(event.metadata, dict) else {}
         addressed = self._is_direct_address(event)
         category = classify_behavior_category(message=event.message, metadata=metadata)
+        short_ack_preferred = self._should_short_ack_direct_address(
+            addressed=addressed,
+            category=category,
+            message=event.message,
+        )
+        if short_ack_preferred:
+            category = CATEGORY_BANTER
         trigger = (category != CATEGORY_OTHER) or self._is_trigger_message(event.message)
         safety_classification, refusal_reason_code = classify_message_safety(event.message)
         approved_emotes = self._approved_emotes(metadata)
@@ -762,6 +797,7 @@ class ProviderDirector:
                     "behavior": {
                         "category": category,
                         "approved_emotes": approved_emotes,
+                        "short_ack_preferred": short_ack_preferred,
                         "topic_anchor": topic_anchor,
                         "topic_anchor_kind": self._topic_anchor_kind or None,
                         "library_confidence": library_confidence,
@@ -808,6 +844,7 @@ class ProviderDirector:
             topic_anchor=topic_anchor,
             library_block=library_block,
             music_fact_question=bool(music_fact_question),
+            short_ack_preferred=short_ack_preferred,
             safety_classification=safety_classification,
         )
         context: Dict[str, Any] = {
@@ -881,6 +918,7 @@ class ProviderDirector:
             "behavior": {
                 "category": category,
                 "approved_emotes": approved_emotes,
+                "short_ack_preferred": short_ack_preferred,
                 "now_playing_available": now_playing_available,
                 "topic_anchor": topic_anchor,
                 "topic_anchor_kind": self._topic_anchor_kind or None,
@@ -934,4 +972,3 @@ class ProviderDirector:
             context_active=context_active,
             context_turns_used=context_turns_used,
         )
-

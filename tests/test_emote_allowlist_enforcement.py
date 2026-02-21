@@ -192,3 +192,50 @@ def test_approved_emote_allow_list_enforced_and_logged(tmp_path, monkeypatch) ->
 
     assert isinstance(suppressions, list)
     assert any(item.get("suppression_reason") == "DISALLOWED_EMOTE" for item in suppressions if isinstance(item, dict))
+
+
+def test_ruleof6_emote_with_description_format_is_enforced(tmp_path, monkeypatch) -> None:
+    import responders.output_gate as output_gate
+
+    _ = _set_runtime_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_OUTPUT_DISABLED", "0")
+    monkeypatch.setenv("ROONIE_OUTPUT_RATE_LIMIT_SECONDS", "0")
+    output_gate._LAST_EMIT_TS = 0.0
+    output_gate._LAST_EMIT_BY_KEY.clear()
+
+    send_calls: List[Dict[str, Any]] = []
+
+    def _spy_handle_output(self, output: Dict[str, Any], metadata: Dict[str, Any]) -> None:
+        send_calls.append({"output": dict(output), "metadata": dict(metadata)})
+
+    monkeypatch.setattr("adapters.twitch_output.TwitchOutputAdapter.handle_output", _spy_handle_output)
+
+    # Simulates approved emotes passed through metadata in "name (desc)" form.
+    allow_list = ["ruleof6Cheshire (cheshire grin)", "ruleof6Party (party)"]
+
+    monkeypatch.setattr(
+        "roonie.provider_director.ProviderDirector.evaluate",
+        _provider_stub("hello ruleof6Cheshire", allow_list),
+    )
+    allowed_path = run_payload(
+        _live_payload("ruleof6-allow", "evt-ruleof6-allow", "@RoonieTheCat hey there"),
+        emit_outputs=True,
+    )
+    allowed_doc = json.loads(allowed_path.read_text(encoding="utf-8"))
+    assert allowed_doc["outputs"][0]["emitted"] is True
+    assert allowed_doc["outputs"][0]["reason"] == "EMITTED"
+    assert len(send_calls) == 1
+
+    # Token includes digit->uppercase transition ("6N"), which old logic missed.
+    monkeypatch.setattr(
+        "roonie.provider_director.ProviderDirector.evaluate",
+        _provider_stub("hello ruleof6Nope", allow_list),
+    )
+    blocked_path = run_payload(
+        _live_payload("ruleof6-block", "evt-ruleof6-block", "@RoonieTheCat hey again"),
+        emit_outputs=True,
+    )
+    blocked_doc = json.loads(blocked_path.read_text(encoding="utf-8"))
+    assert blocked_doc["outputs"][0]["emitted"] is False
+    assert blocked_doc["outputs"][0]["reason"] == "DISALLOWED_EMOTE"
+    assert len(send_calls) == 1

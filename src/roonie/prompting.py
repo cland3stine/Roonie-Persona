@@ -128,7 +128,7 @@ def build_roonie_prompt(
     message: str,
     metadata: Optional[Dict[str, Any]] = None,
     context_turns: Optional[Iterable[Any]] = None,
-    max_context_turns: int = 6,
+    max_context_turns: int = 8,
     max_context_chars: int = 900,
     now_playing_text: str = "",
     inner_circle_text: str = "",

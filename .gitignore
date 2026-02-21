@@ -10,3 +10,4 @@ config/secrets.env
 frontend/node_modules/
 dist/
 data/
+.claude/
