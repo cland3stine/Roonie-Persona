@@ -5225,6 +5225,21 @@ class DashboardStorage:
         exchanged = self._exchange_twitch_device_code(client_id=client_id, device_code=pending_device_code)
         if not bool(exchanged.get("ok", False)):
             oauth_error = str(exchanged.get("oauth_error") or "").strip().lower()
+            if not oauth_error:
+                # Twitch may return only `message: authorization_pending` without an `error` field.
+                detail_text = str(exchanged.get("detail") or "").strip().lower()
+                if detail_text:
+                    detail_norm = re.sub(r"[\s\-]+", "_", detail_text)
+                    if "authorization_pending" in detail_norm:
+                        oauth_error = "authorization_pending"
+                    elif "slow_down" in detail_norm:
+                        oauth_error = "slow_down"
+                    elif "expired_token" in detail_norm:
+                        oauth_error = "expired_token"
+                    elif "access_denied" in detail_norm:
+                        oauth_error = "access_denied"
+                    elif "invalid_device_code" in detail_norm:
+                        oauth_error = "invalid_device_code"
             if oauth_error in {"authorization_pending", "slow_down"}:
                 next_interval = poll_interval_seconds
                 if oauth_error == "slow_down":

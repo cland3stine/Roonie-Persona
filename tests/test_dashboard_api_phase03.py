@@ -3595,6 +3595,96 @@ def test_twitch_device_code_poll_pending_returns_pending(tmp_path: Path, monkeyp
     assert int(body_poll.get("retry_after_seconds", 0)) >= 1
 
 
+def test_twitch_device_code_poll_pending_from_detail_without_oauth_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_DASHBOARD_ART_PASSWORD", "art-pass-123")
+    monkeypatch.setenv("ROONIE_DASHBOARD_JEN_PASSWORD", "jen-pass-123")
+    monkeypatch.delenv("ROONIE_OPERATOR_KEY", raising=False)
+    monkeypatch.setenv("ROONIE_TWITCH_AUTH_FLOW", "device_code")
+    monkeypatch.setenv("TWITCH_CLIENT_ID", "test-client-id")
+    monkeypatch.delenv("TWITCH_CLIENT_SECRET", raising=False)
+    monkeypatch.delenv("TWITCH_REDIRECT_URI", raising=False)
+    monkeypatch.setenv("TWITCH_NICK", "RoonieTheCat")
+    monkeypatch.setenv("TWITCH_CHANNEL", "ruleofrune")
+
+    def _fake_start_device(self, *, client_id: str, scopes: list[str]):
+        assert client_id == "test-client-id"
+        assert "chat:read" in scopes
+        return {
+            "ok": True,
+            "device_code": "device-code-123",
+            "user_code": "ABCD-EFGH",
+            "verification_uri": "https://www.twitch.tv/activate",
+            "verification_uri_complete": "https://www.twitch.tv/activate?device-code-123",
+            "expires_at": "2027-01-01T00:00:00+00:00",
+            "interval_seconds": 1,
+        }
+
+    def _fake_exchange_device(self, *, client_id: str, device_code: str):
+        assert client_id == "test-client-id"
+        assert device_code == "device-code-123"
+        return {
+            "ok": False,
+            "error": "DEVICE_TOKEN_EXCHANGE_FAILED",
+            "detail": "authorization_pending",
+        }
+
+    monkeypatch.setattr(
+        "roonie.dashboard_api.storage.DashboardStorage._start_twitch_device_code",
+        _fake_start_device,
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "roonie.dashboard_api.storage.DashboardStorage._exchange_twitch_device_code",
+        _fake_exchange_device,
+        raising=True,
+    )
+
+    server, thread = _start_server(runs_dir)
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        _, _, login_headers = _request_json_with_headers(
+            base,
+            "/api/auth/login",
+            method="POST",
+            payload={"username": "art", "password": "art-pass-123"},
+        )
+        cookie = _cookie_from_response_headers(login_headers)
+        headers = {"Cookie": cookie}
+        code_start, body_start = _request_json(
+            base,
+            "/api/twitch/connect_start?account=bot",
+            method="POST",
+            payload={},
+            headers=headers,
+        )
+        code_poll, body_poll = _request_json(
+            base,
+            "/api/twitch/connect_poll?account=bot",
+            method="POST",
+            payload={},
+            headers=headers,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    assert code_start == 200
+    assert body_start["ok"] is True
+    assert body_start["flow"] == "device_code"
+    assert code_poll == 200
+    assert body_poll["ok"] is True
+    assert body_poll["flow"] == "device_code"
+    assert body_poll["pending"] is True
+    assert body_poll["connected"] is False
+    assert int(body_poll.get("retry_after_seconds", 0)) >= 1
+
+
 def test_twitch_callback_completes_and_sets_connected(tmp_path: Path, monkeypatch) -> None:
     runs_dir = tmp_path / "runs"
     _write_sample_run(runs_dir)
