@@ -3,50 +3,19 @@
 import re
 from typing import Dict, Optional
 
+from .language_rules import (
+    contains_direct_verb_word,
+    is_live_greeting_message,
+    starts_with_direct_verb,
+)
 from .offline_responders import classify_safe_info_category, library_availability_response, respond
 from .safety_policy import classify_message_safety
 from .types import DecisionRecord, Env, Event
-
-_DIRECT_VERBS = (
-    "fix",
-    "switch",
-    "change",
-    "do",
-    "tell",
-    "show",
-    "check",
-    "turn",
-    "mute",
-    "unmute",
-    "refresh",
-    "restart",
-    "help",
-)
 
 _UNDERSPECIFIED_REQUESTS = [r"\bfix it\b", r"\bdo that again\b"]
 
 
 class OfflineDirector:
-    @staticmethod
-    def _is_live_greeting(message_lower: str, event: Event) -> bool:
-        text = str(message_lower or "").strip()
-        if not text:
-            return False
-        mode = str(event.metadata.get("mode", "")).strip().lower()
-        platform = str(event.metadata.get("platform", "")).strip().lower()
-        if mode != "live" and platform != "twitch":
-            return False
-        trimmed = re.sub(r"^@[\w_]+\s*", "", text).strip()
-        normalized = re.sub(r"[^a-z0-9'\s]", " ", trimmed)
-        tokens = [tok for tok in normalized.split() if tok]
-        if not tokens:
-            return False
-        if tokens[0] in {"hey", "heya", "hi", "hello", "yo", "sup"}:
-            return True
-        if len(tokens) >= 2 and tokens[0] in {"what's", "whats"} and tokens[1] == "up":
-            return True
-        return False
-
     def evaluate(self, event: Event, env: Env) -> DecisionRecord:
         message = event.message or ""
         message_stripped = message.strip()
@@ -59,10 +28,10 @@ class OfflineDirector:
         trigger_type = "banter"
         if "?" in message:
             trigger_type = "direct_question"
-        elif message_lower.startswith(_DIRECT_VERBS):
+        elif starts_with_direct_verb(message_lower):
             trigger_type = "direct_request"
         if addressed_to_roonie and trigger_type == "banter":
-            if any(f" {v} " in f" {message_lower} " for v in _DIRECT_VERBS):
+            if contains_direct_verb_word(message_lower):
                 trigger_type = "direct_request"
 
         ambiguity_detected = False
@@ -83,7 +52,11 @@ class OfflineDirector:
                 ambiguity_detected = True
 
         safety_classification, refusal_reason_code = classify_message_safety(message_stripped)
-        live_greeting = addressed_to_roonie and trigger_type == "banter" and self._is_live_greeting(message_lower, event)
+        live_greeting = addressed_to_roonie and trigger_type == "banter" and is_live_greeting_message(
+            message=message_lower,
+            mode=str(event.metadata.get("mode", "")),
+            platform=str(event.metadata.get("platform", "")),
+        )
 
         noop_bias_applied = True
         action = "NOOP"

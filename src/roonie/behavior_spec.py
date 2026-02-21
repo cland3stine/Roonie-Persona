@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from roonie.language_rules import is_pure_greeting_message
+
 
 CATEGORY_GREETING = "GREETING"
 CATEGORY_BANTER = "BANTER"
@@ -31,31 +33,11 @@ EVENT_COOLDOWN_SECONDS = {
 GREETING_COOLDOWN_SECONDS = 15.0
 
 
-_GREETING_RE = re.compile(r"^(?:@[\w_]+\s*)?(?:hey|heya|hi|hello|yo|sup|what'?s up|whats up)\b", re.IGNORECASE)
 _TRACK_ID_RE = re.compile(
     r"\b(track\s*id|what(?:'s| is)?\s+(?:this|that)\s+track|id\?|what\s+track|track\?)\b",
     re.IGNORECASE,
 )
 _QUESTION_RE = re.compile(r"\?")
-_FOLLOWUP_RE = re.compile(
-    r"\b(how|what|why|when|where|which|who|can|do|does|did|is|are)\b",
-    re.IGNORECASE,
-)
-
-
-def _looks_like_pure_greeting(text: str) -> bool:
-    m = _GREETING_RE.search(text)
-    if not m:
-        return False
-    tail = text[m.end() :].strip(" \t\r\n,!.?-")
-    if not tail:
-        return True
-    if _QUESTION_RE.search(tail):
-        return False
-    if _FOLLOWUP_RE.search(tail):
-        return False
-    # Keep one-word tails ("hey there") in greeting bucket.
-    return len(tail.split()) <= 2
 
 
 def classify_behavior_category(*, message: str, metadata: Dict[str, Any]) -> str:
@@ -68,7 +50,7 @@ def classify_behavior_category(*, message: str, metadata: Dict[str, Any]) -> str
         return CATEGORY_OTHER
     if _TRACK_ID_RE.search(text):
         return CATEGORY_TRACK_ID
-    if _looks_like_pure_greeting(text):
+    if is_pure_greeting_message(text):
         return CATEGORY_GREETING
     if _QUESTION_RE.search(text) or len(text) <= 80:
         return CATEGORY_BANTER

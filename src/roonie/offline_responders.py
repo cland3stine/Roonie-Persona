@@ -9,6 +9,7 @@ from pathlib import Path
 from difflib import SequenceMatcher
 from typing import Optional
 
+from .language_rules import is_pure_greeting_message
 from .types import DecisionRecord, Event
 
 
@@ -22,15 +23,7 @@ _RESPONSES = {
 
 
 def _is_greeting_message(message: str) -> bool:
-    text = (message or "").strip().lower()
-    if not text:
-        return False
-    return bool(
-        re.search(
-            r"^(?:@[\w_]+\s*)?(?:hey|heya|hi|hello|yo|sup|what'?s up|whats up)\b",
-            text,
-        )
-    )
+    return is_pure_greeting_message(message)
 
 
 def _repo_root() -> Path:

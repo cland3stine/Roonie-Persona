@@ -17,6 +17,7 @@ from roonie.behavior_spec import (
     behavior_guidance,
     classify_behavior_category,
 )
+from roonie.language_rules import starts_with_direct_verb
 from providers.registry import ProviderRegistry
 from providers.router import (
     classify_request,
@@ -30,25 +31,7 @@ from roonie.safety_policy import classify_message_safety
 from roonie.types import DecisionRecord, Env, Event
 
 
-_DIRECT_VERBS = (
-    "fix",
-    "switch",
-    "change",
-    "do",
-    "tell",
-    "show",
-    "check",
-    "turn",
-    "mute",
-    "unmute",
-    "refresh",
-    "restart",
-    "help",
-)
 _SHORT_ACK_MAX_CHARS = 220
-_DIRECT_VERB_PREFIX_RE = re.compile(
-    r"^(?:" + "|".join(re.escape(verb) for verb in _DIRECT_VERBS) + r")(?:\s|$)"
-)
 
 _TOPIC_ANCHOR_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9]*(?:\s+[A-Za-z0-9]+){0,2}\s+\d{1,3})\b")
 _TOPIC_ANCHOR_PHRASE_RE = re.compile(r"\b([A-Z][A-Za-z0-9]*(?:\s+[A-Za-z0-9][A-Za-z0-9']*){1,5})\b")
@@ -375,7 +358,7 @@ class ProviderDirector:
             return False
         if "?" in text:
             return True
-        if _DIRECT_VERB_PREFIX_RE.match(text):
+        if starts_with_direct_verb(text):
             return True
         if len(text) <= 3:
             return True
