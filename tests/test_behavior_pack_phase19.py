@@ -51,6 +51,7 @@ def _provider_event_stub(category: str, response_text: str, approved_emotes: Lis
                 },
                 "proposal": {
                     "text": response_text,
+                    "message_text": event.message,
                     "provider_used": "openai",
                     "route_used": "primary:openai",
                     "moderation_status": "allow",
@@ -454,6 +455,34 @@ def test_no_allow_list_does_not_auto_inject_emotes(tmp_path, monkeypatch) -> Non
     assert decision["response_text"] == "Hey there"
     assert "RoonieWave" not in decision["response_text"]
     assert "RoonieHi" not in decision["response_text"]
+
+
+def test_attached_approved_emote_token_is_spacing_normalized(tmp_path, monkeypatch) -> None:
+    _set_runtime_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_OUTPUT_DISABLED", "0")
+    monkeypatch.setattr(
+        "roonie.provider_director.route_generate",
+        lambda **kwargs: "@c0rcyra booth duty all night.ruleof6Paws",
+    )
+
+    out_path = run_payload(
+        {
+            "session_id": "phase19-emote-spacing-normalize",
+            "active_director": "ProviderDirector",
+            "inputs": [
+                _live_input(
+                    "evt-1",
+                    "@RoonieTheCat you there?",
+                    extra_metadata={"approved_emotes": ["ruleof6Paws (cat paws)"]},
+                )
+            ],
+        },
+        emit_outputs=False,
+    )
+    run_doc = json.loads(out_path.read_text(encoding="utf-8"))
+    decision = run_doc["decisions"][0]
+    assert decision["action"] == "RESPOND_PUBLIC"
+    assert decision["response_text"] == "@c0rcyra booth duty all night. ruleof6Paws"
 
 
 def test_live_stub_output_is_sanitized_when_flag_enabled(tmp_path, monkeypatch) -> None:

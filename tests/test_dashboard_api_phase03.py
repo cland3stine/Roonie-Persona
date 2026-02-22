@@ -1298,7 +1298,7 @@ def test_providers_status_seeds_defaults_when_missing(tmp_path: Path, monkeypatc
 
     assert providers_path.exists()
     assert status["active_provider"] == "openai"
-    assert status["approved_providers"] == ["openai", "grok"]
+    assert status["approved_providers"] == ["openai", "grok", "anthropic"]
     assert status["caps"]["daily_requests_max"] == 500
     assert status["usage"]["requests"] == 0
 
@@ -1341,7 +1341,7 @@ def test_providers_set_active_rejects_unapproved_provider(tmp_path: Path, monkey
             base,
             "/api/providers/set_active",
             method="POST",
-            payload={"provider": "anthropic"},
+            payload={"provider": "unsupported-provider"},
             headers=headers,
         )
     finally:
@@ -1703,6 +1703,162 @@ def test_routing_grok_blocked_by_openai_moderation_sets_suppression_reason(tmp_p
     assert context["provider_block_reason"] == "MODERATION_BLOCK"
 
 
+def test_routing_anthropic_blocked_by_openai_moderation_sets_suppression_reason(tmp_path: Path, monkeypatch) -> None:
+    from providers.registry import ProviderRegistry
+    from providers.router import route_generate
+
+    providers_path = tmp_path / "providers_config.json"
+    routing_path = tmp_path / "routing_config.json"
+    providers_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "active_provider": "anthropic",
+                "approved_providers": ["openai", "anthropic"],
+                "caps": {
+                    "daily_requests_max": 10,
+                    "daily_tokens_max": 0,
+                    "hard_stop_on_cap": True,
+                },
+                "usage": {
+                    "day": _today_ny(),
+                    "requests": 0,
+                    "tokens": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    routing_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "enabled": True,
+                "default_provider": "anthropic",
+                "general_route_mode": "active_provider",
+                "music_route_provider": "grok",
+                "moderation_provider": "openai",
+                "manual_override": "default",
+                "classification_rules": {
+                    "music_culture_keywords": ["track", "id"],
+                    "artist_title_pattern": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ROONIE_PROVIDERS_CONFIG_PATH", str(providers_path))
+    monkeypatch.setenv("ROONIE_ROUTING_CONFIG_PATH", str(routing_path))
+
+    reg = ProviderRegistry.from_dict(
+        {
+            "default_provider": "openai",
+            "providers": {
+                "openai": {"enabled": True},
+                "grok": {"enabled": False},
+                "anthropic": {"enabled": True},
+            },
+        }
+    )
+
+    context = {
+        "use_provider_config": True,
+        "message_text": "hello there",
+    }
+    out = route_generate(
+        registry=reg,
+        routing_cfg={},
+        prompt="ping",
+        context=context,
+        test_overrides={"moderation_behavior": "block"},
+    )
+    assert out is None
+    assert context["provider_selected"] == "anthropic"
+    assert context["moderation_provider_used"] == "openai"
+    assert context["moderation_result"] == "block"
+    assert context["suppression_reason"] == "MODERATION_BLOCK"
+    assert context["provider_block_reason"] == "MODERATION_BLOCK"
+
+
+def test_routing_general_random_approved_mode_selects_approved_provider(tmp_path: Path, monkeypatch) -> None:
+    from providers.registry import ProviderRegistry
+    from providers.router import route_generate
+
+    providers_path = tmp_path / "providers_config.json"
+    routing_path = tmp_path / "routing_config.json"
+    providers_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "active_provider": "openai",
+                "approved_providers": ["openai", "grok", "anthropic"],
+                "caps": {
+                    "daily_requests_max": 10,
+                    "daily_tokens_max": 0,
+                    "hard_stop_on_cap": True,
+                },
+                "usage": {
+                    "day": _today_ny(),
+                    "requests": 0,
+                    "tokens": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    routing_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "enabled": True,
+                "default_provider": "openai",
+                "general_route_mode": "random_approved",
+                "music_route_provider": "grok",
+                "moderation_provider": "openai",
+                "manual_override": "default",
+                "classification_rules": {
+                    "music_culture_keywords": ["track", "id"],
+                    "artist_title_pattern": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ROONIE_PROVIDERS_CONFIG_PATH", str(providers_path))
+    monkeypatch.setenv("ROONIE_ROUTING_CONFIG_PATH", str(routing_path))
+
+    reg = ProviderRegistry.from_dict(
+        {
+            "default_provider": "openai",
+            "providers": {
+                "openai": {"enabled": True},
+                "grok": {"enabled": True},
+                "anthropic": {"enabled": True},
+            },
+        }
+    )
+
+    context = {
+        "use_provider_config": True,
+        "message_text": "hows the night going",
+        "session_id": "sess-random",
+        "provider_roulette_seed": "seed-roulette-a",
+    }
+    out = route_generate(registry=reg, routing_cfg={}, prompt="ping", context=context)
+    assert isinstance(out, str)
+    provider_selected = str(context.get("provider_selected", ""))
+    assert provider_selected in {"openai", "grok", "anthropic"}
+    assert str(context.get("general_route_mode", "")) == "random_approved"
+    assert set(context.get("provider_roulette_candidates", [])) == {"openai", "grok", "anthropic"}
+    if provider_selected == "openai":
+        assert context.get("moderation_provider_used") is None
+        assert context.get("moderation_result") == "not_applicable"
+    else:
+        assert context.get("moderation_provider_used") == "openai"
+        assert context.get("moderation_result") == "allow"
+    assert out.startswith(f"[{provider_selected} stub]")
+
+
 def test_routing_config_patch_is_director_only_and_audited(tmp_path: Path, monkeypatch) -> None:
     runs_dir = tmp_path / "runs"
     _write_sample_run(runs_dir)
@@ -1743,7 +1899,7 @@ def test_routing_config_patch_is_director_only_and_audited(tmp_path: Path, monke
             base,
             "/api/routing/config",
             method="PATCH",
-            payload={"enabled": True, "manual_override": "force_grok"},
+            payload={"enabled": True, "manual_override": "force_grok", "general_route_mode": "random_approved"},
             headers=art_h,
         )
         _, routing_status = _request_json(base, "/api/routing/status", headers=art_h)
@@ -1759,6 +1915,7 @@ def test_routing_config_patch_is_director_only_and_audited(tmp_path: Path, monke
     assert art_body["ok"] is True
     assert routing_status["enabled"] is True
     assert routing_status["manual_override"] == "force_grok"
+    assert routing_status["general_route_mode"] == "random_approved"
     routing_action = next(item for item in op_log if item["action"] == "ROUTING_CONFIG_UPDATE")
     assert routing_action["username"] == "art"
     assert routing_action["role"] == "director"

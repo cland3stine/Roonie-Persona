@@ -3164,6 +3164,9 @@ class DashboardStorage:
             proposal = trace.get("proposal", {})
             if not isinstance(proposal, dict):
                 proposal = {}
+            routing = trace.get("routing", {})
+            if not isinstance(routing, dict):
+                routing = {}
             gates = trace.get("gates", {})
             if not isinstance(gates, dict):
                 gates = {}
@@ -3213,6 +3216,17 @@ class DashboardStorage:
             model_used_raw = proposal.get("model_used") or proposal.get("model") or None
             model_used = str(model_used_raw).strip() if model_used_raw else None
 
+            # Extract provider_used from proposal/routing trace, fallback to route.
+            provider_used_raw = (
+                proposal.get("provider_used")
+                or routing.get("provider_selected")
+                or self._active_provider_from_route(str(decision.get("route", "")))
+                or None
+            )
+            provider_used = str(provider_used_raw).strip().lower() if provider_used_raw else None
+            if provider_used not in {"openai", "grok", "anthropic"}:
+                provider_used = None
+
             # Extract behavior_category from trace or output
             behavior_raw = trace.get("behavior", {})
             if not isinstance(behavior_raw, dict):
@@ -3245,6 +3259,7 @@ class DashboardStorage:
                     context_active=context_active,
                     context_turns_used=context_turns_used,
                     model_used=model_used,
+                    provider_used=provider_used,
                     behavior_category=behavior_category,
                 )
             )
@@ -3607,6 +3622,7 @@ class DashboardStorage:
         return {
             "enabled": bool(routing_status.get("enabled", True)),
             "default_provider": str(routing_status.get("default_provider", "openai") or "openai"),
+            "general_route_mode": str(routing_status.get("general_route_mode", "active_provider") or "active_provider"),
             "music_route_provider": str(routing_status.get("music_route_provider", "grok") or "grok"),
             "moderation_provider": str(routing_status.get("moderation_provider", "openai") or "openai"),
             "manual_override": str(routing_status.get("manual_override", "default") or "default"),
@@ -3632,10 +3648,12 @@ class DashboardStorage:
             "old": {
                 "enabled": bool(old_cfg.get("enabled", True)),
                 "manual_override": str(old_cfg.get("manual_override", "default") or "default"),
+                "general_route_mode": str(old_cfg.get("general_route_mode", "active_provider") or "active_provider"),
             },
             "new": {
                 "enabled": bool(new_cfg.get("enabled", True)),
                 "manual_override": str(new_cfg.get("manual_override", "default") or "default"),
+                "general_route_mode": str(new_cfg.get("general_route_mode", "active_provider") or "active_provider"),
             },
         }
 

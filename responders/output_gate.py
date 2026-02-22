@@ -68,6 +68,16 @@ def _decision_approved_emotes(decision: Dict[str, Any]) -> List[str]:
     return out
 
 
+def _decision_message_text(decision: Dict[str, Any]) -> str:
+    proposal = _decision_trace(decision).get("proposal", {})
+    if isinstance(proposal, dict):
+        message_text = str(proposal.get("message_text", "")).strip()
+        if message_text:
+            return message_text
+    fallback = str(decision.get("message_text", "")).strip()
+    return fallback
+
+
 def _normalize_emote_name(raw: Any) -> str:
     text = str(raw or "").strip()
     if not text:
@@ -91,12 +101,10 @@ def _looks_like_emote_token(token: str) -> bool:
         prev = text[idx - 1]
         if curr.isupper() and (prev.islower() or prev.isdigit()):
             return True
-        if curr.isdigit() and prev.isalpha():
-            return True
     return False
 
 
-def _disallowed_emote_in_text(text: str, allowed: List[str]) -> str | None:
+def _disallowed_emote_in_text(text: str, allowed: List[str], *, message_text: str = "") -> str | None:
     allowed_set = {
         normalized
         for normalized in (_normalize_emote_name(item) for item in allowed)
@@ -104,10 +112,29 @@ def _disallowed_emote_in_text(text: str, allowed: List[str]) -> str | None:
     }
     if not allowed_set:
         return None
-    for token in _TOKEN_RE.findall(str(text or "")):
+    text_value = str(text or "")
+    message_tokens = {str(m.group(0) or "").strip().lower() for m in _TOKEN_RE.finditer(str(message_text or ""))}
+    matches = list(_TOKEN_RE.finditer(text_value))
+    token_count = len(matches)
+    for idx, match in enumerate(matches):
+        token = str(match.group(0) or "").strip()
+        if not token:
+            continue
+        # Viewer mentions (e.g., "@cland3stine") are user handles, not emote tokens.
+        if match.start() > 0 and text_value[match.start() - 1] == "@":
+            continue
         if token in allowed_set:
             continue
-        if _looks_like_emote_token(token):
+        # If the token came from the viewer's message, allow echoing it
+        # so Roonie can discuss unknown third-party emotes without suppression.
+        if token.lower() in message_tokens:
+            continue
+        if not _looks_like_emote_token(token):
+            continue
+        has_digit_or_underscore = any(ch.isdigit() for ch in token) or ("_" in token)
+        starts_lower = token[:1].islower()
+        is_last_token = idx == (token_count - 1)
+        if has_digit_or_underscore or starts_lower or is_last_token:
             return token
     return None
 
@@ -175,7 +202,12 @@ def maybe_emit(decisions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 continue
 
             approved_emotes = _decision_approved_emotes(d)
-            disallowed_emote = _disallowed_emote_in_text(str(d.get("response_text") or ""), approved_emotes)
+            input_message_text = _decision_message_text(d)
+            disallowed_emote = _disallowed_emote_in_text(
+                str(d.get("response_text") or ""),
+                approved_emotes,
+                message_text=input_message_text,
+            )
             if disallowed_emote:
                 outputs.append(
                     {

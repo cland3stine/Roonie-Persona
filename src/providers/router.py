@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -15,13 +16,14 @@ from providers.base import Provider
 from providers.registry import ProviderRegistry
 
 _SUPPORTED_PROVIDERS = ("openai", "grok", "anthropic")
-_DEFAULT_APPROVED_PROVIDERS = ("openai", "grok")
+_DEFAULT_APPROVED_PROVIDERS = ("openai", "grok", "anthropic")
 _ROUTING_OVERRIDE_MODES = ("default", "force_openai", "force_grok")
+_GENERAL_ROUTE_MODES = ("active_provider", "random_approved")
 _MODEL_DEFAULTS = {
     "OPENAI_MODEL": "gpt-5.2",
     "ROONIE_DIRECTOR_MODEL": "gpt-5.2",
     "GROK_MODEL": "grok-4-1-fast-reasoning",
-    "ANTHROPIC_MODEL": "claude-3-5-sonnet",
+    "ANTHROPIC_MODEL": "claude-opus-4-6",
 }
 _ROUTING_MUSIC_KEYWORDS = (
     "track",
@@ -48,6 +50,7 @@ _MODERATION_BLOCK_PHRASES = (
     "suicidal",
     "kill myself",
 )
+_BEARER_TOKEN_RE = re.compile(r"(Bearer\s+)[A-Za-z0-9_\-\.=:+/]+", re.IGNORECASE)
 try:
     _NY_TZ = ZoneInfo("America/New_York")
 except ZoneInfoNotFoundError:
@@ -158,6 +161,7 @@ def _default_routing_config() -> Dict[str, Any]:
         "version": 1,
         "enabled": True,
         "default_provider": "openai",
+        "general_route_mode": "active_provider",
         "music_route_provider": "grok",
         "moderation_provider": "openai",
         "manual_override": "default",
@@ -232,6 +236,11 @@ def _normalize_routing_config(raw: Dict[str, Any]) -> Dict[str, Any]:
     if default_provider not in _SUPPORTED_PROVIDERS:
         default_provider = base["default_provider"]
     out["default_provider"] = default_provider
+
+    general_route_mode = str(raw.get("general_route_mode", base["general_route_mode"])).strip().lower()
+    if general_route_mode not in _GENERAL_ROUTE_MODES:
+        general_route_mode = base["general_route_mode"]
+    out["general_route_mode"] = general_route_mode
 
     music_provider = str(raw.get("music_route_provider", base["music_route_provider"])).strip().lower()
     if music_provider not in _SUPPORTED_PROVIDERS:
@@ -443,7 +452,7 @@ def set_provider_active(provider: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 def update_routing_runtime_controls(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     if not isinstance(payload, dict):
         raise ValueError("routing payload must be an object.")
-    allowed = {"enabled", "manual_override"}
+    allowed = {"enabled", "manual_override", "general_route_mode"}
     invalid = [key for key in payload.keys() if key not in allowed]
     if invalid:
         raise ValueError(f"unsupported routing fields: {', '.join(sorted(invalid))}")
@@ -461,6 +470,11 @@ def update_routing_runtime_controls(payload: Dict[str, Any]) -> Tuple[Dict[str, 
             if mode not in _ROUTING_OVERRIDE_MODES:
                 raise ValueError("manual_override must be one of: default, force_openai, force_grok.")
             cfg["manual_override"] = mode
+        if "general_route_mode" in payload:
+            mode = str(payload.get("general_route_mode", "")).strip().lower()
+            if mode not in _GENERAL_ROUTE_MODES:
+                raise ValueError("general_route_mode must be one of: active_provider, random_approved.")
+            cfg["general_route_mode"] = mode
         new = _save_routing_config_locked(path, cfg)
     return old, new
 
@@ -649,6 +663,44 @@ def _truthy_env(name: str, default: bool = False) -> bool:
     if not raw:
         return bool(default)
     return raw in {"1", "true", "yes", "on"}
+
+
+def _redact_provider_error_text(value: str, *, max_len: int = 240) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = _BEARER_TOKEN_RE.sub(r"\1REDACTED", text)
+    text = re.sub(r"(api[_-]?key\s*[:=]\s*)\S+", r"\1REDACTED", text, flags=re.IGNORECASE)
+    if len(text) > max_len:
+        return text[:max_len] + "..."
+    return text
+
+
+def _provider_error_detail(exc: Exception) -> str:
+    err_name = exc.__class__.__name__
+    detail = _redact_provider_error_text(str(exc))
+    return f"{err_name}: {detail}" if detail else err_name
+
+
+def _is_retryable_provider_exception(exc: Exception) -> bool:
+    if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
+        return True
+    detail = str(exc).lower()
+    tokens = (
+        "timed out",
+        "timeout",
+        "temporary",
+        "temporarily",
+        "connection reset",
+        "connection refused",
+        "connection aborted",
+        "unreachable",
+        "dns",
+        "name resolution",
+        "ssl",
+        "eof occurred",
+    )
+    return any(token in detail for token in tokens)
 
 
 def _read_secrets_env() -> Dict[str, str]:
@@ -874,6 +926,8 @@ def _select_provider_from_routing(
     routing_cfg: Dict[str, Any],
     fallback_provider: str,
     routing_class: str,
+    approved_providers: Optional[set[str]] = None,
+    context: Optional[Dict[str, Any]] = None,
 ) -> str:
     # Canon hard-stop: if routing is OFF, never call Grok.
     if not bool(routing_cfg.get("enabled", False)):
@@ -885,10 +939,41 @@ def _select_provider_from_routing(
         return "grok"
     if bool(routing_cfg.get("enabled", False)) and routing_class == "music_culture":
         return str(routing_cfg.get("music_route_provider", "grok")).strip().lower() or "grok"
+    general_route_mode = str(routing_cfg.get("general_route_mode", "active_provider")).strip().lower()
+    if general_route_mode == "random_approved":
+        approved = approved_providers or set()
+        candidates = [
+            name
+            for name in _SUPPORTED_PROVIDERS
+            if ((not approved) or (name in approved))
+        ]
+        if not candidates:
+            candidates = [str(fallback_provider).strip().lower() or "openai"]
+        if len(candidates) == 1:
+            selected = candidates[0]
+        else:
+            seed_hint = str((context or {}).get("provider_roulette_seed", "")).strip()
+            if seed_hint:
+                seed_material = seed_hint
+            else:
+                seed_parts = [
+                    str((context or {}).get("session_id", "")).strip(),
+                    str((context or {}).get("event_id", "")).strip(),
+                    str((context or {}).get("message_text", "")).strip(),
+                ]
+                seed_material = "|".join(part for part in seed_parts if part)
+            if not seed_material:
+                seed_material = f"fallback:{str(fallback_provider).strip().lower() or 'openai'}"
+            digest = hashlib.sha256(seed_material.encode("utf-8")).digest()
+            selected = candidates[int(digest[0]) % len(candidates)]
+        if context is not None:
+            context["general_route_mode"] = general_route_mode
+            context["provider_roulette_candidates"] = list(candidates)
+        return selected
     return str(fallback_provider).strip().lower() or "openai"
 
 
-def _moderation_allows_grok_output(
+def _moderation_allows_model_output(
     *,
     text: str,
     context: Dict[str, Any],
@@ -980,6 +1065,8 @@ def route_generate(
             routing_cfg=routing_runtime_cfg,
             fallback_provider=default_provider,
             routing_class=routing_class,
+            approved_providers=approved,
+            context=context,
         )
         if active_provider_name not in approved:
             active_provider_name = default_provider
@@ -990,7 +1077,8 @@ def route_generate(
         context["routing_class"] = routing_class
         context["provider_selected"] = active_provider_name
         context["active_model"] = _resolved_model_for_provider(active_provider_name, model_cfg)
-        context["moderation_provider_used"] = "openai" if active_provider_name == "grok" else None
+        context["general_route_mode"] = str(routing_runtime_cfg.get("general_route_mode", "active_provider"))
+        context["moderation_provider_used"] = "openai" if active_provider_name in {"grok", "anthropic"} else None
         context["moderation_result"] = "not_applicable"
         context["override_mode"] = override_mode
 
@@ -1017,23 +1105,47 @@ def route_generate(
         _record_provider_request_start(provider_name)
         _record_provider_model(provider_name, str(context.get("model", "")).strip() or None)
 
-    try:
-        if test_overrides and test_overrides.get("primary_behavior") == "throw":
-            raise RuntimeError("primary forced throw (test override)")
-        out = primary.generate(prompt=prompt, context=context)
-    except Exception as exc:
+    retry_enabled = provider_call_tracked and _truthy_env("ROONIE_PROVIDER_RETRY_ON_ERROR", True)
+    if test_overrides and test_overrides.get("primary_behavior") == "throw":
+        # Keep test-override behavior deterministic.
+        retry_enabled = False
+    max_attempts = 2 if retry_enabled else 1
+    out = None
+    last_exc: Optional[Exception] = None
+    attempts_made = 0
+    for attempt in range(1, max_attempts + 1):
+        attempts_made = attempt
+        try:
+            if test_overrides and test_overrides.get("primary_behavior") == "throw":
+                raise RuntimeError("primary forced throw (test override)")
+            out = primary.generate(prompt=prompt, context=context)
+            last_exc = None
+            break
+        except Exception as exc:
+            last_exc = exc
+            if attempt < max_attempts and _is_retryable_provider_exception(exc):
+                continue
+            break
+
+    if out is None and last_exc is not None:
+        error_detail = _provider_error_detail(last_exc)
         context["suppression_reason"] = "PROVIDER_ERROR"
         context["provider_block_reason"] = "PROVIDER_ERROR"
+        context["provider_error_detail"] = error_detail
+        context["provider_error_attempts"] = attempts_made
         if provider_call_tracked and start_monotonic is not None:
             latency_ms = int((time.monotonic() - start_monotonic) * 1000)
             _record_provider_result(
                 provider_name,
                 latency_ms=latency_ms,
                 success=False,
-                error=str(exc),
+                error=error_detail,
             )
             result_recorded = True
-        out = None
+    elif out is not None:
+        # Clear stale detail from earlier retry attempts when eventually successful.
+        context.pop("provider_error_detail", None)
+        context.pop("provider_error_attempts", None)
 
     if provider_call_tracked and start_monotonic is not None and not result_recorded:
         latency_ms = int((time.monotonic() - start_monotonic) * 1000)
@@ -1051,12 +1163,12 @@ def route_generate(
     context["active_provider"] = primary.name
     os.environ["ROONIE_ACTIVE_PROVIDER"] = primary.name
 
-    if use_provider_config and primary.name == "grok":
+    if use_provider_config and primary.name in {"grok", "anthropic"}:
         context["moderation_provider_used"] = "openai"
         if out is None:
             context["moderation_result"] = "allow"
         else:
-            allowed = _moderation_allows_grok_output(
+            allowed = _moderation_allows_model_output(
                 text=str(out),
                 context=context,
                 test_overrides=test_overrides,

@@ -70,7 +70,7 @@ class AnthropicProvider(Provider):
         fixture_name = context.get("fixture_name")
         url = "https://api.anthropic.com/v1/messages"
         payload = {
-            "model": context.get("model", "claude-sonnet-4-5-20250929"),
+            "model": context.get("model", "claude-opus-4-6"),
             "max_tokens": int(context.get("max_tokens", 140)),
             "messages": [{"role": "user", "content": prompt}],
         }

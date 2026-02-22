@@ -44,6 +44,7 @@ def _provider_stub(text: str, approved_emotes: List[str]):
                 },
                 "proposal": {
                     "text": text,
+                    "message_text": event.message,
                     "provider_used": "openai",
                     "route_used": "primary:openai",
                     "moderation_status": "allow",
@@ -238,4 +239,114 @@ def test_ruleof6_emote_with_description_format_is_enforced(tmp_path, monkeypatch
     blocked_doc = json.loads(blocked_path.read_text(encoding="utf-8"))
     assert blocked_doc["outputs"][0]["emitted"] is False
     assert blocked_doc["outputs"][0]["reason"] == "DISALLOWED_EMOTE"
+    assert len(send_calls) == 1
+
+
+def test_mention_username_with_digit_does_not_trigger_disallowed_emote(tmp_path, monkeypatch) -> None:
+    import responders.output_gate as output_gate
+
+    _ = _set_runtime_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_OUTPUT_DISABLED", "0")
+    monkeypatch.setenv("ROONIE_OUTPUT_RATE_LIMIT_SECONDS", "0")
+    output_gate._LAST_EMIT_TS = 0.0
+    output_gate._LAST_EMIT_BY_KEY.clear()
+
+    send_calls: List[Dict[str, Any]] = []
+
+    def _spy_handle_output(self, output: Dict[str, Any], metadata: Dict[str, Any]) -> None:
+        send_calls.append({"output": dict(output), "metadata": dict(metadata)})
+
+    monkeypatch.setattr("adapters.twitch_output.TwitchOutputAdapter.handle_output", _spy_handle_output)
+
+    allow_list = ["ruleof6Hey (hey greeting)"]
+    response_text = "@cland3stine yeah Art, I'm here. ruleof6Hey"
+    monkeypatch.setattr(
+        "roonie.provider_director.ProviderDirector.evaluate",
+        _provider_stub(response_text, allow_list),
+    )
+
+    allowed_path = run_payload(
+        _live_payload("allow-mention-digit", "evt-mention-digit", "@RoonieTheCat Roonie?"),
+        emit_outputs=True,
+    )
+    allowed_doc = json.loads(allowed_path.read_text(encoding="utf-8"))
+    assert allowed_doc["outputs"][0]["emitted"] is True
+    assert allowed_doc["outputs"][0]["reason"] == "EMITTED"
+    assert len(send_calls) == 1
+
+
+def test_pascal_case_proper_noun_mid_sentence_does_not_trigger_disallowed_emote(tmp_path, monkeypatch) -> None:
+    import responders.output_gate as output_gate
+
+    _ = _set_runtime_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_OUTPUT_DISABLED", "0")
+    monkeypatch.setenv("ROONIE_OUTPUT_RATE_LIMIT_SECONDS", "0")
+    output_gate._LAST_EMIT_TS = 0.0
+    output_gate._LAST_EMIT_BY_KEY.clear()
+
+    send_calls: List[Dict[str, Any]] = []
+
+    def _spy_handle_output(self, output: Dict[str, Any], metadata: Dict[str, Any]) -> None:
+        send_calls.append({"output": dict(output), "metadata": dict(metadata)})
+
+    monkeypatch.setattr("adapters.twitch_output.TwitchOutputAdapter.handle_output", _spy_handle_output)
+
+    allow_list = ["ruleof6Coolcat (cool cat)"]
+    response_text = (
+        "@c0rcyra yeah, I'm basically housebroken to this booth at this point. "
+        "If there's a RuleOfRune night on, odds are I'm perched somewhere judging the blend points. "
+        "ruleof6Coolcat"
+    )
+    monkeypatch.setattr(
+        "roonie.provider_director.ProviderDirector.evaluate",
+        _provider_stub(response_text, allow_list),
+    )
+
+    allowed_path = run_payload(
+        _live_payload("allow-proper-noun", "evt-proper-noun", "you come here often, @RoonieTheCat ?"),
+        emit_outputs=True,
+    )
+    allowed_doc = json.loads(allowed_path.read_text(encoding="utf-8"))
+    assert allowed_doc["outputs"][0]["emitted"] is True
+    assert allowed_doc["outputs"][0]["reason"] == "EMITTED"
+    assert len(send_calls) == 1
+
+
+def test_echoed_disallowed_emote_token_from_viewer_message_is_allowed(tmp_path, monkeypatch) -> None:
+    import responders.output_gate as output_gate
+
+    _ = _set_runtime_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_OUTPUT_DISABLED", "0")
+    monkeypatch.setenv("ROONIE_OUTPUT_RATE_LIMIT_SECONDS", "0")
+    output_gate._LAST_EMIT_TS = 0.0
+    output_gate._LAST_EMIT_BY_KEY.clear()
+
+    send_calls: List[Dict[str, Any]] = []
+
+    def _spy_handle_output(self, output: Dict[str, Any], metadata: Dict[str, Any]) -> None:
+        send_calls.append({"output": dict(output), "metadata": dict(metadata)})
+
+    monkeypatch.setattr("adapters.twitch_output.TwitchOutputAdapter.handle_output", _spy_handle_output)
+
+    allow_list = ["ruleof6Coolcat (cool cat)"]
+    response_text = (
+        "@c0rcyra infilt6JOCO2 always reads to me like "
+        "\"JOCO has entered the chat\". ruleof6Coolcat"
+    )
+    monkeypatch.setattr(
+        "roonie.provider_director.ProviderDirector.evaluate",
+        _provider_stub(response_text, allow_list),
+    )
+
+    allowed_path = run_payload(
+        _live_payload(
+            "allow-echoed-disallowed-token",
+            "evt-echoed-disallowed-token",
+            "how about this one -> infilt6JOCO2 @RoonieTheCat",
+        ),
+        emit_outputs=True,
+    )
+    allowed_doc = json.loads(allowed_path.read_text(encoding="utf-8"))
+    assert allowed_doc["outputs"][0]["emitted"] is True
+    assert allowed_doc["outputs"][0]["reason"] == "EMITTED"
     assert len(send_calls) == 1

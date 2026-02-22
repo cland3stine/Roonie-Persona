@@ -407,6 +407,38 @@ class ProviderDirector:
         return out
 
     @staticmethod
+    def _normalize_emote_spacing(text: str, approved_emotes: List[str]) -> str:
+        value = str(text or "").strip()
+        if not value:
+            return ""
+        if not approved_emotes:
+            return value
+        names: List[str] = []
+        seen: set[str] = set()
+        for item in approved_emotes[:24]:
+            token = str(item or "").strip()
+            if not token:
+                continue
+            match = re.match(r"^([A-Za-z][A-Za-z0-9_]{2,31})\b", token)
+            if not match:
+                continue
+            name = str(match.group(1)).strip()
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            names.append(name)
+        if not names:
+            return value
+        # Providers can glue emotes to trailing punctuation/words ("...booth.ruleof6Paws").
+        # Ensure a delimiter so Twitch parses the emote token correctly.
+        normalized = value
+        for name in sorted(names, key=len, reverse=True):
+            pattern = rf"(?<![\s@])({re.escape(name)})(?=$|[\s\.,!?:;\)\]\}}])"
+            normalized = re.sub(pattern, r" \1", normalized)
+        return normalized
+
+    @staticmethod
     def _now_playing_text(metadata: Dict[str, Any]) -> str:
         direct = str(
             metadata.get("now_playing")
@@ -798,6 +830,7 @@ class ProviderDirector:
                     },
                     "proposal": {
                         "text": None,
+                        "message_text": event.message,
                         "provider_used": None,
                         "route_used": "none",
                         "moderation_status": "not_applicable",
@@ -881,6 +914,7 @@ class ProviderDirector:
                     category=category,
                     user_message=event.message,
                 )
+            response_text = self._normalize_emote_spacing(response_text, approved_emotes)
             action = "RESPOND_PUBLIC"
             route = f"primary:{provider_used}"
 
@@ -926,9 +960,11 @@ class ProviderDirector:
                 "moderation_provider_used": context.get("moderation_provider_used"),
                 "moderation_result": moderation_status,
                 "override_mode": str(context.get("override_mode", "default")),
+                "provider_error_attempts": context.get("provider_error_attempts"),
             },
             "proposal": {
                 "text": response_text,
+                "message_text": event.message,
                 "provider_used": provider_used,
                 "model_used": provider_model,
                 "route_used": route,
@@ -944,6 +980,7 @@ class ProviderDirector:
         if suppression_reason:
             trace["suppression_reason"] = suppression_reason
             trace["provider_block_reason"] = str(context.get("provider_block_reason") or suppression_reason)
+            trace["provider_error_detail"] = context.get("provider_error_detail")
 
         return DecisionRecord(
             case_id=str(event.metadata.get("case_id", "live")),

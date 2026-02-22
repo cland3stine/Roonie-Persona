@@ -124,7 +124,79 @@ function buildMessageLine(event) {
   return msg || decision || "";
 }
 
-function MessageBlock({ event }) {
+function _providerFromEvent(event) {
+  if (!event) return "unknown";
+  const direct = String(event.provider_used || event.provider || "").trim().toLowerCase();
+  if (direct === "openai" || direct === "grok" || direct === "anthropic") return direct;
+
+  const model = String(event.model_used || "").trim().toLowerCase();
+  if (model.includes("grok")) return "grok";
+  if (model.includes("claude") || model.includes("anthropic")) return "anthropic";
+  if (model.includes("gpt") || model.includes("openai") || model.startsWith("o1") || model.startsWith("o3")) {
+    return "openai";
+  }
+
+  const response = String(event.final_text || event.decision || "").trim().toLowerCase();
+  if (response.startsWith("[openai stub]")) return "openai";
+  if (response.startsWith("[grok stub]")) return "grok";
+  if (response.startsWith("[anthropic stub]")) return "anthropic";
+  return "unknown";
+}
+
+function _providerLabel(providerId) {
+  if (providerId === "openai") return "OpenAI";
+  if (providerId === "grok") return "Grok";
+  if (providerId === "anthropic") return "Anthropic";
+  return AWAITING;
+}
+
+function _providerColor(providerId) {
+  if (providerId === "openai") return "#7faacc";
+  if (providerId === "grok") return "#ff851b";
+  if (providerId === "anthropic") return "#cc7faa";
+  return "#555";
+}
+
+function _behaviorBadgeColor(category) {
+  const c = String(category || "").trim().toUpperCase();
+  if (c === "BANTER") return "#2ecc40";
+  if (c === "GREETING") return "#7faacc";
+  if (c === "TRACK_ID") return "#ff851b";
+  if (c === "OTHER") return "#777";
+  return "#666";
+}
+
+function LogMetaColumn({ event }) {
+  const providerId = _providerFromEvent(event);
+  const providerName = _providerLabel(providerId).toUpperCase();
+  const providerColor = _providerColor(providerId);
+  const category = String(event?.behavior_category || "").trim().toUpperCase() || AWAITING;
+  const categoryColor = _behaviorBadgeColor(category);
+
+  return (
+    <div style={{ minWidth: 140, display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-start" }}>
+      <Timestamp time={fmtTime(event?.ts)} />
+      <span style={{
+        fontSize: 9, padding: "2px 7px",
+        background: `${providerColor}12`, border: `1px solid ${providerColor}40`,
+        borderRadius: 2, color: providerColor, fontFamily: "'JetBrains Mono', monospace",
+        letterSpacing: 1, fontWeight: 700,
+      }}>
+        {`MODEL: ${providerName}`}
+      </span>
+      <span style={{
+        fontSize: 9, padding: "2px 7px",
+        background: `${categoryColor}12`, border: `1px solid ${categoryColor}40`,
+        borderRadius: 2, color: categoryColor, fontFamily: "'JetBrains Mono', monospace",
+        letterSpacing: 1, fontWeight: 700,
+      }}>
+        {category}
+      </span>
+    </div>
+  );
+}
+
+function MessageBlock({ event, showMeta = true }) {
   if (!event) return null;
   const user = (event.user_handle || "viewer").trim();
   const msg = (event.message_text || "").trim();
@@ -159,7 +231,7 @@ function MessageBlock({ event }) {
           No response
         </div>
       )}
-      {(model || category) && (
+      {showMeta && (model || category) && (
         <div style={{ fontSize: 9, color: "#555", fontFamily: "'JetBrains Mono', monospace", letterSpacing: 0.5 }}>
           {model ? `MODEL: ${model}` : ""}{model && category ? " | " : ""}{category || ""}
         </div>
@@ -855,21 +927,52 @@ function useDashboardData(activePage) {
   };
 
   const setProviderActive = async (provider) => {
+    const selected = String(provider || "").trim().toLowerCase();
+    if (!selected) return;
     const headers = buildOperatorHeaders({ json: true });
+    const readErrorDetail = async (response) => {
+      let detail = response.statusText;
+      try {
+        const body = await response.json();
+        detail = body.detail || body.error || detail;
+      } catch (_err) {
+        // Keep status text fallback.
+      }
+      return detail;
+    };
+    const patchGeneralRouteMode = async (mode) => {
+      const response = await apiFetch(`${API_BASE}/api/routing/config`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ general_route_mode: mode }),
+      });
+      if (!response.ok) {
+        const detail = await readErrorDetail(response);
+        console.error(`[Dashboard D5] routing mode failed (${response.status}) ${detail}`);
+        return false;
+      }
+      return true;
+    };
     try {
+      if (selected === "randomized") {
+        await patchGeneralRouteMode("random_approved");
+        return;
+      }
+
+      const currentlyRandomized = String(routingStatusData?.general_route_mode || "")
+        .trim()
+        .toLowerCase() === "random_approved";
+      if (currentlyRandomized) {
+        await patchGeneralRouteMode("active_provider");
+      }
+
       const response = await apiFetch(`${API_BASE}/api/providers/set_active`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ provider }),
+        body: JSON.stringify({ provider: selected }),
       });
       if (!response.ok) {
-        let detail = response.statusText;
-        try {
-          const body = await response.json();
-          detail = body.detail || body.error || detail;
-        } catch (_err) {
-          // Keep status text fallback.
-        }
+        const detail = await readErrorDetail(response);
         console.error(`[Dashboard D5] set_active failed (${response.status}) ${detail}`);
       }
     } catch (err) {
@@ -1954,9 +2057,9 @@ function LogsPage({ eventsData, suppressionsData, operatorLogData }) {
                   borderLeft: dtype !== "speak" ? `3px solid ${borderColorForType(dtype)}` : "3px solid transparent",
                   paddingLeft: 8,
                 }}>
-                  <Timestamp time={fmtTime(msg.ts)} />
+                  <LogMetaColumn event={msg} />
                   <Led color={ledColorForType(dtype)} size={5} />
-                  <MessageBlock event={msg} />
+                  <MessageBlock event={msg} showMeta={false} />
                 </div>
               );
             })}
@@ -2054,13 +2157,29 @@ function ProvidersPage({ statusData, providersStatusData, routingStatusData, sys
       moderationBlocks: readNumericField(source, "moderation_blocks"),
     };
   });
-  const ap = String(providersStatusData?.active_provider || "");
-  const a = providers.find((p) => p.id === ap) || null;
+  const generalRouteMode = String(routingStatusData?.general_route_mode || "active_provider").trim().toLowerCase() || "active_provider";
+  const randomizedActive = generalRouteMode === "random_approved";
+  const randomizedPool = providers.length ? providers.map((p) => p.name).join(" / ") : "OpenAI / Grok / Anthropic";
+  const randomizedOption = {
+    id: "randomized",
+    name: "Randomized",
+    model: `Per-response roulette (${randomizedPool}), OpenAI moderated`,
+    latency: null,
+    requests: null,
+    failures: null,
+    moderationBlocks: null,
+  };
+  const providerOptions = [...providers, randomizedOption];
+  const activeProviderId = String(providersStatusData?.active_provider || "").trim().toLowerCase();
+  const ap = randomizedActive ? "randomized" : activeProviderId;
+  const a = providerOptions.find((p) => p.id === ap) || null;
   const activeModel = String(
-    providersStatusData?.active_model
+    randomizedActive
+    ? randomizedOption.model
+    : (providersStatusData?.active_model
     || statusData?.active_model
     || (a && a.model)
-    || ""
+    || "")
   ).trim();
   const openaiModel = String(
     providerModels.openai
@@ -2077,6 +2196,11 @@ function ProvidersPage({ statusData, providersStatusData, routingStatusData, sys
     || resolvedModels.grok_model
     || ""
   ).trim() || AWAITING;
+  const anthropicModel = String(
+    providerModels.anthropic
+    || resolvedModels.anthropic_model
+    || ""
+  ).trim() || AWAITING;
   const usage = providersStatusData?.usage || {};
   const caps = providersStatusData?.caps || {};
   const requestsUsed = hasNumericField(usage, "requests") ? Number(usage.requests) : null;
@@ -2085,12 +2209,14 @@ function ProvidersPage({ statusData, providersStatusData, routingStatusData, sys
   const dailyCostText = tokensUsed !== null && tokensUsed > 0 ? `${tokensUsed}` : "0";
   const routing = routingStatusData || {};
   const routingEnabled = typeof routing.enabled === "boolean" ? routing.enabled : Boolean(statusData?.routing_enabled);
+  const routingModeLabel = generalRouteMode === "random_approved" ? "RANDOMIZED" : "ACTIVE_PROVIDER";
   const routingOverride = String(routing.manual_override || "default");
   const routingLast = routing.last_decision || {};
   const activeDirector = String(statusData?.active_director || providersStatusData?.active_director || "ProviderDirector");
   const dryRunEnabled = Boolean(statusData?.read_only_mode);
   const openaiHealth = healthMetrics.openai || {};
   const grokHealth = healthMetrics.grok || {};
+  const anthropicHealth = healthMetrics.anthropic || {};
   const healthRouting = systemHealthData?.routing || {};
   const memoryReachable = systemHealthData?.memory_db?.reachable;
   const ready = Boolean(readinessData?.ready);
@@ -2099,8 +2225,10 @@ function ProvidersPage({ statusData, providersStatusData, routingStatusData, sys
   const countText = (value) => (Number.isFinite(value) ? String(value) : AWAITING);
   const openaiLatency = readNumericField(openaiHealth, "avg_latency_ms");
   const grokLatency = readNumericField(grokHealth, "avg_latency_ms");
+  const anthropicLatency = readNumericField(anthropicHealth, "avg_latency_ms");
   const openaiBlocks = readNumericField(openaiHealth, "moderation_blocks");
   const grokBlocks = readNumericField(grokHealth, "moderation_blocks");
+  const anthropicBlocks = readNumericField(anthropicHealth, "moderation_blocks");
   const musicHits = readNumericField(healthRouting, "music_culture_hits");
   const generalHits = readNumericField(healthRouting, "general_hits");
   const overrideHits = readNumericField(healthRouting, "override_hits");
@@ -2133,10 +2261,10 @@ function ProvidersPage({ statusData, providersStatusData, routingStatusData, sys
         <div style={{ display: "flex", flexDirection: "column", gap: 0, background: "#111114", border: "1px solid #1f1f22", borderRadius: 2, padding: "6px 10px" }}>
           <div style={metaRowStyle}><span style={metaLabelStyle}>REQUESTS</span><span style={metaValueStyle}>{a?.requests !== null && Number.isFinite(a?.requests) ? a.requests : AWAITING}</span></div>
           <div style={metaRowStyle}><span style={metaLabelStyle}>MOD BLOCKS</span><span style={metaValueStyle}>{a?.moderationBlocks !== null && Number.isFinite(a?.moderationBlocks) ? a.moderationBlocks : AWAITING}</span></div>
-          <div style={metaRowStyle}><span style={metaLabelStyle}>ROUTING</span><span style={metaValueStyle}>{routingEnabled ? "ON" : "OFF"} ({routingOverride})</span></div>
+          <div style={metaRowStyle}><span style={metaLabelStyle}>ROUTING</span><span style={metaValueStyle}>{routingEnabled ? "ON" : "OFF"} ({routingOverride}, {routingModeLabel})</span></div>
           <div style={metaRowStyle}><span style={metaLabelStyle}>LAST CLASS</span><span style={metaValueStyle}>{routingClass ? routingClass.toUpperCase() : AWAITING}</span></div>
-          <div style={metaRowStyle}><span style={metaLabelStyle}>LATENCY</span><span style={metaValueStyle}>O: {openaiLatency !== null ? `${Math.round(openaiLatency)}ms` : AWAITING} / G: {grokLatency !== null ? `${Math.round(grokLatency)}ms` : AWAITING}</span></div>
-          <div style={metaRowStyle}><span style={metaLabelStyle}>MOD BLOCKS</span><span style={metaValueStyle}>O: {countText(openaiBlocks)} / G: {countText(grokBlocks)}</span></div>
+          <div style={metaRowStyle}><span style={metaLabelStyle}>LATENCY</span><span style={metaValueStyle}>O: {openaiLatency !== null ? `${Math.round(openaiLatency)}ms` : AWAITING} / G: {grokLatency !== null ? `${Math.round(grokLatency)}ms` : AWAITING} / A: {anthropicLatency !== null ? `${Math.round(anthropicLatency)}ms` : AWAITING}</span></div>
+          <div style={metaRowStyle}><span style={metaLabelStyle}>MOD BLOCKS</span><span style={metaValueStyle}>O: {countText(openaiBlocks)} / G: {countText(grokBlocks)} / A: {countText(anthropicBlocks)}</span></div>
           <div style={metaRowStyle}><span style={metaLabelStyle}>ROUTE HITS</span><span style={metaValueStyle}>M: {countText(musicHits)} / G: {countText(generalHits)} / O: {countText(overrideHits)}</span></div>
           <div style={metaRowStyle}><span style={metaLabelStyle}>MEMORY</span><span style={metaValueStyle}>{memoryReachable === true ? "OK" : (memoryReachable === false ? "ERR" : AWAITING)}</span></div>
           <div style={{ ...metaRowStyle, borderBottom: "none" }}><span style={metaLabelStyle}>READINESS</span><span style={{ ...metaValueStyle, color: ready ? "#2ecc40" : "#ff851b" }}>{readinessText}</span></div>
@@ -2158,8 +2286,8 @@ function ProvidersPage({ statusData, providersStatusData, routingStatusData, sys
           {requestsMax > 0 && requestsUsed !== null && Number.isFinite(requestsUsed) && <MeterBar value={Math.min(requestsUsed, requestsMax)} max={requestsMax} color="#7faacc" label={`Daily request cap (${requestsMax})`} />}
         </RackPanel>
         <RackPanel>
-          <RackLabel>Provider Switch - Pre-Approved Only</RackLabel>
-          {providers.map((p) => (
+          <RackLabel>Provider Mode - Pre-Approved + Randomized</RackLabel>
+          {providerOptions.map((p) => (
             <button key={p.id} onClick={() => setProviderActive(p.id)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: ap === p.id ? "#2a2a2e" : "transparent", border: `1px solid ${ap === p.id ? "#7faacc44" : "#252528"}`, borderRadius: 3, padding: "10px 14px", marginBottom: 6, cursor: "pointer", boxSizing: "border-box" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <Led color={ap === p.id ? "#2ecc40" : "#555"} size={6} />
@@ -2169,14 +2297,19 @@ function ProvidersPage({ statusData, providersStatusData, routingStatusData, sys
               <span style={{ fontSize: 9, letterSpacing: 1.5, color: ap === p.id ? "#2ecc40" : "#555", fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>{ap === p.id ? "ACTIVE" : "STANDBY"}</span>
             </button>
           ))}
-          {!providers.length && <AwaitingBlock style={{ padding: "6px 0" }} message="No providers configured" />}
+          {!providerOptions.length && <AwaitingBlock style={{ padding: "6px 0" }} message="No providers configured" />}
           <div style={{ display: "flex", flexDirection: "column", gap: 0, background: "#111114", border: "1px solid #1f1f22", borderRadius: 2, padding: "6px 10px", marginTop: 8 }}>
             <div style={metaRowStyle}><span style={metaLabelStyle}>OPENAI MODEL</span><span style={metaValueStyle}>{openaiModel}</span></div>
             <div style={metaRowStyle}><span style={metaLabelStyle}>DIRECTOR MODEL</span><span style={metaValueStyle}>{directorModel}</span></div>
-            <div style={{ ...metaRowStyle, borderBottom: "none" }}><span style={metaLabelStyle}>GROK MODEL</span><span style={metaValueStyle}>{grokModel}</span></div>
+            <div style={metaRowStyle}><span style={metaLabelStyle}>GROK MODEL</span><span style={metaValueStyle}>{grokModel}</span></div>
+            <div style={{ ...metaRowStyle, borderBottom: "none" }}><span style={metaLabelStyle}>ANTHROPIC MODEL</span><span style={metaValueStyle}>{anthropicModel}</span></div>
           </div>
           <div style={{ marginTop: 6, fontSize: 10, color: "#555", fontFamily: "'IBM Plex Sans', sans-serif" }}>
-            {routingEnabled ? "Grok receives music/culture routes when Routing is ON" : "Grok routing disabled (Routing OFF)"}
+            {!routingEnabled
+              ? "Grok routing disabled (Routing OFF)"
+              : (randomizedActive
+                ? "Randomized mode active: each response picks a provider from approved pool (OpenAI moderation still enforced)."
+                : "Grok receives music/culture routes when Routing is ON")}
           </div>
           <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
             <RackButton label={`ROUTING ${routingEnabled ? "ON" : "OFF"}`} color={routingEnabled ? "#2ecc40" : "#ff851b"} onClick={() => setRoutingEnabled(!routingEnabled)} />
@@ -3176,7 +3309,9 @@ export default function RoonieControlRoom() {
             <div style={{ fontSize: 9, color: "#333", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", lineHeight: 1.8 }}>
               <div>STREAM: {String(statusData.mode || "offline").toUpperCase()}</div>
               <div>TWITCH: {statusData.twitch_connected ? "CONNECTED" : "DISCONNECTED"}</div>
-              <div>PROVIDER: {(statusData.active_provider ? String(statusData.active_provider).toUpperCase() : "NONE")}</div>
+              <div>PROVIDER: {(String(routingStatusData?.general_route_mode || "").toLowerCase() === "random_approved"
+                ? "RANDOMIZED"
+                : (statusData.active_provider ? String(statusData.active_provider).toUpperCase() : "NONE"))}</div>
               <div>DIRECTOR: {String(statusData.active_director || "ProviderDirector").toUpperCase()}</div>
               <div>ROUTING: {statusData.routing_enabled ? "ON" : "OFF"}</div>
               <div
