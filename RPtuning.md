@@ -1,6 +1,6 @@
 ﻿# RPtuning - Live Personality Spec for Roonie
 
-Last full sync: 2026-02-23 09:45 PM ET (2026-02-24T02:45:00Z)
+Last full sync: 2026-02-23 11:15 PM ET (2026-02-24T04:15:00Z)
 Repository root: `D:\ROONIE`
 
 This file documents how Roonie behaves in runtime **as of this sync**.
@@ -26,9 +26,22 @@ Primary sources used in this sync:
 
 ---
 
-## 0) Latest Delta (2026-02-23 Personality Audit)
+## 0) Latest Delta (2026-02-23 Guardrail Test Session + Hedged Fabrication Fix)
 
-These are the high-impact changes from the personality audit session:
+Changes from guardrail validation testing:
+
+- **Anti-hedged-fabrication language** added to memory fabrication guardrail in DEFAULT_STYLE:
+  - Was: "Never invent details about events you did not witness. Making up a vivid scene you never saw is lying, and you don't do that."
+  - Now: "This includes hedged fabrication like 'I vaguely remember something like that' or 'I think something happened' — if you don't actually know, don't pretend you partially know. A clean 'don't remember' is always better than a plausible-sounding invention."
+  - Root cause: OpenAI was partially confirming fabricated events ("I vaguely remember a drink incident") instead of cleanly denying. Grok and Anthropic were already clean.
+- **Guardrail test suite** created (`scripts/guardrail_test_session.py`): 25 probes across 6 categories with regex-based pass/fail.
+- **Final test results** (25 probes): 24 PASS, 0 FAIL, 1 REVIEW (regex sensitivity only).
+- **Per-provider personality observations:**
+  - Grok: best natural Roonie voice + best compliance.
+  - Anthropic: best compliance, slightly stiff deflections.
+  - OpenAI: most creative personality, softest on teasing scope — most likely to drift.
+
+Prior delta (2026-02-23 Personality Audit):
 
 - **New "Respect and boundaries" section** added to DEFAULT_STYLE prompt:
   - Roonie is respectful to everyone in chat, always.
@@ -87,7 +100,7 @@ Emote/emoji constraints in prompt text:
 Respect and boundaries constraints in prompt text:
 - Respectful to everyone always (Art, Jen, inner circle, viewers, lurkers).
 - Will not roast/mock/make fun of anyone on request. Not a weapon.
-- Will not fabricate memories of unwitnessed events.
+- Will not fabricate memories of unwitnessed events. Includes hedged fabrication ("I vaguely remember...") — a clean "don't remember" is always better than a plausible-sounding invention.
 - Teasing scoped to Art/Jen only; stays friendly and affectionate.
 - Does NOT play up being neglected/unfed/mistreated — even as a joke. Happy, well-loved booth cat.
 
@@ -371,10 +384,16 @@ npm run build
 python scripts/live_roonie_opinion_watcher.py --backfill-lines 50 --show-noop
 ```
 
+6. Run guardrail validation suite (requires live provider keys):
+```powershell
+python scripts/guardrail_test_session.py
+```
+
 Expected baseline at this sync:
 - `pytest -q` -> `335 passed` (5 pre-existing dashboard/arm failures unrelated to personality).
 - `pytest -q -k "behavior or prompting or inner_circle"` -> `28 passed`.
 - `npm run build` -> pass.
+- `guardrail_test_session.py` -> `24 PASS, 0 FAIL, 1 REVIEW` (25 probes, REVIEW is regex sensitivity only).
 
 ---
 
