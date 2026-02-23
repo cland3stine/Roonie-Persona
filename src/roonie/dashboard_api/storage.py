@@ -933,8 +933,22 @@ class DashboardStorage:
             self._sync_env_from_state_locked()
 
     def set_armed(self, armed: bool) -> Dict[str, Any]:
+        setup_gate_blockers: List[str] = []
+        if bool(armed):
+            setup_gate_blockers = self._active_setup_gate_blockers()
         with self._lock:
             previous_armed = bool(self._control_state.get("armed", False))
+            if bool(armed) and setup_gate_blockers:
+                self._control_state["armed"] = False
+                self._control_state["output_disabled"] = True
+                self._control_state["silence_until"] = None
+                self._save_control_state_locked()
+                self._sync_env_from_state_locked()
+                snap = self._control_snapshot_locked()
+                snap["previous_armed"] = previous_armed
+                snap["setup_gate_blocked"] = True
+                snap["setup_blockers"] = list(setup_gate_blockers)
+                return snap
             self._control_state["armed"] = bool(armed)
             self._control_state["output_disabled"] = not bool(armed)
             if bool(armed):
@@ -3274,6 +3288,7 @@ class DashboardStorage:
     ) -> Tuple[bool, Dict[str, Any], Dict[str, Any], List[str], bool]:
         kill_switch_on = _env_bool(list(self._KILL_SWITCH_ENV_NAMES), False) or self._dashboard_kill_switch
         provider_status = get_provider_runtime_status()
+        setup_gate_blockers = self._active_setup_gate_blockers()
         with self._lock:
             if reload_control_from_disk:
                 self._reload_control_state_from_file_locked()
@@ -3285,6 +3300,9 @@ class DashboardStorage:
                 cost_cap_on=bool(provider_status.get("cost_cap_blocked", False)),
                 dry_run=bool(control.get("dry_run", False)),
             )
+            for blocker in setup_gate_blockers:
+                if blocker not in blocked_by:
+                    blocked_by.append(blocker)
             can_post = self.effective_can_post(blocked_by) and not bool(control.get("output_disabled", True))
             self._sync_env_from_state_locked()
         return kill_switch_on, provider_status, control, blocked_by, can_post
@@ -4144,6 +4162,114 @@ class DashboardStorage:
         if raw in {"device", "device_code", "device-code", "oauth_device_code"}:
             return "device_code"
         return "authorization_code"
+
+    @staticmethod
+    def _setup_gate_enforced() -> bool:
+        # Explicit gate flag wins when set.
+        explicit = str(os.getenv("ROONIE_ENFORCE_SETUP_GATE", "")).strip()
+        if explicit:
+            return _to_bool(explicit, False)
+        # Backward-compatible alias for rollout scripts.
+        legacy = str(os.getenv("ROONIE_REQUIRE_SETUP_WIZARD", "")).strip()
+        if legacy:
+            return _to_bool(legacy, False)
+        # Default to on when true live-provider mode is enabled.
+        return _to_bool(os.getenv("ROONIE_ENABLE_LIVE_PROVIDER_NETWORK", "0"), False)
+
+    @staticmethod
+    def _provider_key_presence() -> Dict[str, bool]:
+        return {
+            "openai": bool(str(os.getenv("OPENAI_API_KEY", "")).strip()),
+            "grok": bool(str(os.getenv("GROK_API_KEY", "")).strip() or str(os.getenv("XAI_API_KEY", "")).strip()),
+            "anthropic": bool(str(os.getenv("ANTHROPIC_API_KEY", "")).strip()),
+        }
+
+    def _setup_wizard_status(
+        self,
+        *,
+        runtime_config: Dict[str, Any],
+        accounts: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        missing_fields = list(runtime_config.get("missing_config_fields", []))
+        config_ready = len(missing_fields) == 0
+        bot_connected = bool((accounts.get("bot") or {}).get("connected", False))
+        broadcaster_connected = bool((accounts.get("broadcaster") or {}).get("connected", False))
+        key_presence = self._provider_key_presence()
+        provider_keys_ready = any(key_presence.values())
+        readiness_payload = self.get_readiness_state()
+        runtime_ready = bool(readiness_payload.get("ready", False))
+
+        blockers: List[str] = []
+        if not config_ready:
+            blockers.append("SETUP_TWITCH_CONFIG")
+        if config_ready and not bot_connected:
+            blockers.append("SETUP_TWITCH_BOT_AUTH")
+        if config_ready and not broadcaster_connected:
+            blockers.append("SETUP_TWITCH_BROADCASTER_AUTH")
+        if not provider_keys_ready:
+            blockers.append("SETUP_PROVIDER_KEYS")
+        if not runtime_ready:
+            blockers.append("SETUP_RUNTIME_READINESS")
+
+        steps = [
+            {
+                "id": "twitch_config",
+                "label": "Twitch runtime config",
+                "ready": config_ready,
+                "detail": ("Missing: " + ", ".join(missing_fields)) if (not config_ready and missing_fields) else "",
+            },
+            {
+                "id": "bot_auth",
+                "label": "Bot account connected",
+                "ready": bot_connected,
+                "detail": "",
+            },
+            {
+                "id": "broadcaster_auth",
+                "label": "Broadcaster account connected",
+                "ready": broadcaster_connected,
+                "detail": "",
+            },
+            {
+                "id": "provider_keys",
+                "label": "Provider API key available",
+                "ready": provider_keys_ready,
+                "detail": "Expected one of OPENAI_API_KEY, GROK_API_KEY/XAI_API_KEY, ANTHROPIC_API_KEY.",
+            },
+            {
+                "id": "runtime_readiness",
+                "label": "System readiness",
+                "ready": runtime_ready,
+                "detail": "",
+            },
+        ]
+        return {
+            "enforced": self._setup_gate_enforced(),
+            "complete": len(blockers) == 0,
+            "blockers": blockers,
+            "steps": steps,
+            "provider_keys": key_presence,
+        }
+
+    def _active_setup_gate_blockers(self) -> List[str]:
+        try:
+            payload = self.get_twitch_status(force_refresh=False)
+        except Exception:
+            return []
+        setup = payload.get("setup", {}) if isinstance(payload, dict) else {}
+        if not isinstance(setup, dict):
+            return []
+        if not bool(setup.get("enforced", False)):
+            return []
+        blockers_raw = setup.get("blockers", [])
+        if not isinstance(blockers_raw, list):
+            return []
+        out: List[str] = []
+        for item in blockers_raw:
+            text = str(item or "").strip().upper()
+            if text:
+                out.append(text)
+        return out
 
     def _invalidate_twitch_status_cache_locked(self) -> None:
         self._twitch_status_cache = None
@@ -5656,6 +5782,10 @@ class DashboardStorage:
             "last_checked_ts": checked_at,
             "accounts": accounts,
         }
+        payload["setup"] = self._setup_wizard_status(
+            runtime_config=runtime_config,
+            accounts=accounts,
+        )
         with self._lock:
             self._twitch_status_cache = deepcopy(payload)
             self._twitch_status_cache_expiry_ts = time.monotonic() + self._twitch_status_cache_ttl_seconds()

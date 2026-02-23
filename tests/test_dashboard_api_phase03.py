@@ -3515,6 +3515,77 @@ def test_twitch_status_reports_missing_primary_channel_and_disables_connect(tmp_
     assert status["accounts"]["bot"]["connect_available"] is False
 
 
+def test_twitch_status_includes_setup_wizard_payload(tmp_path: Path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_ENFORCE_SETUP_GATE", "1")
+    monkeypatch.delenv("ROONIE_OPERATOR_KEY", raising=False)
+    monkeypatch.delenv("TWITCH_CLIENT_ID", raising=False)
+    monkeypatch.delenv("TWITCH_CLIENT_SECRET", raising=False)
+    monkeypatch.delenv("TWITCH_REDIRECT_URI", raising=False)
+    monkeypatch.delenv("TWITCH_CHANNEL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("GROK_API_KEY", raising=False)
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    server, thread = _start_server(runs_dir)
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        _, status = _request_json(base, "/api/twitch/status")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    setup = status.get("setup", {})
+    assert isinstance(setup, dict)
+    assert setup.get("enforced") is True
+    assert setup.get("complete") is False
+    blockers = set(setup.get("blockers", []))
+    assert "SETUP_TWITCH_CONFIG" in blockers
+    assert "SETUP_PROVIDER_KEYS" in blockers
+    assert isinstance(setup.get("steps", []), list)
+
+
+def test_setup_gate_blocks_arm_when_enforced(tmp_path: Path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_ENFORCE_SETUP_GATE", "1")
+    monkeypatch.setenv("ROONIE_OPERATOR_KEY", "op-key-123")
+    monkeypatch.delenv("TWITCH_CLIENT_ID", raising=False)
+    monkeypatch.delenv("TWITCH_CLIENT_SECRET", raising=False)
+    monkeypatch.delenv("TWITCH_REDIRECT_URI", raising=False)
+    monkeypatch.delenv("TWITCH_CHANNEL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("GROK_API_KEY", raising=False)
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    headers = {"X-ROONIE-OP-KEY": "op-key-123", "X-ROONIE-ACTOR": "system"}
+
+    server, thread = _start_server(runs_dir)
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        code, body = _request_json(base, "/api/live/arm", method="POST", payload={}, headers=headers)
+        _, status = _request_json(base, "/api/status")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    assert code == 200
+    assert body["ok"] is True
+    state = body.get("state", {})
+    assert state.get("setup_gate_blocked") is True
+    assert state.get("armed") is False
+    assert "SETUP_TWITCH_CONFIG" in list(state.get("setup_blockers", []))
+    assert status["armed"] is False
+    assert "SETUP_TWITCH_CONFIG" in list(status.get("blocked_by", []))
+    assert status["can_post"] is False
+
+
 def test_twitch_connect_start_uses_primary_channel_from_config_file(tmp_path: Path, monkeypatch) -> None:
     runs_dir = tmp_path / "runs"
     _write_sample_run(runs_dir)
