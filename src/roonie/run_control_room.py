@@ -147,9 +147,33 @@ def _twitch_refresh_loop_interval_seconds() -> float:
     return max(5.0, min(parsed, 900.0))
 
 
+def _runtime_entry_root() -> Path:
+    if bool(getattr(sys, "frozen", False)):
+        exe_path = str(getattr(sys, "executable", "")).strip()
+        if exe_path:
+            try:
+                return Path(exe_path).resolve().parent
+            except OSError:
+                pass
+    return Path.cwd().resolve()
+
+
+def _pin_setup_gate_launch_default() -> Dict[str, str]:
+    explicit = str(os.getenv("ROONIE_ENFORCE_SETUP_GATE", "")).strip()
+    if explicit:
+        return {"value": explicit, "source": "explicit"}
+    legacy = str(os.getenv("ROONIE_REQUIRE_SETUP_WIZARD", "")).strip()
+    if legacy:
+        os.environ["ROONIE_ENFORCE_SETUP_GATE"] = legacy
+        return {"value": legacy, "source": "legacy_alias"}
+    os.environ["ROONIE_ENFORCE_SETUP_GATE"] = "1"
+    return {"value": "1", "source": "launch_default"}
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _arg_parser().parse_args(argv)
-    repo_root = Path.cwd()
+    repo_root = _runtime_entry_root()
+    setup_gate_pin = _pin_setup_gate_launch_default()
     llm_seed_stats = seed_process_env_from_llm_key_store(overwrite_existing=False)
     secrets_stats = _load_secrets_env_into_process(
         repo_root / "config" / "secrets.env",
@@ -176,6 +200,12 @@ def main(argv: list[str] | None = None) -> int:
     os.environ["ROONIE_DASHBOARD_LOGS_DIR"] = str(paths.logs_dir)
     os.environ["ROONIE_DASHBOARD_RUNS_DIR"] = str(paths.runs_dir)
     os.environ["ROONIE_DASHBOARD_PORT"] = str(int(args.port))
+    _append_log(
+        paths.control_log_path,
+        "SETUP_GATE: "
+        f"ROONIE_ENFORCE_SETUP_GATE={setup_gate_pin.get('value')} "
+        f"source={setup_gate_pin.get('source')}",
+    )
     _append_log(
         paths.control_log_path,
         "SECRETS_ENV: "
@@ -377,3 +407,5 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import os
@@ -58,12 +58,18 @@ def resolve_runtime_paths(
     log_dir: str = "logs",
 ) -> RuntimePaths:
     repo = repo_root.resolve()
-    runtime_root = repo
-
     data_env = (os.getenv("ROONIE_DASHBOARD_DATA_DIR") or "").strip()
     logs_env = (os.getenv("ROONIE_DASHBOARD_LOGS_DIR") or "").strip()
     runs_env = (os.getenv("ROONIE_DASHBOARD_RUNS_DIR") or "").strip()
     persona_env = (os.getenv("ROONIE_PERSONA_POLICY_PATH") or "").strip()
+
+    runtime_root = repo
+    if os.name == "nt" and (not data_env and not logs_env and not runs_env):
+        localapp = str(os.getenv("LOCALAPPDATA", "")).strip()
+        repo_text = str(repo).replace("/", "\\").lower()
+        in_program_files = ("\\program files\\" in repo_text) or ("\\program files (x86)\\" in repo_text)
+        if localapp and in_program_files:
+            runtime_root = (Path(localapp) / "RoonieControlRoom").resolve()
 
     data_dir = _resolve_path(runtime_root, data_env) if data_env else (runtime_root / "data")
     logs_dir = _resolve_path(runtime_root, logs_env) if logs_env else _resolve_path(runtime_root, log_dir)
@@ -291,3 +297,4 @@ def run_preflight(paths: RuntimePaths) -> Dict[str, Any]:
         "items": items,
         "blocking_reasons": blocking_reasons,
     }
+

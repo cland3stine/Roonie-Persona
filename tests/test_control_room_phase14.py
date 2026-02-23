@@ -4,6 +4,7 @@ import json
 import os
 import socket
 import threading
+import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -19,6 +20,8 @@ from roonie.run_control_room import (
     _arg_parser as _control_room_arg_parser,
     _load_secrets_env_into_process,
     main as run_control_room_main,
+    _runtime_entry_root,
+    _pin_setup_gate_launch_default,
 )
 
 
@@ -192,17 +195,86 @@ def test_readiness_endpoint_returns_structure(tmp_path: Path, monkeypatch) -> No
 def test_runtime_path_resolver_prefers_localappdata_on_windows(tmp_path: Path, monkeypatch) -> None:
     if os.name != "nt":
         return
+    repo_root = tmp_path / "Program Files" / "RoonieControlRoom"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    localapp = tmp_path / "localapp"
+    monkeypatch.setenv("LOCALAPPDATA", str(localapp))
+    monkeypatch.delenv("ROONIE_DASHBOARD_DATA_DIR", raising=False)
+    monkeypatch.delenv("ROONIE_DASHBOARD_LOGS_DIR", raising=False)
+    monkeypatch.delenv("ROONIE_DASHBOARD_RUNS_DIR", raising=False)
+
+    paths = resolve_runtime_paths(repo_root=repo_root, runs_dir="runs", log_dir="logs")
+    expected_root = (localapp / "RoonieControlRoom").resolve()
+    assert paths.runtime_root == expected_root
+    assert paths.data_dir == expected_root / "data"
+    assert paths.logs_dir == expected_root / "logs"
+    assert paths.runs_dir == expected_root / "runs"
+
+
+def test_runtime_path_resolver_defaults_to_repo_root_when_not_program_files(tmp_path: Path, monkeypatch) -> None:
     repo_root = tmp_path / "repo"
     repo_root.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localapp"))
     monkeypatch.delenv("ROONIE_DASHBOARD_DATA_DIR", raising=False)
     monkeypatch.delenv("ROONIE_DASHBOARD_LOGS_DIR", raising=False)
     monkeypatch.delenv("ROONIE_DASHBOARD_RUNS_DIR", raising=False)
 
     paths = resolve_runtime_paths(repo_root=repo_root, runs_dir="runs", log_dir="logs")
     assert paths.runtime_root == repo_root.resolve()
-    assert paths.data_dir == paths.runtime_root / "data"
-    assert paths.logs_dir == paths.runtime_root / "logs"
+    assert paths.data_dir == repo_root.resolve() / "data"
+    assert paths.logs_dir == repo_root.resolve() / "logs"
+
+
+def test_runtime_entry_root_uses_cwd_when_not_frozen(tmp_path: Path, monkeypatch) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(repo_root)
+    monkeypatch.delattr(sys, "frozen", raising=False)
+
+    assert _runtime_entry_root() == repo_root.resolve()
+
+
+def test_runtime_entry_root_uses_executable_parent_when_frozen(tmp_path: Path, monkeypatch) -> None:
+    exe_dir = tmp_path / "Program Files" / "RoonieControlRoom"
+    exe_dir.mkdir(parents=True, exist_ok=True)
+    exe_path = exe_dir / "RoonieControlRoom.exe"
+    exe_path.write_text("", encoding="utf-8")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(exe_path), raising=False)
+
+    assert _runtime_entry_root() == exe_dir.resolve()
+
+
+def test_pin_setup_gate_launch_default_sets_enforced_when_unset(monkeypatch) -> None:
+    monkeypatch.delenv("ROONIE_ENFORCE_SETUP_GATE", raising=False)
+    monkeypatch.delenv("ROONIE_REQUIRE_SETUP_WIZARD", raising=False)
+
+    result = _pin_setup_gate_launch_default()
+
+    assert os.getenv("ROONIE_ENFORCE_SETUP_GATE") == "1"
+    assert result == {"value": "1", "source": "launch_default"}
+    os.environ.pop("ROONIE_ENFORCE_SETUP_GATE", None)
+
+
+def test_pin_setup_gate_launch_default_respects_explicit_env(monkeypatch) -> None:
+    monkeypatch.setenv("ROONIE_ENFORCE_SETUP_GATE", "0")
+    monkeypatch.setenv("ROONIE_REQUIRE_SETUP_WIZARD", "1")
+
+    result = _pin_setup_gate_launch_default()
+
+    assert os.getenv("ROONIE_ENFORCE_SETUP_GATE") == "0"
+    assert result == {"value": "0", "source": "explicit"}
+    os.environ.pop("ROONIE_ENFORCE_SETUP_GATE", None)
+
+
+def test_pin_setup_gate_launch_default_promotes_legacy_alias(monkeypatch) -> None:
+    monkeypatch.delenv("ROONIE_ENFORCE_SETUP_GATE", raising=False)
+    monkeypatch.setenv("ROONIE_REQUIRE_SETUP_WIZARD", "0")
+
+    result = _pin_setup_gate_launch_default()
+
+    assert os.getenv("ROONIE_ENFORCE_SETUP_GATE") == "0"
+    assert result == {"value": "0", "source": "legacy_alias"}
+    os.environ.pop("ROONIE_ENFORCE_SETUP_GATE", None)
 
 
 def test_safe_start_defaults_force_disarmed_output_disabled(tmp_path: Path, monkeypatch) -> None:
@@ -213,6 +285,7 @@ def test_safe_start_defaults_force_disarmed_output_disabled(tmp_path: Path, monk
     monkeypatch.setenv("ROONIE_DASHBOARD_DATA_DIR", str(data_dir))
     monkeypatch.setenv("ROONIE_DASHBOARD_LOGS_DIR", str(logs_dir))
     monkeypatch.setenv("ROONIE_KILL_SWITCH", "0")
+    monkeypatch.setenv("ROONIE_ENFORCE_SETUP_GATE", "0")
 
     readiness_state = {
         "ready": True,
@@ -254,6 +327,7 @@ def test_twitch_output_enabled_tracks_active_state(tmp_path: Path, monkeypatch) 
     monkeypatch.setenv("ROONIE_DASHBOARD_DATA_DIR", str(data_dir))
     monkeypatch.setenv("ROONIE_DASHBOARD_LOGS_DIR", str(logs_dir))
     monkeypatch.setenv("ROONIE_KILL_SWITCH", "0")
+    monkeypatch.setenv("ROONIE_ENFORCE_SETUP_GATE", "0")
 
     readiness_state = {
         "ready": True,

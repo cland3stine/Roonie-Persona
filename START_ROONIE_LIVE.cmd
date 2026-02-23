@@ -16,10 +16,13 @@ if not exist "%RUNNER%" (
   exit /b 1
 )
 
+if not defined ROONIE_ENFORCE_SETUP_GATE set "ROONIE_ENFORCE_SETUP_GATE=1"
+
 echo [ROONIE] Repo root: %REPO_ROOT%
 echo [ROONIE] Python: %PY_EXE%
 echo [ROONIE] Launching Control Room for LAN monitoring...
 echo [ROONIE] Bind: 0.0.0.0:8787
+echo [ROONIE] Setup gate: %ROONIE_ENFORCE_SETUP_GATE% (ROONIE_ENFORCE_SETUP_GATE)
 echo.
 
 "%PY_EXE%" "%RUNNER%" --host 0.0.0.0 --port 8787 --start-live-chat --live-account bot %*
@@ -31,3 +34,4 @@ if not "%ERR%"=="0" (
 )
 
 exit /b %ERR%
+

@@ -19,6 +19,7 @@ def _set_dashboard_paths(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("ROONIE_ROUTING_CONFIG_PATH", str(tmp_path / "data" / "routing_config.json"))
     monkeypatch.setenv("ROONIE_DASHBOARD_ART_PASSWORD", "art-pass-123")
     monkeypatch.setenv("ROONIE_DASHBOARD_JEN_PASSWORD", "jen-pass-123")
+    monkeypatch.setenv("ROONIE_ENFORCE_SETUP_GATE", "0")
     _SESSION_COOKIE_CACHE.clear()
 
 

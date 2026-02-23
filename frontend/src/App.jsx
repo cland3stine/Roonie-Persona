@@ -101,6 +101,14 @@ const TEXT_STYLES = {
   },
 };
 
+const SETUP_BLOCKER_GUIDANCE = {
+  SETUP_TWITCH_CONFIG: "Set Twitch runtime config (TWITCH_CLIENT_ID and primary channel) before connecting accounts.",
+  SETUP_TWITCH_BOT_AUTH: "Connect the bot account and finish Twitch approval.",
+  SETUP_TWITCH_BROADCASTER_AUTH: "Connect the broadcaster account and finish Twitch approval.",
+  SETUP_PROVIDER_KEYS: "Provide at least one provider key (OPENAI_API_KEY, GROK_API_KEY/XAI_API_KEY, or ANTHROPIC_API_KEY).",
+  SETUP_RUNTIME_READINESS: "Resolve remaining runtime readiness blockers before arming live mode.",
+};
+
 function AwaitingInline({ style = {}, message }) {
   return <span style={{ ...TEXT_STYLES.muted, ...style }}>{message || AWAITING}</span>;
 }
@@ -2339,6 +2347,27 @@ function AuthPage({ twitchStatusData, twitchConnectStart, twitchConnectPoll, twi
   const missingConfigFields = Array.isArray(twitchStatusData?.missing_config_fields) ? twitchStatusData.missing_config_fields : [];
   const primaryChannelRaw = String(twitchStatusData?.primary_channel || "").trim();
   const primaryChannel = primaryChannelRaw ? `#${primaryChannelRaw.replace(/^#/, "")}` : "";
+  const setup = (twitchStatusData && typeof twitchStatusData.setup === "object") ? twitchStatusData.setup : null;
+  const setupAvailable = Boolean(setup);
+  const setupEnforced = Boolean(setup?.enforced);
+  const setupComplete = Boolean(setup?.complete);
+  const setupBlockers = Array.isArray(setup?.blockers)
+    ? setup.blockers.map((item) => String(item || "").trim().toUpperCase()).filter(Boolean)
+    : [];
+  const setupSteps = Array.isArray(setup?.steps) ? setup.steps : [];
+  const providerKeyPresence = (setup?.provider_keys && typeof setup.provider_keys === "object") ? setup.provider_keys : {};
+  const providerKeyRows = [
+    { id: "openai", env: "OPENAI_API_KEY", ready: Boolean(providerKeyPresence.openai) },
+    { id: "grok", env: "GROK_API_KEY/XAI_API_KEY", ready: Boolean(providerKeyPresence.grok) },
+    { id: "anthropic", env: "ANTHROPIC_API_KEY", ready: Boolean(providerKeyPresence.anthropic) },
+  ];
+  const setupStateLabel = !setupAvailable
+    ? "UNKNOWN"
+    : (setupComplete ? "READY" : (setupEnforced ? "BLOCKED" : "INCOMPLETE"));
+  const setupStateColor = !setupAvailable
+    ? "#666"
+    : (setupComplete ? "#2ecc40" : (setupEnforced ? "#ff4136" : "#ff851b"));
+  const setupGateLabel = setupEnforced ? "ENFORCED" : "ADVISORY";
   const caps = [
     { name: "Read chat events", on: Boolean(scopesPresent["chat:read"]) },
     { name: "Send chat messages", on: Boolean(scopesPresent["chat:edit"]) },
@@ -2689,6 +2718,89 @@ function AuthPage({ twitchStatusData, twitchConnectStart, twitchConnectPoll, twi
         <AcctRow account={broadcaster} />
       </RackPanel>
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <RackPanel>
+          <RackLabel>First-Run Setup Gate</RackLabel>
+          {setupAvailable ? (
+            <>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <Led color={setupStateColor} size={8} pulse={setupComplete} />
+                  <span style={{ fontSize: 13, fontWeight: 700, color: setupStateColor, fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1.3 }}>
+                    {setupStateLabel}
+                  </span>
+                </div>
+                <span style={{ fontSize: 9, padding: "3px 8px", background: setupEnforced ? "#ff413612" : "#7faacc12", border: `1px solid ${setupEnforced ? "#ff413633" : "#7faacc33"}`, borderRadius: 2, color: setupEnforced ? "#ff4136" : "#7faacc", letterSpacing: 1.3, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>
+                  {`GATE ${setupGateLabel}`}
+                </span>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 10 }}>
+                {setupSteps.map((step) => {
+                  const stepReady = Boolean(step?.ready);
+                  const stepLabel = String(step?.label || step?.id || "Setup step").trim();
+                  const stepDetail = String(step?.detail || "").trim();
+                  const stepColor = stepReady ? "#2ecc40" : "#ff851b";
+                  return (
+                    <div key={String(step?.id || stepLabel)} style={{ padding: "8px 10px", background: "#111114", border: "1px solid #2a2a2e", borderRadius: 2 }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                          <Led color={stepColor} size={6} pulse={stepReady} />
+                          <span style={{ fontSize: 12, color: stepReady ? "#bbb" : "#aaa", fontFamily: "'IBM Plex Sans', sans-serif", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {stepLabel}
+                          </span>
+                        </div>
+                        <span style={{ fontSize: 9, color: stepColor, fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1.2, fontWeight: 700 }}>
+                          {stepReady ? "READY" : "NEEDS ACTION"}
+                        </span>
+                      </div>
+                      {stepDetail ? (
+                        <div style={{ ...TEXT_STYLES.meta, marginTop: 4 }}>
+                          {stepDetail}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+              <RackLabel>Provider Key Presence</RackLabel>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: setupBlockers.length ? 10 : 0 }}>
+                {providerKeyRows.map((item) => (
+                  <div key={item.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "5px 0", borderBottom: "1px solid #1f1f22" }}>
+                    <span style={{ fontSize: 10, color: "#888", fontFamily: "'JetBrains Mono', monospace" }}>{item.env}</span>
+                    <span style={{ fontSize: 9, color: item.ready ? "#2ecc40" : "#666", fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1.2, fontWeight: 700 }}>
+                      {item.ready ? "PRESENT" : "MISSING"}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              {setupBlockers.length ? (
+                <>
+                  <RackLabel>Operator Guidance</RackLabel>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {setupBlockers.map((blocker) => {
+                      const guidance = SETUP_BLOCKER_GUIDANCE[blocker] || "Resolve this blocker and re-check setup status.";
+                      return (
+                        <div key={blocker} style={{ padding: "7px 10px", background: "#15151a", borderLeft: "2px solid #ff851b55", borderRadius: "0 2px 2px 0" }}>
+                          <div style={{ fontSize: 9, color: "#ff851b", fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1.2, marginBottom: 2 }}>
+                            {blocker}
+                          </div>
+                          <div style={{ fontSize: 11, color: "#9a9a9a", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.45 }}>
+                            {guidance}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              ) : (
+                <div style={{ ...TEXT_STYLES.meta }}>
+                  Setup checklist is clear.
+                </div>
+              )}
+            </>
+          ) : (
+            <AwaitingBlock message="Setup status unavailable. Refresh auth status." />
+          )}
+        </RackPanel>
         <RackPanel>
           <RackLabel>Capabilities</RackLabel>
           {caps.map((c, i) => (
@@ -3337,3 +3449,4 @@ export default function RoonieControlRoom() {
     </div>
   );
 }
+
