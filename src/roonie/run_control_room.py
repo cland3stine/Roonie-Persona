@@ -13,7 +13,11 @@ from typing import Any, Dict
 
 from roonie.control_room.preflight import resolve_runtime_paths, run_preflight
 from roonie.dashboard_api.app import create_server
-from providers.router import get_resolved_model_config
+from providers.router import (
+    get_resolved_model_config,
+    migrate_llm_key_store_from_secrets_env,
+    seed_process_env_from_llm_key_store,
+)
 
 
 def _utc_now_iso() -> str:
@@ -146,6 +150,7 @@ def _twitch_refresh_loop_interval_seconds() -> float:
 def main(argv: list[str] | None = None) -> int:
     args = _arg_parser().parse_args(argv)
     repo_root = Path.cwd()
+    llm_seed_stats = seed_process_env_from_llm_key_store(overwrite_existing=False)
     secrets_stats = _load_secrets_env_into_process(
         repo_root / "config" / "secrets.env",
         override_existing=False,
@@ -156,6 +161,11 @@ def main(argv: list[str] | None = None) -> int:
             "ANTHROPIC_MODEL",
         },
     )
+    llm_migration_stats = migrate_llm_key_store_from_secrets_env(
+        path=repo_root / "config" / "secrets.env",
+        overwrite_existing=False,
+    )
+    llm_seed_after_migrate_stats = seed_process_env_from_llm_key_store(overwrite_existing=False)
 
     paths = resolve_runtime_paths(
         repo_root=repo_root,
@@ -175,6 +185,18 @@ def main(argv: list[str] | None = None) -> int:
         f"set={secrets_stats.get('set')} "
         f"skipped_existing={secrets_stats.get('skipped_existing')} "
         f"forced_override={secrets_stats.get('forced_override')}",
+    )
+    _append_log(
+        paths.control_log_path,
+        "LLM_KEY_STORE: "
+        f"seed_loaded={llm_seed_stats.get('loaded')} "
+        f"seed_set={llm_seed_stats.get('set')} "
+        f"seed_after_migrate_set={llm_seed_after_migrate_stats.get('set')} "
+        f"migrated={llm_migration_stats.get('migrated')} "
+        f"migrate_skipped_existing={llm_migration_stats.get('skipped_existing')} "
+        f"source_path={llm_migration_stats.get('source_path')} "
+        f"store_path={llm_migration_stats.get('store_path')} "
+        f"encryption={llm_migration_stats.get('encryption')}",
     )
 
     model_cfg = get_resolved_model_config(ensure_env=True)

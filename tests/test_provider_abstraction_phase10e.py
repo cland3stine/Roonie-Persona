@@ -116,6 +116,74 @@ def test_model_resolution_can_load_from_secrets_and_seed_process_env(monkeypatch
     assert os.getenv("GROK_MODEL") == "grok-4-1-fast-reasoning"
 
 
+def test_llm_key_store_migrates_from_secrets_and_seeds_env(monkeypatch, tmp_path: Path):
+    import providers.router as router
+
+    secrets_path = tmp_path / "secrets.env"
+    secrets_path.write_text(
+        "\n".join(
+            [
+                "OPENAI_API_KEY=openai-test-key",
+                "GROK_API_KEY=grok-test-key",
+                "ANTHROPIC_API_KEY=anthropic-test-key",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setenv("ROONIE_DASHBOARD_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("ROONIE_ENCRYPT_LLM_KEYS_AT_REST", "0")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("GROK_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(router, "_LLM_KEY_STORE_CACHE", None)
+    monkeypatch.setattr(router, "_LLM_KEY_STORE_CACHE_MTIME_NS", None)
+    monkeypatch.setattr(router, "_LLM_KEY_STORE_CACHE_PATH", None)
+
+    migrate = router.migrate_llm_key_store_from_secrets_env(path=secrets_path, overwrite_existing=False)
+    assert migrate["migrated"] == 3
+    assert migrate["wrote"] is True
+    assert migrate["encryption"] == "plaintext"
+
+    store_path = data_dir / "llm_key_store.json"
+    payload = json.loads(store_path.read_text(encoding="utf-8"))
+    keys = payload.get("keys", {})
+    assert keys.get("OPENAI_API_KEY", {}).get("value") == "openai-test-key"
+    assert keys.get("GROK_API_KEY", {}).get("value") == "grok-test-key"
+    assert keys.get("ANTHROPIC_API_KEY", {}).get("value") == "anthropic-test-key"
+
+    seeded = router.seed_process_env_from_llm_key_store(overwrite_existing=False)
+    assert seeded["set"] >= 3
+    assert os.getenv("OPENAI_API_KEY") == "openai-test-key"
+    assert os.getenv("GROK_API_KEY") == "grok-test-key"
+    assert os.getenv("ANTHROPIC_API_KEY") == "anthropic-test-key"
+
+
+def test_api_key_resolution_prefers_env_then_store_then_secrets(monkeypatch, tmp_path: Path):
+    import providers.router as router
+
+    source_path = tmp_path / "secrets.env"
+    source_path.write_text("OPENAI_API_KEY=store-key\n", encoding="utf-8")
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setenv("ROONIE_DASHBOARD_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("ROONIE_ENCRYPT_LLM_KEYS_AT_REST", "0")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(router, "_LLM_KEY_STORE_CACHE", None)
+    monkeypatch.setattr(router, "_LLM_KEY_STORE_CACHE_MTIME_NS", None)
+    monkeypatch.setattr(router, "_LLM_KEY_STORE_CACHE_PATH", None)
+    router.migrate_llm_key_store_from_secrets_env(path=source_path, overwrite_existing=True)
+
+    monkeypatch.setattr(router, "_read_secrets_env", lambda: {"OPENAI_API_KEY": "secrets-key"})
+    assert router._resolve_secret_or_env("OPENAI_API_KEY") == "store-key"
+
+    monkeypatch.setenv("OPENAI_API_KEY", "env-key")
+    assert router._resolve_secret_or_env("OPENAI_API_KEY") == "env-key"
+
+
 def test_route_generate_uses_director_model_for_openai(monkeypatch, tmp_path: Path):
     from providers.registry import ProviderRegistry
     from providers.router import route_generate

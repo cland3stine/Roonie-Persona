@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -71,6 +72,117 @@ _SECRETS_CACHE_LOCK = threading.Lock()
 _SECRETS_CACHE: Optional[Dict[str, str]] = None
 _SECRETS_CACHE_MTIME_NS: Optional[int] = None
 _SECRETS_CACHE_PATH: Optional[str] = None
+_LLM_KEY_NAMES = (
+    "OPENAI_API_KEY",
+    "GROK_API_KEY",
+    "XAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+)
+_LLM_KEY_STORE_LOCK = threading.Lock()
+_LLM_KEY_STORE_CACHE: Optional[Dict[str, Any]] = None
+_LLM_KEY_STORE_CACHE_MTIME_NS: Optional[int] = None
+_LLM_KEY_STORE_CACHE_PATH: Optional[str] = None
+
+if os.name == "nt":
+    import ctypes
+    from ctypes import wintypes
+
+    class _DpapiDataBlob(ctypes.Structure):
+        _fields_ = [
+            ("cbData", wintypes.DWORD),
+            ("pbData", ctypes.POINTER(ctypes.c_ubyte)),
+        ]
+
+    _CRYPTPROTECT_UI_FORBIDDEN = 0x01
+
+    _crypt32 = ctypes.windll.crypt32
+    _kernel32 = ctypes.windll.kernel32
+    _crypt32.CryptProtectData.argtypes = [
+        ctypes.POINTER(_DpapiDataBlob),
+        wintypes.LPCWSTR,
+        ctypes.POINTER(_DpapiDataBlob),
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(_DpapiDataBlob),
+    ]
+    _crypt32.CryptProtectData.restype = wintypes.BOOL
+    _crypt32.CryptUnprotectData.argtypes = [
+        ctypes.POINTER(_DpapiDataBlob),
+        ctypes.POINTER(wintypes.LPWSTR),
+        ctypes.POINTER(_DpapiDataBlob),
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(_DpapiDataBlob),
+    ]
+    _crypt32.CryptUnprotectData.restype = wintypes.BOOL
+    _kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    _kernel32.LocalFree.restype = ctypes.c_void_p
+
+    def _dpapi_blob_from_bytes(raw: bytes) -> Tuple[_DpapiDataBlob, Any]:
+        src = bytes(raw or b"")
+        if src:
+            arr = (ctypes.c_ubyte * len(src)).from_buffer_copy(src)
+            blob = _DpapiDataBlob(len(src), ctypes.cast(arr, ctypes.POINTER(ctypes.c_ubyte)))
+            return blob, arr
+        arr = (ctypes.c_ubyte * 1)()
+        blob = _DpapiDataBlob(0, ctypes.cast(arr, ctypes.POINTER(ctypes.c_ubyte)))
+        return blob, arr
+
+    def _dpapi_protect_bytes(raw: bytes) -> bytes:
+        in_blob, in_buf = _dpapi_blob_from_bytes(raw)
+        out_blob = _DpapiDataBlob()
+        if not _crypt32.CryptProtectData(
+            ctypes.byref(in_blob),
+            "roonie.llm.key.store",
+            None,
+            None,
+            None,
+            _CRYPTPROTECT_UI_FORBIDDEN,
+            ctypes.byref(out_blob),
+        ):
+            raise OSError(f"CryptProtectData failed: {ctypes.WinError()}")
+        _ = in_buf
+        try:
+            if not out_blob.pbData or int(out_blob.cbData) <= 0:
+                return b""
+            return ctypes.string_at(out_blob.pbData, int(out_blob.cbData))
+        finally:
+            if out_blob.pbData:
+                _kernel32.LocalFree(out_blob.pbData)
+
+    def _dpapi_unprotect_bytes(raw: bytes) -> bytes:
+        in_blob, in_buf = _dpapi_blob_from_bytes(raw)
+        out_blob = _DpapiDataBlob()
+        descr = wintypes.LPWSTR()
+        if not _crypt32.CryptUnprotectData(
+            ctypes.byref(in_blob),
+            ctypes.byref(descr),
+            None,
+            None,
+            None,
+            _CRYPTPROTECT_UI_FORBIDDEN,
+            ctypes.byref(out_blob),
+        ):
+            raise OSError(f"CryptUnprotectData failed: {ctypes.WinError()}")
+        _ = in_buf
+        try:
+            if not out_blob.pbData or int(out_blob.cbData) <= 0:
+                return b""
+            return ctypes.string_at(out_blob.pbData, int(out_blob.cbData))
+        finally:
+            if out_blob.pbData:
+                _kernel32.LocalFree(out_blob.pbData)
+            if descr:
+                _kernel32.LocalFree(descr)
+else:
+
+    def _dpapi_protect_bytes(raw: bytes) -> bytes:
+        raise RuntimeError("DPAPI is only available on Windows.")
+
+    def _dpapi_unprotect_bytes(raw: bytes) -> bytes:
+        raise RuntimeError("DPAPI is only available on Windows.")
 
 
 def _new_provider_metrics() -> Dict[str, Any]:
@@ -105,6 +217,13 @@ _RUNTIME_METRICS: Dict[str, Any] = _default_runtime_metrics()
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
+
+
+def _safe_read_json(path: Path) -> Dict[str, Any]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8-sig"))
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+        return {}
 
 
 def _providers_config_path() -> Path:
@@ -703,6 +822,29 @@ def _is_retryable_provider_exception(exc: Exception) -> bool:
     return any(token in detail for token in tokens)
 
 
+def _read_env_kv_file(path: Path) -> Dict[str, str]:
+    parsed: Dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return parsed
+    for raw_line in lines:
+        line = str(raw_line or "").strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and (
+            (value[0] == '"' and value[-1] == '"')
+            or (value[0] == "'" and value[-1] == "'")
+        ):
+            value = value[1:-1]
+        if key:
+            parsed[key] = value
+    return parsed
+
+
 def _read_secrets_env() -> Dict[str, str]:
     global _SECRETS_CACHE, _SECRETS_CACHE_MTIME_NS, _SECRETS_CACHE_PATH
     path = (_repo_root() / "config" / "secrets.env").resolve()
@@ -719,34 +861,271 @@ def _read_secrets_env() -> Dict[str, str]:
             and _SECRETS_CACHE_MTIME_NS == mtime_ns
         ):
             return dict(_SECRETS_CACHE)
-        parsed: Dict[str, str] = {}
-        try:
-            for raw_line in path.read_text(encoding="utf-8").splitlines():
-                line = str(raw_line or "").strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, value = line.split("=", 1)
-                key = key.strip()
-                value = value.strip()
-                if len(value) >= 2 and (
-                    (value[0] == '"' and value[-1] == '"')
-                    or (value[0] == "'" and value[-1] == "'")
-                ):
-                    value = value[1:-1]
-                if key:
-                    parsed[key] = value
-        except OSError:
-            parsed = {}
+        parsed = _read_env_kv_file(path)
         _SECRETS_CACHE = dict(parsed)
         _SECRETS_CACHE_MTIME_NS = mtime_ns
         _SECRETS_CACHE_PATH = path_str
         return parsed
 
 
+def _llm_key_store_path() -> Path:
+    configured = str(os.getenv("ROONIE_LLM_KEY_STORE_PATH", "")).strip()
+    if configured:
+        return Path(configured)
+    dashboard_data_dir = str(os.getenv("ROONIE_DASHBOARD_DATA_DIR", "")).strip()
+    if dashboard_data_dir:
+        return Path(dashboard_data_dir) / "llm_key_store.json"
+    return _repo_root() / "data" / "llm_key_store.json"
+
+
+def _llm_key_store_encryption_enabled() -> bool:
+    return _truthy_env("ROONIE_ENCRYPT_LLM_KEYS_AT_REST", True) and os.name == "nt"
+
+
+def _default_llm_key_store() -> Dict[str, Any]:
+    return {
+        "version": 1,
+        "updated_at": None,
+        "keys": {},
+    }
+
+
+def _decode_llm_key_value(*, value: Any, value_enc: Any) -> str:
+    candidates: list[str] = []
+    text_plain = str(value or "").strip()
+    text_enc = str(value_enc or "").strip()
+    if text_plain:
+        candidates.append(text_plain)
+    if text_enc:
+        candidates.append(text_enc)
+    for candidate in candidates:
+        if not candidate.lower().startswith("dpapi:"):
+            return candidate
+        payload_b64 = candidate.split(":", 1)[1]
+        if not payload_b64:
+            continue
+        try:
+            protected = base64.b64decode(payload_b64.encode("ascii"), validate=True)
+            clear = _dpapi_unprotect_bytes(protected).decode("utf-8")
+            clear_text = str(clear).strip()
+            if clear_text:
+                return clear_text
+        except Exception:
+            continue
+    return ""
+
+
+def _encode_llm_key_value(secret: str) -> Dict[str, Optional[str]]:
+    clear = str(secret or "").strip()
+    if not clear:
+        return {"value": None, "value_enc": None}
+    if not _llm_key_store_encryption_enabled():
+        return {"value": clear, "value_enc": None}
+    try:
+        protected = _dpapi_protect_bytes(clear.encode("utf-8"))
+        return {"value": None, "value_enc": "dpapi:" + base64.b64encode(protected).decode("ascii")}
+    except Exception:
+        # Fallback preserves runtime behavior if DPAPI is unavailable at startup.
+        return {"value": clear, "value_enc": None}
+
+
+def _normalize_llm_key_store(payload: Any) -> Dict[str, Any]:
+    base = _default_llm_key_store()
+    if not isinstance(payload, dict):
+        return base
+    keys_raw = payload.get("keys", {})
+    if not isinstance(keys_raw, dict):
+        keys_raw = {}
+    keys_out: Dict[str, Dict[str, Optional[str]]] = {}
+    for key in _LLM_KEY_NAMES:
+        row_raw = keys_raw.get(key)
+        value_text: Optional[str] = None
+        value_enc_text: Optional[str] = None
+        if isinstance(row_raw, dict):
+            raw_value = row_raw.get("value")
+            if isinstance(raw_value, str):
+                cleaned = str(raw_value).strip()
+                if cleaned:
+                    value_text = cleaned
+            raw_value_enc = row_raw.get("value_enc")
+            if isinstance(raw_value_enc, str):
+                cleaned = str(raw_value_enc).strip()
+                if cleaned:
+                    value_enc_text = cleaned
+        elif isinstance(row_raw, str):
+            cleaned = str(row_raw).strip()
+            if cleaned.lower().startswith("dpapi:"):
+                value_enc_text = cleaned
+            else:
+                value_text = cleaned
+        if value_text or value_enc_text:
+            keys_out[key] = {
+                "value": value_text,
+                "value_enc": value_enc_text,
+            }
+    updated_at_raw = payload.get("updated_at")
+    updated_at = str(updated_at_raw).strip() if isinstance(updated_at_raw, str) and str(updated_at_raw).strip() else None
+    return {
+        "version": 1,
+        "updated_at": updated_at,
+        "keys": keys_out,
+    }
+
+
+def _read_llm_key_store() -> Dict[str, Any]:
+    global _LLM_KEY_STORE_CACHE, _LLM_KEY_STORE_CACHE_MTIME_NS, _LLM_KEY_STORE_CACHE_PATH
+    path = _llm_key_store_path().resolve()
+    path_str = str(path)
+    try:
+        mtime_ns = int(path.stat().st_mtime_ns)
+    except OSError:
+        with _LLM_KEY_STORE_LOCK:
+            if (
+                _LLM_KEY_STORE_CACHE is not None
+                and _LLM_KEY_STORE_CACHE_PATH == path_str
+                and _LLM_KEY_STORE_CACHE_MTIME_NS is None
+            ):
+                return json.loads(json.dumps(_LLM_KEY_STORE_CACHE))
+            empty_payload = _default_llm_key_store()
+            _LLM_KEY_STORE_CACHE = json.loads(json.dumps(empty_payload))
+            _LLM_KEY_STORE_CACHE_MTIME_NS = None
+            _LLM_KEY_STORE_CACHE_PATH = path_str
+            return empty_payload
+    with _LLM_KEY_STORE_LOCK:
+        if (
+            _LLM_KEY_STORE_CACHE is not None
+            and _LLM_KEY_STORE_CACHE_PATH == path_str
+            and _LLM_KEY_STORE_CACHE_MTIME_NS == mtime_ns
+        ):
+            return json.loads(json.dumps(_LLM_KEY_STORE_CACHE))
+        raw = _safe_read_json(path)
+        normalized = _normalize_llm_key_store(raw)
+        _LLM_KEY_STORE_CACHE = json.loads(json.dumps(normalized))
+        _LLM_KEY_STORE_CACHE_MTIME_NS = mtime_ns
+        _LLM_KEY_STORE_CACHE_PATH = path_str
+        return normalized
+
+
+def _write_llm_key_store(payload: Dict[str, Any]) -> None:
+    global _LLM_KEY_STORE_CACHE, _LLM_KEY_STORE_CACHE_MTIME_NS, _LLM_KEY_STORE_CACHE_PATH
+    normalized = _normalize_llm_key_store(payload)
+    normalized["updated_at"] = datetime.now(timezone.utc).isoformat()
+    path = _llm_key_store_path().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+    mtime_ns: Optional[int]
+    try:
+        mtime_ns = int(path.stat().st_mtime_ns)
+    except OSError:
+        mtime_ns = None
+    with _LLM_KEY_STORE_LOCK:
+        _LLM_KEY_STORE_CACHE = json.loads(json.dumps(normalized))
+        _LLM_KEY_STORE_CACHE_MTIME_NS = mtime_ns
+        _LLM_KEY_STORE_CACHE_PATH = str(path)
+
+
+def _resolve_secret_from_llm_store(name: str) -> str:
+    normalized = str(name or "").strip().upper()
+    if normalized not in _LLM_KEY_NAMES:
+        return ""
+    payload = _read_llm_key_store()
+    keys = payload.get("keys", {})
+    if not isinstance(keys, dict):
+        return ""
+    row = keys.get(normalized)
+    if isinstance(row, str):
+        return _decode_llm_key_value(value=row, value_enc=None)
+    if isinstance(row, dict):
+        return _decode_llm_key_value(value=row.get("value"), value_enc=row.get("value_enc"))
+    return ""
+
+
+def seed_process_env_from_llm_key_store(*, overwrite_existing: bool = False) -> Dict[str, Any]:
+    keys = _read_llm_key_store().get("keys", {})
+    if not isinstance(keys, dict):
+        keys = {}
+    stats = {
+        "store_path": str(_llm_key_store_path().resolve()),
+        "loaded": 0,
+        "set": 0,
+        "skipped_existing": 0,
+        "missing": 0,
+    }
+    for key in _LLM_KEY_NAMES:
+        row = keys.get(key)
+        value = ""
+        if isinstance(row, str):
+            value = _decode_llm_key_value(value=row, value_enc=None)
+        elif isinstance(row, dict):
+            value = _decode_llm_key_value(value=row.get("value"), value_enc=row.get("value_enc"))
+        if not value:
+            stats["missing"] += 1
+            continue
+        stats["loaded"] += 1
+        if (not overwrite_existing) and str(os.getenv(key, "")).strip():
+            stats["skipped_existing"] += 1
+            continue
+        os.environ[key] = value
+        stats["set"] += 1
+    return stats
+
+
+def migrate_llm_key_store_from_secrets_env(
+    *,
+    path: Optional[Path] = None,
+    overwrite_existing: bool = False,
+) -> Dict[str, Any]:
+    source_path = path.resolve() if isinstance(path, Path) else (_repo_root() / "config" / "secrets.env").resolve()
+    source_data = _read_env_kv_file(source_path)
+    current = _read_llm_key_store()
+    keys = current.get("keys", {})
+    if not isinstance(keys, dict):
+        keys = {}
+    migrated = 0
+    skipped_existing = 0
+    missing_source = 0
+    for key in _LLM_KEY_NAMES:
+        candidate = str(source_data.get(key, "")).strip()
+        if not candidate:
+            missing_source += 1
+            continue
+        existing_row = keys.get(key)
+        existing_value = ""
+        if isinstance(existing_row, str):
+            existing_value = _decode_llm_key_value(value=existing_row, value_enc=None)
+        elif isinstance(existing_row, dict):
+            existing_value = _decode_llm_key_value(value=existing_row.get("value"), value_enc=existing_row.get("value_enc"))
+        if existing_value and (not overwrite_existing):
+            skipped_existing += 1
+            continue
+        keys[key] = _encode_llm_key_value(candidate)
+        migrated += 1
+    wrote = False
+    if migrated > 0:
+        current["keys"] = keys
+        _write_llm_key_store(current)
+        wrote = True
+    return {
+        "source_path": str(source_path),
+        "store_path": str(_llm_key_store_path().resolve()),
+        "source_keys_present": sum(1 for key in _LLM_KEY_NAMES if str(source_data.get(key, "")).strip()),
+        "migrated": migrated,
+        "skipped_existing": skipped_existing,
+        "missing_source": missing_source,
+        "wrote": wrote,
+        "encryption": "dpapi" if _llm_key_store_encryption_enabled() else "plaintext",
+    }
+
+
 def _resolve_secret_or_env(name: str) -> str:
     direct = str(os.getenv(name, "")).strip()
     if direct:
         return direct
+    from_store = _resolve_secret_from_llm_store(name)
+    if from_store:
+        return from_store
     return str(_read_secrets_env().get(name, "")).strip()
 
 
