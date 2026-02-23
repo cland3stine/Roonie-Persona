@@ -82,7 +82,7 @@ def behavior_guidance(
             lines.append("Do not force a follow-up question unless it's clearly needed.")
         if topic_anchor:
             lines.append(f"Recent topic: {topic_anchor}. Pick up the thread if relevant.")
-        lines.append("Chat naturally. Be warm, react to what they actually said. Light teasing is welcome if the moment is right.")
+        lines.append("Chat naturally. Be warm, react to what they actually said. Light teasing with people you know well is welcome if the moment is right.")
         lines.append("If the recent chat shows you repeating the same joke or theme, drop it and respond fresh to what the viewer just said.")
     if topic_anchor and category != CATEGORY_BANTER:
         lines.append(f"Recent topic: {topic_anchor}. Pick up the thread if relevant.")
