@@ -262,6 +262,31 @@ class LiveChatBridge:
                     ]
             except Exception:
                 pass
+        if hasattr(self._storage, "get_stream_schedule"):
+            try:
+                schedule = self._storage.get_stream_schedule()
+                if isinstance(schedule, dict):
+                    slots_raw = schedule.get("slots", [])
+                    slots = []
+                    if isinstance(slots_raw, list):
+                        for s in slots_raw:
+                            if not isinstance(s, dict):
+                                continue
+                            day = str(s.get("day", "")).strip().lower()
+                            time_val = str(s.get("time", "")).strip()
+                            if day and time_val and s.get("enabled", True):
+                                slots.append({
+                                    "day": day,
+                                    "time": time_val,
+                                    "note": str(s.get("note", "")).strip(),
+                                })
+                    metadata["stream_schedule"] = {
+                        "timezone": str(schedule.get("timezone", "ET")).strip(),
+                        "slots": slots,
+                        "next_stream_override": str(schedule.get("next_stream_override", "")).strip(),
+                    }
+            except Exception:
+                pass
         if isinstance(metadata_extra, dict):
             metadata.update(dict(metadata_extra))
 

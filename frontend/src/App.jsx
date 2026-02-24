@@ -9,6 +9,7 @@ const PAGES_TOP = [
   { id: "culture", label: "CULTURAL NOTES" },
   { id: "innercircle", label: "INNER CIRCLE" },
   { id: "nowplaying", label: "NOW PLAYING" },
+  { id: "schedule", label: "SCHEDULE" },
 ];
 
 const PAGES_BOTTOM = [
@@ -553,6 +554,7 @@ function useDashboardData(activePage) {
   const [viewerNotesData, setViewerNotesData] = useState([]);
   const [memoryPendingData, setMemoryPendingData] = useState([]);
   const [innerCircleData, setInnerCircleData] = useState(null);
+  const [scheduleData, setScheduleData] = useState(null);
   const [twitchStatusData, setTwitchStatusData] = useState(null);
   const [twitchNotice, setTwitchNotice] = useState("");
   const refreshDataInFlightRef = useRef(false);
@@ -575,7 +577,7 @@ function useDashboardData(activePage) {
     }
     refreshDataInFlightRef.current = true;
     try {
-      const [authRes, statusRes, eventsRes, suppressionsRes, operatorRes, queueRes, studioProfileRes, libraryStatusRes, logsEventsRes, logsSuppressionsRes, logsOperatorRes, providersStatusRes, routingStatusRes, sensesStatusRes, memoryCulturalRes, memoryViewersRes, memoryPendingRes, twitchStatusRes, innerCircleRes] = await Promise.all([
+      const [authRes, statusRes, eventsRes, suppressionsRes, operatorRes, queueRes, studioProfileRes, libraryStatusRes, logsEventsRes, logsSuppressionsRes, logsOperatorRes, providersStatusRes, routingStatusRes, sensesStatusRes, memoryCulturalRes, memoryViewersRes, memoryPendingRes, twitchStatusRes, innerCircleRes, scheduleRes] = await Promise.all([
         apiFetch(`${API_BASE}/api/auth/me`),
         apiFetch(`${API_BASE}/api/status`),
         apiFetch(`${API_BASE}/api/events?limit=5`),
@@ -595,6 +597,7 @@ function useDashboardData(activePage) {
         apiFetch(`${API_BASE}/api/memory/pending?limit=100&offset=0`),
         apiFetch(`${API_BASE}/api/twitch/status`),
         apiFetch(`${API_BASE}/api/inner_circle`),
+        apiFetch(`${API_BASE}/api/stream_schedule`),
       ]);
       if (authRes.ok) {
         setAuthData(await authRes.json());
@@ -641,6 +644,9 @@ function useDashboardData(activePage) {
       }
       if (innerCircleRes.ok) {
         setInnerCircleData(await innerCircleRes.json());
+      }
+      if (scheduleRes.ok) {
+        setScheduleData(await scheduleRes.json());
       }
     } catch (_err) {
       // Polling errors keep prior data.
@@ -736,6 +742,10 @@ function useDashboardData(activePage) {
       if (page === "innercircle") {
         fetches.push(apiFetch(`${API_BASE}/api/inner_circle`));
         handlers.push((res) => res.ok && res.json().then(setInnerCircleData));
+      }
+      if (page === "schedule") {
+        fetches.push(apiFetch(`${API_BASE}/api/stream_schedule`));
+        handlers.push((res) => res.ok && res.json().then(setScheduleData));
       }
       if (fetches.length) {
         const results = await Promise.all(fetches);
@@ -860,6 +870,34 @@ function useDashboardData(activePage) {
       }
     } catch (err) {
       console.error("[Dashboard] inner_circle save error", err);
+    } finally {
+      await refreshData();
+    }
+  };
+
+  const saveStreamSchedule = async (payload) => {
+    const headers = buildOperatorHeaders({ json: true });
+    try {
+      const response = await apiFetch(`${API_BASE}/api/stream_schedule`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify(payload || {}),
+      });
+      if (!response.ok) {
+        let detail = response.statusText;
+        try {
+          const body = await response.json();
+          detail = body.detail || body.error || detail;
+        } catch (_err) {
+          // Keep status text fallback.
+        }
+        console.error(`[Dashboard] stream_schedule save failed (${response.status}) ${detail}`);
+      } else {
+        const body = await response.json();
+        if (body && body.stream_schedule) setScheduleData(body.stream_schedule);
+      }
+    } catch (err) {
+      console.error("[Dashboard] stream_schedule save error", err);
     } finally {
       await refreshData();
     }
@@ -1472,6 +1510,7 @@ function useDashboardData(activePage) {
     viewerNotesData,
     memoryPendingData,
     innerCircleData,
+    scheduleData,
     twitchStatusData,
     twitchNotice,
     setTwitchNotice,
@@ -1479,6 +1518,7 @@ function useDashboardData(activePage) {
     busyAction,
     saveStudioProfile,
     saveInnerCircle,
+    saveStreamSchedule,
     searchLibraryIndex,
     uploadLibraryXml,
     rebuildLibraryIndex,
@@ -3053,6 +3093,145 @@ function CulturePage({
   );
 }
 
+// --- PAGE: SCHEDULE ---
+
+const DAYS_OF_WEEK = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
+const DAY_LABELS = { monday: "Monday", tuesday: "Tuesday", wednesday: "Wednesday", thursday: "Thursday", friday: "Friday", saturday: "Saturday", sunday: "Sunday" };
+
+function SchedulePage({ scheduleData, saveStreamSchedule }) {
+  const slots = Array.isArray(scheduleData?.slots) ? scheduleData.slots : [];
+  const tz = scheduleData?.timezone || "ET";
+  const override = scheduleData?.next_stream_override || "";
+  const [editing, setEditing] = useState(false);
+  const [draftSlots, setDraftSlots] = useState([]);
+  const [draftTz, setDraftTz] = useState("ET");
+  const [draftOverride, setDraftOverride] = useState("");
+
+  const inputStyle = { background: "#111114", border: "1px solid #2a2a2e", borderRadius: 2, padding: "4px 8px", color: "#aaa", fontSize: 11, fontFamily: "'IBM Plex Sans', sans-serif", outline: "none", boxSizing: "border-box" };
+  const selectStyle = { ...inputStyle, cursor: "pointer" };
+  const editBtnStyle = { background: "transparent", border: "1px dashed #333", color: "#555", padding: "8px 16px", fontSize: 10, letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", cursor: "pointer", borderRadius: 2, width: "100%" };
+  const saveBtnStyle = { ...editBtnStyle, border: "1px solid #2ecc4066", color: "#2ecc40" };
+  const cancelBtnStyle = { ...editBtnStyle };
+
+  const startEditing = () => {
+    setDraftSlots(slots.map((s) => ({ ...s })));
+    setDraftTz(tz);
+    setDraftOverride(override);
+    setEditing(true);
+  };
+
+  const cancelEditing = () => setEditing(false);
+
+  const saveSchedule = async () => {
+    const cleaned = draftSlots
+      .filter((s) => s.day && s.time)
+      .map((s) => ({
+        day: String(s.day).trim().toLowerCase(),
+        time: String(s.time).trim(),
+        note: String(s.note || "").trim(),
+        enabled: s.enabled !== false,
+      }));
+    const seen = new Set();
+    const deduped = cleaned.filter((s) => {
+      if (seen.has(s.day)) return false;
+      seen.add(s.day);
+      return true;
+    });
+    await saveStreamSchedule({
+      version: 1,
+      timezone: draftTz.trim() || "ET",
+      slots: deduped,
+      next_stream_override: draftOverride.trim(),
+    });
+    setEditing(false);
+  };
+
+  const updateSlotField = (idx, field, value) => {
+    const next = [...draftSlots];
+    next[idx] = { ...next[idx], [field]: value };
+    setDraftSlots(next);
+  };
+
+  const usedDays = new Set(draftSlots.map((s) => String(s.day).toLowerCase()));
+
+  return (
+    <div>
+      <RackPanel>
+        <RackLabel>Stream Schedule</RackLabel>
+        <div style={{ fontSize: 10, color: "#555", fontFamily: "'IBM Plex Sans', sans-serif", marginBottom: 12 }}>
+          Weekly stream times injected into Roonie's prompt so he can answer schedule questions accurately.
+        </div>
+        {editing ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+              <span style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>TIMEZONE</span>
+              <input type="text" value={draftTz} onChange={(e) => setDraftTz(e.target.value)} placeholder="ET" style={{ ...inputStyle, width: 80 }} />
+            </div>
+            {draftSlots.length > 0 && (
+              <div style={{ display: "grid", gridTemplateColumns: "130px 100px 1fr 50px 20px", gap: 6, marginBottom: 2 }}>
+                <span style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>DAY</span>
+                <span style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>TIME</span>
+                <span style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>NOTE</span>
+                <span style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, textAlign: "center" }}>ON</span>
+                <span />
+              </div>
+            )}
+            {draftSlots.map((s, i) => (
+              <div key={i} style={{ display: "grid", gridTemplateColumns: "130px 100px 1fr 50px 20px", gap: 6, alignItems: "center" }}>
+                <select value={s.day || ""} onChange={(e) => updateSlotField(i, "day", e.target.value)} style={selectStyle}>
+                  <option value="">-- day --</option>
+                  {DAYS_OF_WEEK.map((d) => (
+                    <option key={d} value={d} disabled={usedDays.has(d) && s.day !== d}>{DAY_LABELS[d]}</option>
+                  ))}
+                </select>
+                <input type="text" value={s.time || ""} onChange={(e) => updateSlotField(i, "time", e.target.value)} placeholder="7:00 PM" style={inputStyle} />
+                <input type="text" value={s.note || ""} onChange={(e) => updateSlotField(i, "note", e.target.value)} placeholder="optional note..." style={inputStyle} />
+                <div style={{ textAlign: "center" }}>
+                  <input type="checkbox" checked={s.enabled !== false} onChange={(e) => updateSlotField(i, "enabled", e.target.checked)} style={{ cursor: "pointer" }} />
+                </div>
+                <span onClick={() => { const next = [...draftSlots]; next.splice(i, 1); setDraftSlots(next); }} style={{ color: "#ff4136", fontSize: 13, cursor: "pointer", fontFamily: "'JetBrains Mono', monospace", textAlign: "center", flexShrink: 0 }}>&times;</span>
+              </div>
+            ))}
+            {draftSlots.length < 7 && (
+              <div onClick={() => setDraftSlots([...draftSlots, { day: "", time: "", note: "", enabled: true }])} style={{ fontSize: 10, color: "#555", letterSpacing: 1, fontFamily: "'JetBrains Mono', monospace", cursor: "pointer", marginTop: 4 }}>+ ADD SLOT</div>
+            )}
+            <div style={{ marginTop: 10 }}>
+              <span style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>SCHEDULE OVERRIDE / NOTE</span>
+              <input type="text" value={draftOverride} onChange={(e) => setDraftOverride(e.target.value)} placeholder='e.g. "no stream this Saturday — back next week"' style={{ ...inputStyle, width: "100%", marginTop: 4 }} />
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+              <button onClick={saveSchedule} style={saveBtnStyle}>SAVE</button>
+              <button onClick={cancelEditing} style={cancelBtnStyle}>CANCEL</button>
+            </div>
+          </div>
+        ) : (
+          <div>
+            <div style={{ fontSize: 10, color: "#5a5a5a", fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1.5, marginBottom: 8 }}>TIMEZONE: {tz}</div>
+            {slots.map((s, idx) => (
+              <div key={s.day || idx} style={{ padding: "10px 12px", marginBottom: 6, background: "#15151a", border: "1px solid #222", borderRadius: 2, opacity: s.enabled === false ? 0.4 : 1 }}>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                  <span style={{ fontSize: 11, color: "#7faacc", fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>{DAY_LABELS[s.day] || s.day}</span>
+                  <span style={{ fontSize: 11, color: "#aaa", fontFamily: "'IBM Plex Sans', sans-serif" }}>{s.time}</span>
+                  {s.note ? <span style={{ fontSize: 10, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif" }}>({s.note})</span> : null}
+                  {s.enabled === false ? <span style={{ fontSize: 9, color: "#ff851b", fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1 }}>DISABLED</span> : null}
+                </div>
+              </div>
+            ))}
+            {!slots.length ? <div style={{ padding: "6px 0", fontSize: 11, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif" }}>No schedule slots</div> : null}
+            {override ? (
+              <div style={{ padding: "8px 12px", marginTop: 4, marginBottom: 6, background: "#1a1a10", border: "1px solid #333320", borderRadius: 2 }}>
+                <span style={{ fontSize: 9, color: "#aa9944", fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1.5, fontWeight: 600 }}>OVERRIDE: </span>
+                <span style={{ fontSize: 11, color: "#cc9", fontFamily: "'IBM Plex Sans', sans-serif" }}>{override}</span>
+              </div>
+            ) : null}
+            <button onClick={startEditing} style={{ ...editBtnStyle, marginTop: 8 }}>EDIT SCHEDULE</button>
+          </div>
+        )}
+      </RackPanel>
+    </div>
+  );
+}
+
 // --- PAGE: INNER CIRCLE ---
 
 function InnerCirclePage({ innerCircleData, saveInnerCircle }) {
@@ -3366,6 +3545,7 @@ export default function RoonieControlRoom() {
     viewerNotesData,
     memoryPendingData,
     innerCircleData,
+    scheduleData,
     twitchStatusData,
     twitchNotice,
     setTwitchNotice,
@@ -3373,6 +3553,7 @@ export default function RoonieControlRoom() {
     busyAction,
     saveStudioProfile,
     saveInnerCircle,
+    saveStreamSchedule,
     searchLibraryIndex,
     uploadLibraryXml,
     setProviderActive,
@@ -3431,6 +3612,7 @@ export default function RoonieControlRoom() {
       case "auth": return <AuthPage twitchStatusData={twitchStatusData} twitchConnectStart={twitchConnectStart} twitchConnectPoll={twitchConnectPoll} twitchDisconnect={twitchDisconnect} twitchNotice={twitchNotice} setTwitchNotice={setTwitchNotice} />;
       case "culture": return <CulturePage culturalNotesData={culturalNotesData} viewerNotesData={viewerNotesData} memoryPendingData={memoryPendingData} saveCulturalNote={saveCulturalNote} deleteCulturalNote={deleteCulturalNote} saveViewerNote={saveViewerNote} deleteViewerNote={deleteViewerNote} reviewMemoryPending={reviewMemoryPending} />;
       case "innercircle": return <InnerCirclePage innerCircleData={innerCircleData} saveInnerCircle={saveInnerCircle} />;
+      case "schedule": return <SchedulePage scheduleData={scheduleData} saveStreamSchedule={saveStreamSchedule} />;
       case "snapshot": return <CulturalSnapshotPage logsEventsData={logsEventsData} logsSuppressionsData={logsSuppressionsData} statusData={statusData} />;
       case "senses": return <SensesPage sensesStatusData={sensesStatusData} />;
       case "governance": return <GovernancePage />;

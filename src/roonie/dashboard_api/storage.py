@@ -336,6 +336,7 @@ class DashboardStorage:
         self._twitch_config_path = self.data_dir / "twitch_config.json"
         self._studio_profile_path = self.data_dir / "studio_profile.json"
         self._inner_circle_path = self.data_dir / "inner_circle.json"
+        self._stream_schedule_path = self.data_dir / "stream_schedule.json"
         self._library_dir = self.data_dir / "library"
         self._library_xml_path = self._library_dir / "rekordbox.xml"
         self._library_index_path = self._library_dir / "library_index.json"
@@ -2682,6 +2683,134 @@ class DashboardStorage:
 
         changed_keys = [
             key for key in ("members",)
+            if old.get(key) != new.get(key)
+        ]
+        old_hash = _json_sha256(old)
+        new_hash = _json_sha256(new)
+        audit_payload = {
+            "changed_keys": changed_keys,
+            "old_snapshot_hash": old_hash,
+            "new_snapshot_hash": new_hash,
+            "mode": "patch" if patch else "put",
+        }
+        return new, audit_payload
+
+    # ── stream_schedule ─────────────────────────────────────────
+
+    _VALID_DAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+
+    @staticmethod
+    def _default_stream_schedule() -> Dict[str, Any]:
+        return {
+            "version": 1,
+            "timezone": "ET",
+            "slots": [
+                {"day": "thursday", "time": "7:00 PM", "note": "Art solo", "enabled": True},
+                {"day": "saturday", "time": "7:00 PM", "note": "", "enabled": True},
+            ],
+            "next_stream_override": "",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_by": "system",
+        }
+
+    def _coerce_stream_schedule_fields(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ValueError("stream_schedule payload must be an object.")
+        tz = self._bounded_text(
+            payload.get("timezone"), field_name="timezone", max_len=40, required=False,
+        )
+        if not tz:
+            tz = "ET"
+        override = self._bounded_text(
+            payload.get("next_stream_override"), field_name="next_stream_override", max_len=200, required=False,
+        )
+        slots_raw = payload.get("slots", [])
+        if not isinstance(slots_raw, list):
+            raise ValueError("slots must be a list.")
+        if len(slots_raw) > 7:
+            raise ValueError("slots exceeds maximum size (7).")
+        slots: List[Dict[str, Any]] = []
+        seen_days: set[str] = set()
+        for idx, item in enumerate(slots_raw):
+            if not isinstance(item, dict):
+                raise ValueError(f"slots[{idx}] must be an object.")
+            day = self._bounded_text(
+                item.get("day"), field_name=f"slots[{idx}].day", max_len=20, required=True,
+            ).lower()
+            if day not in self._VALID_DAYS:
+                raise ValueError(f"slots[{idx}].day must be a valid weekday, got '{day}'.")
+            if day in seen_days:
+                raise ValueError(f"Duplicate day: {day}")
+            seen_days.add(day)
+            time_val = self._bounded_text(
+                item.get("time"), field_name=f"slots[{idx}].time", max_len=30, required=True,
+            )
+            note = self._bounded_text(
+                item.get("note"), field_name=f"slots[{idx}].note", max_len=100, required=False,
+            )
+            enabled = item.get("enabled", True)
+            if not isinstance(enabled, bool):
+                enabled = bool(enabled)
+            slots.append({"day": day, "time": time_val, "note": note, "enabled": enabled})
+        return {"version": 1, "timezone": tz, "slots": slots, "next_stream_override": override}
+
+    def _normalize_stream_schedule_for_read(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        fields = self._coerce_stream_schedule_fields(payload)
+        updated_at_raw = payload.get("updated_at")
+        updated_at = _format_iso(_parse_iso(str(updated_at_raw))) if updated_at_raw else None
+        return {
+            **fields,
+            "updated_at": updated_at or datetime.now(timezone.utc).isoformat(),
+            "updated_by": self.normalize_actor(payload.get("updated_by")),
+        }
+
+    def _normalize_stream_schedule_for_write(self, payload: Dict[str, Any], actor: str) -> Dict[str, Any]:
+        fields = self._coerce_stream_schedule_fields(payload)
+        return {
+            **fields,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_by": self.normalize_actor(actor),
+        }
+
+    def _read_or_create_stream_schedule_locked(self) -> Dict[str, Any]:
+        raw = _safe_read_json(self._stream_schedule_path)
+        if isinstance(raw, dict):
+            try:
+                return self._normalize_stream_schedule_for_read(raw)
+            except ValueError:
+                pass
+        default = self._default_stream_schedule()
+        self._write_json_atomic(self._stream_schedule_path, default)
+        return default
+
+    def get_stream_schedule(self) -> Dict[str, Any]:
+        with self._lock:
+            schedule = self._read_or_create_stream_schedule_locked()
+            self._write_json_atomic(self._stream_schedule_path, schedule)
+            return deepcopy(schedule)
+
+    def update_stream_schedule(
+        self,
+        payload: Dict[str, Any],
+        *,
+        actor: Optional[str] = None,
+        patch: bool = False,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid JSON payload.")
+        actor_norm = self.normalize_actor(actor)
+        with self._lock:
+            old = self._read_or_create_stream_schedule_locked()
+            merged = (
+                self._merge_dicts(old, payload)
+                if patch
+                else self._merge_dicts(self._default_stream_schedule(), payload)
+            )
+            new = self._normalize_stream_schedule_for_write(merged, actor_norm)
+            self._write_json_atomic(self._stream_schedule_path, new)
+
+        changed_keys = [
+            key for key in ("slots", "timezone", "next_stream_override")
             if old.get(key) != new.get(key)
         ]
         old_hash = _json_sha256(old)

@@ -483,6 +483,47 @@ class ProviderDirector:
             return ""
         return "People you know:\n" + "\n".join(lines)
 
+    _DAY_ORDER = {
+        "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+        "friday": 4, "saturday": 5, "sunday": 6,
+    }
+
+    @staticmethod
+    def _stream_schedule_block(metadata: Dict[str, Any]) -> str:
+        raw = metadata.get("stream_schedule")
+        if not isinstance(raw, dict):
+            return ""
+        slots = raw.get("slots", [])
+        if not isinstance(slots, list):
+            return ""
+        tz = str(raw.get("timezone", "ET")).strip() or "ET"
+        day_order = ProviderDirector._DAY_ORDER
+        filtered = []
+        for s in slots:
+            if not isinstance(s, dict):
+                continue
+            day = str(s.get("day", "")).strip().lower()
+            time_val = str(s.get("time", "")).strip()
+            if day and time_val:
+                filtered.append(s)
+        if not filtered:
+            return ""
+        filtered.sort(key=lambda s: day_order.get(str(s.get("day", "")).strip().lower(), 99))
+        parts = []
+        for s in filtered:
+            day = str(s.get("day", "")).strip().capitalize()
+            time_val = str(s.get("time", "")).strip()
+            note = str(s.get("note", "")).strip()
+            entry = f"{day} {time_val}"
+            if note:
+                entry += f" ({note})"
+            parts.append(entry)
+        line = f"Stream schedule (all times {tz}): {', '.join(parts)}"
+        override = str(raw.get("next_stream_override", "")).strip()
+        if override:
+            line += f"\nSchedule note: {override}"
+        return line
+
     @staticmethod
     def _extract_topic_anchor(message: str) -> str:
         text = str(message or "").strip()
@@ -617,6 +658,7 @@ class ProviderDirector:
         now_playing_available: bool,
         now_playing_text: str = "",
         inner_circle_text: str = "",
+        schedule_text: str = "",
         memory_hints: str,
         topic_anchor: str,
         library_block: str,
@@ -635,6 +677,7 @@ class ProviderDirector:
             max_context_chars=1200,
             now_playing_text=now_playing_text,
             inner_circle_text=inner_circle_text,
+            schedule_text=schedule_text,
         )
         behavior_block = behavior_guidance(
             category=category,
@@ -847,6 +890,7 @@ class ProviderDirector:
             )
 
         inner_circle_text = self._inner_circle_block(metadata)
+        schedule_text = self._stream_schedule_block(metadata)
 
         prompt = self._build_prompt(
             event,
@@ -856,6 +900,7 @@ class ProviderDirector:
             now_playing_available=now_playing_available,
             now_playing_text=now_playing,
             inner_circle_text=inner_circle_text,
+            schedule_text=schedule_text,
             memory_hints=memory_result.text_snippet,
             topic_anchor=topic_anchor,
             library_block=library_block,
