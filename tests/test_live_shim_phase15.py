@@ -313,6 +313,166 @@ def test_live_payload_reuses_director_instance_for_context_carry_forward(tmp_pat
     assert int(second_decision.get("context_turns_used", 0)) >= 1
 
 
+def test_live_payload_suppressed_output_does_not_add_assistant_context(tmp_path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runtime-runs"
+    monkeypatch.setenv("ROONIE_DASHBOARD_RUNS_DIR", str(runs_dir))
+    monkeypatch.setenv("ROONIE_PROVIDERS_CONFIG_PATH", str(tmp_path / "providers_config.json"))
+    monkeypatch.setenv("ROONIE_ROUTING_CONFIG_PATH", str(tmp_path / "routing_config.json"))
+    monkeypatch.setenv("ROONIE_OUTPUT_RATE_LIMIT_SECONDS", "0")
+
+    import responders.output_gate as output_gate
+
+    output_gate._LAST_EMIT_TS = 0.0
+    output_gate._LAST_EMIT_BY_KEY.clear()
+
+    captured_prompts = []
+
+    def _stub_route_generate(**kwargs):
+        captured_prompts.append(str(kwargs.get("prompt") or ""))
+        kwargs["context"]["provider_selected"] = "openai"
+        kwargs["context"]["moderation_result"] = "allow"
+        return "all good"
+
+    monkeypatch.setattr("roonie.provider_director.route_generate", _stub_route_generate)
+
+    director = ProviderDirector()
+    env = Env(offline=False)
+
+    # First turn is suppressed by OutputGate, so assistant text should not enter continuity context.
+    monkeypatch.setenv("ROONIE_OUTPUT_DISABLED", "1")
+    first_path = run_payload(
+        {
+            "session_id": "live-suppressed-context",
+            "active_director": "ProviderDirector",
+            "inputs": [
+                {
+                    "event_id": "evt-1",
+                    "message": "@RoonieTheCat first message",
+                    "metadata": {
+                        "user": "ruleofrune",
+                        "is_direct_mention": True,
+                        "mode": "live",
+                        "platform": "twitch",
+                    },
+                }
+            ],
+        },
+        emit_outputs=True,
+        director_instance=director,
+        env_instance=env,
+    )
+    first_doc = json.loads(first_path.read_text(encoding="utf-8"))
+    assert first_doc["outputs"][0]["emitted"] is False
+    assert first_doc["outputs"][0]["reason"] == "OUTPUT_DISABLED"
+
+    monkeypatch.setenv("ROONIE_OUTPUT_DISABLED", "0")
+    _ = run_payload(
+        {
+            "session_id": "live-suppressed-context",
+            "active_director": "ProviderDirector",
+            "inputs": [
+                {
+                    "event_id": "evt-2",
+                    "message": "@RoonieTheCat second message",
+                    "metadata": {
+                        "user": "ruleofrune",
+                        "is_direct_mention": True,
+                        "mode": "live",
+                        "platform": "twitch",
+                    },
+                }
+            ],
+        },
+        emit_outputs=True,
+        director_instance=director,
+        env_instance=env,
+    )
+
+    assert len(captured_prompts) >= 2
+    second_prompt = captured_prompts[-1]
+    assert "ruleofrune: @RoonieTheCat first message" in second_prompt
+    assert "Roonie: all good" not in second_prompt
+
+
+def test_live_payload_emitted_output_can_add_assistant_context(tmp_path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runtime-runs"
+    monkeypatch.setenv("ROONIE_DASHBOARD_RUNS_DIR", str(runs_dir))
+    monkeypatch.setenv("ROONIE_PROVIDERS_CONFIG_PATH", str(tmp_path / "providers_config.json"))
+    monkeypatch.setenv("ROONIE_ROUTING_CONFIG_PATH", str(tmp_path / "routing_config.json"))
+    monkeypatch.setenv("ROONIE_OUTPUT_DISABLED", "0")
+    monkeypatch.setenv("ROONIE_OUTPUT_RATE_LIMIT_SECONDS", "0")
+
+    import responders.output_gate as output_gate
+
+    output_gate._LAST_EMIT_TS = 0.0
+    output_gate._LAST_EMIT_BY_KEY.clear()
+
+    captured_prompts = []
+
+    def _stub_route_generate(**kwargs):
+        captured_prompts.append(str(kwargs.get("prompt") or ""))
+        kwargs["context"]["provider_selected"] = "openai"
+        kwargs["context"]["moderation_result"] = "allow"
+        return "all good"
+
+    monkeypatch.setattr("roonie.provider_director.route_generate", _stub_route_generate)
+    monkeypatch.setattr(
+        "adapters.twitch_output.TwitchOutputAdapter.handle_output",
+        lambda self, envelope, ctx: {"sent": True, "reason": "OK_TEST"},
+    )
+
+    director = ProviderDirector()
+    env = Env(offline=False)
+
+    _ = run_payload(
+        {
+            "session_id": "live-emitted-context",
+            "active_director": "ProviderDirector",
+            "inputs": [
+                {
+                    "event_id": "evt-1",
+                    "message": "@RoonieTheCat first message",
+                    "metadata": {
+                        "user": "ruleofrune",
+                        "is_direct_mention": True,
+                        "mode": "live",
+                        "platform": "twitch",
+                    },
+                }
+            ],
+        },
+        emit_outputs=True,
+        director_instance=director,
+        env_instance=env,
+    )
+    _ = run_payload(
+        {
+            "session_id": "live-emitted-context",
+            "active_director": "ProviderDirector",
+            "inputs": [
+                {
+                    "event_id": "evt-2",
+                    "message": "@RoonieTheCat second message",
+                    "metadata": {
+                        "user": "ruleofrune",
+                        "is_direct_mention": True,
+                        "mode": "live",
+                        "platform": "twitch",
+                    },
+                }
+            ],
+        },
+        emit_outputs=True,
+        director_instance=director,
+        env_instance=env,
+    )
+
+    assert len(captured_prompts) >= 2
+    second_prompt = captured_prompts[-1]
+    assert "ruleofrune: @RoonieTheCat first message" in second_prompt
+    assert "Roonie: all good" in second_prompt
+
+
 def test_live_payload_honors_manual_offline_director_override(tmp_path, monkeypatch) -> None:
     runs_dir = tmp_path / "runtime-runs"
     monkeypatch.setenv("ROONIE_DASHBOARD_RUNS_DIR", str(runs_dir))
