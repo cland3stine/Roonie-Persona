@@ -121,3 +121,70 @@ def test_topic_anchor_can_apply_to_general_topics_on_deictic_followup(monkeypatc
     assert "Recent topic:" in prompt
     assert "Maze" in prompt
     assert "Library grounding (local)" not in prompt
+
+
+def test_provider_director_stores_assistant_turn_after_send_feedback(monkeypatch) -> None:
+    captured: Dict[str, Any] = {"prompts": []}
+    replies = ["maze is still in heavy rotation", "same, that one stays on repeat"]
+
+    def _stub_route_generate(**kwargs):
+        captured["prompts"].append(kwargs.get("prompt"))
+        kwargs["context"]["provider_selected"] = "openai"
+        kwargs["context"]["moderation_result"] = "allow"
+        return replies.pop(0)
+
+    monkeypatch.setattr("roonie.provider_director.route_generate", _stub_route_generate)
+
+    director = ProviderDirector()
+    env = Env(offline=False)
+
+    first = director.evaluate(_live_event("evt-1", "@RoonieTheCat maze 28 still slaps"), env)
+    assert first.action == "RESPOND_PUBLIC"
+
+    before_feedback = director.context_buffer.get_context(max_turns=12)
+    assert not any(str(turn.speaker).strip().lower() == "roonie" for turn in before_feedback)
+
+    director.apply_output_feedback(
+        event_id="evt-1",
+        emitted=True,
+        send_result={"sent": True, "reason": "OK"},
+    )
+
+    after_feedback = director.context_buffer.get_context(max_turns=12)
+    assert any(str(turn.speaker).strip().lower() == "roonie" for turn in after_feedback)
+
+    director.evaluate(_live_event("evt-2", "@RoonieTheCat what was that one again?"), env)
+    prompt = str(captured["prompts"][-1] or "")
+    assert "Roonie: maze is still in heavy rotation" in prompt
+
+
+def test_provider_director_does_not_store_assistant_turn_when_not_sent(monkeypatch) -> None:
+    captured: Dict[str, Any] = {"prompts": []}
+    replies = ["this one gets wild", "you caught the mood right away"]
+
+    def _stub_route_generate(**kwargs):
+        captured["prompts"].append(kwargs.get("prompt"))
+        kwargs["context"]["provider_selected"] = "openai"
+        kwargs["context"]["moderation_result"] = "allow"
+        return replies.pop(0)
+
+    monkeypatch.setattr("roonie.provider_director.route_generate", _stub_route_generate)
+
+    director = ProviderDirector()
+    env = Env(offline=False)
+
+    first = director.evaluate(_live_event("evt-1", "@RoonieTheCat this part is nuts"), env)
+    assert first.action == "RESPOND_PUBLIC"
+
+    director.apply_output_feedback(
+        event_id="evt-1",
+        emitted=False,
+        send_result={"sent": False, "reason": "RATE_LIMIT"},
+    )
+
+    after_feedback = director.context_buffer.get_context(max_turns=12)
+    assert not any(str(turn.speaker).strip().lower() == "roonie" for turn in after_feedback)
+
+    director.evaluate(_live_event("evt-2", "@RoonieTheCat and what about this drop?"), env)
+    prompt = str(captured["prompts"][-1] or "")
+    assert "Roonie: this one gets wild" not in prompt

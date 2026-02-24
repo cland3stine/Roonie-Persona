@@ -127,6 +127,56 @@ def _strip_model_metadata_from_decisions(decisions: list[dict]) -> list[dict]:
     return sanitized
 
 
+def _apply_output_feedback_to_director(*, director: Any, decisions: list[dict], outputs: list[dict]) -> None:
+    if not hasattr(director, "apply_output_feedback"):
+        return
+    output_by_event: Dict[str, Dict[str, Any]] = {}
+    for item in outputs:
+        if not isinstance(item, dict):
+            continue
+        event_id = str(item.get("event_id", "")).strip()
+        if event_id:
+            output_by_event[event_id] = item
+    for decision in decisions:
+        if not isinstance(decision, dict):
+            continue
+        event_id = str(decision.get("event_id", "")).strip()
+        if not event_id:
+            continue
+        output_item = output_by_event.get(event_id)
+        emitted = bool(output_item.get("emitted", False)) if isinstance(output_item, dict) else False
+        send_result = output_item.get("send_result") if isinstance(output_item, dict) else None
+        try:
+            director.apply_output_feedback(
+                event_id=event_id,
+                emitted=emitted,
+                send_result=send_result if isinstance(send_result, dict) else None,
+            )
+        except Exception:
+            pass
+
+
+def _apply_default_feedback_to_director(*, director: Any, decisions: list[dict]) -> None:
+    if not hasattr(director, "apply_output_feedback"):
+        return
+    for decision in decisions:
+        if not isinstance(decision, dict):
+            continue
+        event_id = str(decision.get("event_id", "")).strip()
+        if not event_id:
+            continue
+        action = str(decision.get("action", "")).strip().upper()
+        emitted = action == "RESPOND_PUBLIC"
+        try:
+            director.apply_output_feedback(
+                event_id=event_id,
+                emitted=emitted,
+                send_result={"sent": emitted},
+            )
+        except Exception:
+            pass
+
+
 def run_payload(
     payload: dict,
     emit_outputs: bool = False,
@@ -219,6 +269,9 @@ def run_payload(
                 )
                 output_rec["send_result"] = send_result
         output["outputs"] = outputs
+        _apply_output_feedback_to_director(director=director, decisions=decisions, outputs=outputs)
+    else:
+        _apply_default_feedback_to_director(director=director, decisions=decisions)
     if fixture_hint:
         output["fixture_hint"] = fixture_hint
 

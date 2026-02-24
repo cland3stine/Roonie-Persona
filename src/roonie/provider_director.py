@@ -249,9 +249,52 @@ class ProviderDirector:
     _topic_anchor_kind: str = field(default="", init=False, repr=False)  # "music"|"general"
     _library_cache_mtime_ns: int = field(default=0, init=False, repr=False)
     _library_cache_tracks: List[Dict[str, Any]] = field(default_factory=list, init=False, repr=False)
+    _pending_assistant_turns: Dict[str, Dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._persona_policy_text = _load_persona_policy_text()
+
+    def _queue_pending_assistant_turn(self, *, event_id: str, text: str, related_to_stored_user: bool) -> None:
+        key = str(event_id or "").strip()
+        value = str(text or "").strip()
+        if not key or not value:
+            return
+        self._pending_assistant_turns[key] = {
+            "text": value,
+            "related_to_stored_user": bool(related_to_stored_user),
+        }
+        # Keep this bounded for direct unit tests that call evaluate without output feedback.
+        if len(self._pending_assistant_turns) > 128:
+            oldest_key = next(iter(self._pending_assistant_turns))
+            self._pending_assistant_turns.pop(oldest_key, None)
+
+    def apply_output_feedback(
+        self,
+        *,
+        event_id: str,
+        emitted: bool,
+        send_result: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        key = str(event_id or "").strip()
+        if not key:
+            return
+        pending = self._pending_assistant_turns.pop(key, None)
+        if not isinstance(pending, dict):
+            return
+        text = str(pending.get("text", "")).strip()
+        if not text:
+            return
+        was_sent = bool(emitted)
+        if isinstance(send_result, dict) and "sent" in send_result:
+            was_sent = was_sent and bool(send_result.get("sent", False))
+        if not was_sent:
+            return
+        self.context_buffer.add_turn(
+            speaker="roonie",
+            text=text,
+            sent=True,
+            related_to_stored_user=bool(pending.get("related_to_stored_user", False)),
+        )
 
     def _load_library_tracks_cached(self) -> List[Dict[str, Any]]:
         path = _library_index_path()
@@ -745,6 +788,7 @@ class ProviderDirector:
             self._topic_anchor = ""
             self._topic_anchor_turn = 0
             self._topic_anchor_kind = ""
+            self._pending_assistant_turns.clear()
 
         metadata = event.metadata if isinstance(event.metadata, dict) else {}
         addressed = self._is_direct_address(event)
@@ -963,12 +1007,15 @@ class ProviderDirector:
             action = "RESPOND_PUBLIC"
             route = f"primary:{provider_used}"
 
-        self.context_buffer.add_turn(
-            speaker="roonie",
-            text=response_text or "",
-            sent=True,
-            related_to_stored_user=stored_user_turn,
-        )
+        event_id = str(event.event_id or "").strip()
+        if event_id:
+            self._pending_assistant_turns.pop(event_id, None)
+        if response_text:
+            self._queue_pending_assistant_turn(
+                event_id=event_id,
+                text=response_text,
+                related_to_stored_user=stored_user_turn,
+            )
 
         trace: Dict[str, Any] = {
             "director": {
