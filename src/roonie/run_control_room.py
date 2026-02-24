@@ -97,6 +97,7 @@ def _arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--open-browser", action="store_true")
     p.add_argument("--start-live-chat", action="store_true")
     p.add_argument("--live-account", default=os.getenv("ROONIE_LIVE_ACCOUNT", "bot"), choices=["bot", "broadcaster"])
+    p.add_argument("--start-audio", action="store_true")
     return p
 
 
@@ -312,6 +313,7 @@ def main(argv: list[str] | None = None) -> int:
 
     live_bridge = None
     eventsub_bridge = None
+    audio_bridge = None
     refresh_thread = None
     refresh_stop = threading.Event()
     if bool(args.start_live_chat) and storage is not None and hasattr(storage, "refresh_twitch_tokens_if_needed"):
@@ -380,6 +382,21 @@ def main(argv: list[str] | None = None) -> int:
         _append_log(paths.control_log_path, "LIVE-CHAT: not started (storage unavailable)")
         print("Live chat bridge not started: storage unavailable.")
 
+    if bool(args.start_audio) and live_bridge is not None and storage is not None:
+        from roonie.control_room.audio_bridge import AudioInputBridge
+
+        audio_bridge = AudioInputBridge(
+            live_bridge=live_bridge,
+            storage=storage,
+            logger=lambda line: _append_log(paths.control_log_path, line),
+        )
+        audio_bridge.start()
+        _append_log(paths.control_log_path, "AUDIO: bridge started")
+        print("Audio input bridge started.")
+    elif bool(args.start_audio):
+        _append_log(paths.control_log_path, "AUDIO: not started (live_bridge or storage unavailable)")
+        print("Audio input bridge not started: live chat bridge required.")
+
     if bool(args.open_browser):
         try:
             webbrowser.open(_browser_url(args.host, int(args.port)))
@@ -391,6 +408,9 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        if audio_bridge is not None:
+            audio_bridge.stop()
+            audio_bridge.join(timeout=2.0)
         if eventsub_bridge is not None:
             eventsub_bridge.stop()
             eventsub_bridge.join(timeout=2.0)

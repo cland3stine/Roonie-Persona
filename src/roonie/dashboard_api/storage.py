@@ -337,6 +337,7 @@ class DashboardStorage:
         self._studio_profile_path = self.data_dir / "studio_profile.json"
         self._inner_circle_path = self.data_dir / "inner_circle.json"
         self._stream_schedule_path = self.data_dir / "stream_schedule.json"
+        self._audio_config_path = self.data_dir / "audio_config.json"
         self._library_dir = self.data_dir / "library"
         self._library_xml_path = self._library_dir / "rekordbox.xml"
         self._library_index_path = self._library_dir / "library_index.json"
@@ -1114,7 +1115,7 @@ class DashboardStorage:
             required=True,
         )
         return {
-            "enabled": False,
+            "enabled": _to_bool(raw.get("enabled"), bool(base["enabled"])),
             "local_only": _to_bool(raw.get("local_only"), bool(base["local_only"])),
             "whitelist": whitelist,
             "purpose": purpose,
@@ -1147,10 +1148,11 @@ class DashboardStorage:
     def get_senses_status(self) -> Dict[str, Any]:
         with self._lock:
             config = self._read_or_create_senses_config_locked()
+            enabled = bool(config.get("enabled", False))
             return {
                 **deepcopy(config),
-                "live_hard_disabled": True,
-                "reason": "Senses disabled by Canon; not active in Live.",
+                "live_hard_disabled": not enabled,
+                "reason": "" if enabled else "Senses disabled in config.",
             }
 
     @staticmethod
@@ -2811,6 +2813,112 @@ class DashboardStorage:
 
         changed_keys = [
             key for key in ("slots", "timezone", "next_stream_override")
+            if old.get(key) != new.get(key)
+        ]
+        old_hash = _json_sha256(old)
+        new_hash = _json_sha256(new)
+        audit_payload = {
+            "changed_keys": changed_keys,
+            "old_snapshot_hash": old_hash,
+            "new_snapshot_hash": new_hash,
+            "mode": "patch" if patch else "put",
+        }
+        return new, audit_payload
+
+    # ── audio_config ───────────────────────────────────────────
+
+    @staticmethod
+    def _default_audio_config() -> Dict[str, Any]:
+        return {
+            "enabled": False,
+            "device_name": "",
+            "sample_rate": 16_000,
+            "whisper_model": "base.en",
+            "whisper_device": "cuda",
+            "wake_word_enabled": True,
+            "transcription_interval_seconds": 3.0,
+            "voice_default_user": "Art",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_by": "system",
+        }
+
+    def _normalize_audio_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        base = self._default_audio_config()
+        raw = payload if isinstance(payload, dict) else {}
+        device = self._bounded_text(
+            raw.get("device_name", base["device_name"]),
+            field_name="device_name", max_len=120, required=False,
+        )
+        whisper_model = self._bounded_text(
+            raw.get("whisper_model", base["whisper_model"]),
+            field_name="whisper_model", max_len=40, required=False,
+        ) or "base.en"
+        whisper_device = self._bounded_text(
+            raw.get("whisper_device", base["whisper_device"]),
+            field_name="whisper_device", max_len=20, required=False,
+        ) or "cuda"
+        voice_user = self._bounded_text(
+            raw.get("voice_default_user", base["voice_default_user"]),
+            field_name="voice_default_user", max_len=40, required=False,
+        ) or "Art"
+        sample_rate = raw.get("sample_rate", base["sample_rate"])
+        if not isinstance(sample_rate, int) or sample_rate not in (8_000, 16_000, 22_050, 44_100, 48_000):
+            sample_rate = 16_000
+        interval = raw.get("transcription_interval_seconds", base["transcription_interval_seconds"])
+        if not isinstance(interval, (int, float)) or not (1.0 <= interval <= 30.0):
+            interval = 3.0
+        return {
+            "enabled": _to_bool(raw.get("enabled"), bool(base["enabled"])),
+            "device_name": device,
+            "sample_rate": sample_rate,
+            "whisper_model": whisper_model,
+            "whisper_device": whisper_device,
+            "wake_word_enabled": _to_bool(raw.get("wake_word_enabled"), bool(base["wake_word_enabled"])),
+            "transcription_interval_seconds": float(interval),
+            "voice_default_user": voice_user,
+        }
+
+    def _read_or_create_audio_config_locked(self) -> Dict[str, Any]:
+        raw = _safe_read_json(self._audio_config_path)
+        if isinstance(raw, dict):
+            config = self._normalize_audio_config(raw)
+        else:
+            config = self._normalize_audio_config(self._default_audio_config())
+        config.setdefault("updated_at", datetime.now(timezone.utc).isoformat())
+        config.setdefault("updated_by", "system")
+        self._write_json_atomic(self._audio_config_path, config)
+        return config
+
+    def get_audio_config(self) -> Dict[str, Any]:
+        with self._lock:
+            config = self._read_or_create_audio_config_locked()
+            return deepcopy(config)
+
+    def update_audio_config(
+        self,
+        payload: Dict[str, Any],
+        *,
+        actor: Optional[str] = None,
+        patch: bool = False,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid JSON payload.")
+        actor_norm = self.normalize_actor(actor)
+        with self._lock:
+            old = self._read_or_create_audio_config_locked()
+            merged = (
+                self._merge_dicts(old, payload)
+                if patch
+                else self._merge_dicts(self._default_audio_config(), payload)
+            )
+            new = self._normalize_audio_config(merged)
+            new["updated_at"] = datetime.now(timezone.utc).isoformat()
+            new["updated_by"] = actor_norm
+            self._write_json_atomic(self._audio_config_path, new)
+        changed_keys = [
+            key for key in ("enabled", "device_name", "whisper_model", "whisper_device",
+                            "wake_word_enabled", "sample_rate", "transcription_interval_seconds",
+                            "voice_default_user")
             if old.get(key) != new.get(key)
         ]
         old_hash = _json_sha256(old)

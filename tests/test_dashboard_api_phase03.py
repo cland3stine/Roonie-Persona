@@ -4672,10 +4672,11 @@ def test_senses_status_off_with_guardrails(tmp_path: Path, monkeypatch) -> None:
     assert body["never_publicly_reference_detection"] is True
     assert body["no_viewer_recognition"] is True
     assert body["live_hard_disabled"] is True
-    assert body["reason"] == "Senses disabled by Canon; not active in Live."
+    assert body["reason"] == "Senses disabled in config."
 
 
-def test_senses_enable_attempt_is_forbidden(tmp_path: Path, monkeypatch) -> None:
+def test_senses_enable_attempt_requires_auth(tmp_path: Path, monkeypatch) -> None:
+    """Senses enable endpoint requires operator auth (returns 403 without credentials)."""
     runs_dir = tmp_path / "runs"
     _write_sample_run(runs_dir)
     _set_dashboard_paths(monkeypatch, tmp_path)
@@ -4691,7 +4692,6 @@ def test_senses_enable_attempt_is_forbidden(tmp_path: Path, monkeypatch) -> None
 
     assert code == 403
     assert body["ok"] is False
-    assert body["detail"] == "Senses are disabled by Canon in this build."
 
 
 def test_senses_allowed_guard_always_false() -> None:

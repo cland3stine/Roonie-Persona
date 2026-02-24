@@ -30,6 +30,7 @@ _SENSITIVE_GET_REQUIRED_ROLE: Dict[str, str] = {
     "/api/studio_profile": "operator",
     "/api/inner_circle": "operator",
     "/api/stream_schedule": "operator",
+    "/api/audio_config": "operator",
     "/api/providers/status": "operator",
     "/api/system/readiness": "operator",
     "/api/system/health": "operator",
@@ -731,6 +732,47 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
             )
             _json_response(self, {"ok": True, "stream_schedule": schedule, "audit": audit.to_dict()})
 
+        def _handle_audio_config_write(self, *, patch: bool) -> None:
+            ok_body, payload = self._read_json_body()
+            if not ok_body:
+                _json_response(
+                    self,
+                    {"ok": False, "error": "bad_request", "detail": "Invalid JSON body."},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            identity = self._authorize_write(
+                action="AUDIO_CONFIG_UPDATE",
+                payload=payload,
+                required_role="operator",
+            )
+            if identity is None:
+                return
+            try:
+                config, diff_payload = storage.update_audio_config(
+                    payload,
+                    actor=(identity.get("username") or identity.get("actor")),
+                    patch=patch,
+                )
+            except ValueError as exc:
+                _json_response(
+                    self,
+                    {"ok": False, "error": "bad_request", "detail": str(exc)},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            audit = storage.record_operator_action(
+                operator=identity["operator"],
+                action="AUDIO_CONFIG_UPDATE",
+                payload=diff_payload,
+                result="OK",
+                actor=identity["actor"],
+                username=identity.get("username"),
+                role=identity.get("role"),
+                auth_mode=identity.get("auth_mode"),
+            )
+            _json_response(self, {"ok": True, "audio_config": config, "audit": audit.to_dict()})
+
         def do_GET(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
             query = parse_qs(parsed.query)
@@ -826,6 +868,9 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
                 return
             if path == "/api/stream_schedule":
                 _json_response(self, storage.get_stream_schedule())
+                return
+            if path == "/api/audio_config":
+                _json_response(self, storage.get_audio_config())
                 return
             if path == "/api/providers/status":
                 _json_response(self, storage.get_providers_status())
@@ -1380,26 +1425,46 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
                         status=HTTPStatus.BAD_REQUEST,
                     )
                     return
-                identity = self._identity_from_request(payload)
+                identity = self._authorize_write(
+                    action="SENSES_ENABLE",
+                    payload=payload,
+                    required_role="operator",
+                )
+                if identity is None:
+                    return
+                enabled = payload.get("enabled", False)
+                if not isinstance(enabled, bool):
+                    _json_response(
+                        self,
+                        {"ok": False, "error": "bad_request", "detail": "'enabled' must be a boolean."},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                actor = identity.get("actor") or identity.get("operator") or "Operator"
+                # Write the enabled state to senses_config.json via storage.
+                senses_path = storage.data_dir / "senses_config.json"
+                try:
+                    current = storage.get_senses_status()
+                    current["enabled"] = enabled
+                    storage._write_json_atomic(senses_path, current)
+                except Exception as exc:
+                    _json_response(
+                        self,
+                        {"ok": False, "error": "internal", "detail": str(exc)},
+                        status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    )
+                    return
                 storage.record_operator_action(
                     operator=identity.get("operator") or "Operator",
-                    action="SENSES_ENABLE_ATTEMPT",
-                    payload=payload,
-                    result="DENIED: Senses are disabled by Canon in this build.",
+                    action="SENSES_ENABLE",
+                    payload={"enabled": enabled},
+                    result=f"OK: senses {'enabled' if enabled else 'disabled'}",
                     actor=identity.get("actor"),
                     username=identity.get("username"),
                     role=identity.get("role"),
                     auth_mode=identity.get("auth_mode"),
                 )
-                _json_response(
-                    self,
-                    {
-                        "ok": False,
-                        "error": "forbidden",
-                        "detail": "Senses are disabled by Canon in this build.",
-                    },
-                    status=HTTPStatus.FORBIDDEN,
-                )
+                _json_response(self, {"ok": True, "enabled": enabled})
                 return
 
             if path == "/api/memory/cultural":
@@ -2154,6 +2219,9 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
             if parsed.path == "/api/stream_schedule":
                 self._handle_stream_schedule_write(patch=False)
                 return
+            if parsed.path == "/api/audio_config":
+                self._handle_audio_config_write(patch=False)
+                return
             _json_response(
                 self,
                 {"ok": False, "error": "not_found", "path": parsed.path},
@@ -2175,6 +2243,9 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
                 return
             if parsed.path == "/api/stream_schedule":
                 self._handle_stream_schedule_write(patch=True)
+                return
+            if parsed.path == "/api/audio_config":
+                self._handle_audio_config_write(patch=True)
                 return
             if parsed.path.startswith("/api/memory/cultural/"):
                 ok_body, payload = self._read_json_body()

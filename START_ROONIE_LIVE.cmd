@@ -18,14 +18,20 @@ if not exist "%RUNNER%" (
 
 if not defined ROONIE_ENFORCE_SETUP_GATE set "ROONIE_ENFORCE_SETUP_GATE=1"
 
+set "AUDIO_FLAG="
+if defined ROONIE_AUDIO_ENABLED (
+  if "%ROONIE_AUDIO_ENABLED%"=="1" set "AUDIO_FLAG=--start-audio"
+)
+
 echo [ROONIE] Repo root: %REPO_ROOT%
 echo [ROONIE] Python: %PY_EXE%
 echo [ROONIE] Launching Control Room for LAN monitoring...
 echo [ROONIE] Bind: 0.0.0.0:8787
 echo [ROONIE] Setup gate: %ROONIE_ENFORCE_SETUP_GATE% (ROONIE_ENFORCE_SETUP_GATE)
+if defined AUDIO_FLAG echo [ROONIE] Audio: ENABLED (ROONIE_AUDIO_ENABLED=1)
 echo.
 
-"%PY_EXE%" "%RUNNER%" --host 0.0.0.0 --port 8787 --start-live-chat --live-account bot %*
+"%PY_EXE%" "%RUNNER%" --host 0.0.0.0 --port 8787 --start-live-chat --live-account bot %AUDIO_FLAG% %*
 set "ERR=%ERRORLEVEL%"
 
 if not "%ERR%"=="0" (

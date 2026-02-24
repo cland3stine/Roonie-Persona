@@ -1,2 +1,6 @@
 ﻿pytest
 python-dotenv
+# Audio sense (optional — AudioInputBridge degrades gracefully if missing)
+faster-whisper
+sounddevice
+numpy
