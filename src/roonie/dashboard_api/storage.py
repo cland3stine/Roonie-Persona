@@ -4830,9 +4830,16 @@ class DashboardStorage:
         row["pending_poll_interval_seconds"] = None
         row["pending_poll_next_at"] = None
 
+    _DEFAULT_TWITCH_SCOPES = (
+        "chat:read chat:edit "
+        "moderator:read:followers "
+        "channel:read:subscriptions "
+        "bits:read"
+    )
+
     @staticmethod
     def _twitch_device_scope_list() -> List[str]:
-        scopes = str(os.getenv("TWITCH_REQUEST_SCOPES", "chat:read chat:edit")).strip() or "chat:read chat:edit"
+        scopes = str(os.getenv("TWITCH_REQUEST_SCOPES", DashboardStorage._DEFAULT_TWITCH_SCOPES)).strip() or DashboardStorage._DEFAULT_TWITCH_SCOPES
         return DashboardStorage._normalize_twitch_scopes(scopes)
 
     @staticmethod
@@ -5393,7 +5400,7 @@ class DashboardStorage:
                 "detail": "Open Twitch verification URL and enter the code to connect this account.",
             }
 
-        scopes = str(os.getenv("TWITCH_REQUEST_SCOPES", "chat:read chat:edit")).strip() or "chat:read chat:edit"
+        scopes = str(os.getenv("TWITCH_REQUEST_SCOPES", self._DEFAULT_TWITCH_SCOPES)).strip() or self._DEFAULT_TWITCH_SCOPES
         state_token = secrets.token_urlsafe(24)
         with self._lock:
             state = self._load_twitch_auth_state_locked()

@@ -1,5 +1,6 @@
 ﻿pytest
 python-dotenv
+websocket-client
 # Audio sense (optional — AudioInputBridge degrades gracefully if missing)
 faster-whisper
 sounddevice
