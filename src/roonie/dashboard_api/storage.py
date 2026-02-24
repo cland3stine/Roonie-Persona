@@ -2971,7 +2971,7 @@ class DashboardStorage:
         keys = sorted(payload.keys())[:8]
         compact = {k: payload.get(k) for k in keys}
         text = json.dumps(compact, ensure_ascii=False)
-        return text if len(text) <= 300 else (text[:297] + "...")
+        return text if len(text) <= 512 else (text[:509] + "...")
 
     def record_operator_action(
         self,
@@ -3644,6 +3644,7 @@ class DashboardStorage:
             "music_route_provider": str(routing_status.get("music_route_provider", "grok") or "grok"),
             "moderation_provider": str(routing_status.get("moderation_provider", "openai") or "openai"),
             "manual_override": str(routing_status.get("manual_override", "default") or "default"),
+            "provider_weights": dict(routing_status.get("provider_weights", {})),
             "classification_rules": dict(routing_status.get("classification_rules", {})),
             "can_post": can_post,
             "blocked_by": blocked_by,
@@ -3667,11 +3668,13 @@ class DashboardStorage:
                 "enabled": bool(old_cfg.get("enabled", True)),
                 "manual_override": str(old_cfg.get("manual_override", "default") or "default"),
                 "general_route_mode": str(old_cfg.get("general_route_mode", "active_provider") or "active_provider"),
+                "provider_weights": dict(old_cfg.get("provider_weights", {})),
             },
             "new": {
                 "enabled": bool(new_cfg.get("enabled", True)),
                 "manual_override": str(new_cfg.get("manual_override", "default") or "default"),
                 "general_route_mode": str(new_cfg.get("general_route_mode", "active_provider") or "active_provider"),
+                "provider_weights": dict(new_cfg.get("provider_weights", {})),
             },
         }
 

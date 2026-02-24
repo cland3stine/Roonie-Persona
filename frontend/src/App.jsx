@@ -966,11 +966,13 @@ function useDashboardData(activePage) {
         await patchGeneralRouteMode("random_approved");
         return;
       }
+      if (selected === "weighted") {
+        await patchGeneralRouteMode("weighted_random");
+        return;
+      }
 
-      const currentlyRandomized = String(routingStatusData?.general_route_mode || "")
-        .trim()
-        .toLowerCase() === "random_approved";
-      if (currentlyRandomized) {
+      const currentMode = String(routingStatusData?.general_route_mode || "").trim().toLowerCase();
+      if (currentMode === "random_approved" || currentMode === "weighted_random") {
         await patchGeneralRouteMode("active_provider");
       }
 
@@ -1014,6 +1016,34 @@ function useDashboardData(activePage) {
     } finally {
       await refreshData();
       await refreshSystemHealth();
+    }
+  };
+
+  const patchProviderWeights = async (weights) => {
+    const headers = buildOperatorHeaders({ json: true });
+    try {
+      const response = await apiFetch(`${API_BASE}/api/routing/config`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ provider_weights: weights }),
+      });
+      if (!response.ok) {
+        let detail = response.statusText;
+        try {
+          const body = await response.json();
+          detail = body.detail || body.error || detail;
+        } catch (_err) {
+          // Keep status text fallback.
+        }
+        console.error(`[Dashboard D5] patch weights failed (${response.status}) ${detail}`);
+        return false;
+      }
+      return true;
+    } catch (err) {
+      console.error("[Dashboard D5] patch weights error", err);
+      return false;
+    } finally {
+      await refreshData();
     }
   };
 
@@ -1454,6 +1484,7 @@ function useDashboardData(activePage) {
     rebuildLibraryIndex,
     setProviderActive,
     setProviderCaps,
+    patchProviderWeights,
     setRoutingEnabled,
     setActiveDirector,
     setDryRunEnabled,
@@ -2132,7 +2163,7 @@ function LogsPage({ eventsData, suppressionsData, operatorLogData }) {
     </div>
   );
 }
-function ProvidersPage({ statusData, providersStatusData, routingStatusData, systemHealthData, readinessData, setProviderActive, setProviderCaps, setRoutingEnabled, setActiveDirector, setDryRunEnabled }) {
+function ProvidersPage({ statusData, providersStatusData, routingStatusData, systemHealthData, readinessData, setProviderActive, setProviderCaps, patchProviderWeights, setRoutingEnabled, setActiveDirector, setDryRunEnabled }) {
   const providerMeta = {
     openai: { name: "OpenAI" },
     grok: { name: "Grok" },
@@ -2167,27 +2198,40 @@ function ProvidersPage({ statusData, providersStatusData, routingStatusData, sys
   });
   const generalRouteMode = String(routingStatusData?.general_route_mode || "active_provider").trim().toLowerCase() || "active_provider";
   const randomizedActive = generalRouteMode === "random_approved";
+  const weightedActive = generalRouteMode === "weighted_random";
   const randomizedPool = providers.length ? providers.map((p) => p.name).join(" / ") : "OpenAI / Grok / Anthropic";
+  const backendWeights = (routingStatusData && typeof routingStatusData.provider_weights === "object") ? routingStatusData.provider_weights : {};
   const randomizedOption = {
     id: "randomized",
     name: "Randomized",
-    model: `Per-response roulette (${randomizedPool}), OpenAI moderated`,
+    model: `Equal roulette (${randomizedPool}), OpenAI moderated`,
     latency: null,
     requests: null,
     failures: null,
     moderationBlocks: null,
   };
-  const providerOptions = [...providers, randomizedOption];
+  const weightedOption = {
+    id: "weighted",
+    name: "Weighted",
+    model: `Weighted roulette (G:${backendWeights.grok || 50} O:${backendWeights.openai || 25} A:${backendWeights.anthropic || 25}), OpenAI moderated`,
+    latency: null,
+    requests: null,
+    failures: null,
+    moderationBlocks: null,
+  };
+  const providerOptions = [...providers, randomizedOption, weightedOption];
   const activeProviderId = String(providersStatusData?.active_provider || "").trim().toLowerCase();
-  const ap = randomizedActive ? "randomized" : activeProviderId;
+  const ap = weightedActive ? "weighted" : (randomizedActive ? "randomized" : activeProviderId);
   const a = providerOptions.find((p) => p.id === ap) || null;
   const activeModel = String(
-    randomizedActive
-    ? randomizedOption.model
-    : (providersStatusData?.active_model
-    || statusData?.active_model
-    || (a && a.model)
-    || "")
+    weightedActive
+    ? weightedOption.model
+    : (randomizedActive
+      ? randomizedOption.model
+      : (providersStatusData?.active_model
+        || statusData?.active_model
+        || (a && a.model)
+        || ""))
   ).trim();
   const openaiModel = String(
     providerModels.openai
@@ -2217,7 +2261,7 @@ function ProvidersPage({ statusData, providersStatusData, routingStatusData, sys
   const dailyCostText = tokensUsed !== null && tokensUsed > 0 ? `${tokensUsed}` : "0";
   const routing = routingStatusData || {};
   const routingEnabled = typeof routing.enabled === "boolean" ? routing.enabled : Boolean(statusData?.routing_enabled);
-  const routingModeLabel = generalRouteMode === "random_approved" ? "RANDOMIZED" : "ACTIVE_PROVIDER";
+  const routingModeLabel = generalRouteMode === "weighted_random" ? "WEIGHTED" : (generalRouteMode === "random_approved" ? "RANDOMIZED" : "ACTIVE_PROVIDER");
   const routingOverride = String(routing.manual_override || "default");
   const routingLast = routing.last_decision || {};
   const activeDirector = String(statusData?.active_director || providersStatusData?.active_director || "ProviderDirector");
@@ -2241,6 +2285,19 @@ function ProvidersPage({ statusData, providersStatusData, routingStatusData, sys
   const generalHits = readNumericField(healthRouting, "general_hits");
   const overrideHits = readNumericField(healthRouting, "override_hits");
   const routingClass = String(routingLast.routing_class || "").trim();
+  const [draftWeights, setDraftWeights] = useState({ grok: 50, openai: 25, anthropic: 25 });
+  const [weightApplyState, setWeightApplyState] = useState(null);
+  useEffect(() => {
+    if (backendWeights && (backendWeights.grok !== undefined || backendWeights.openai !== undefined || backendWeights.anthropic !== undefined)) {
+      setDraftWeights({
+        grok: Number(backendWeights.grok) || 0,
+        openai: Number(backendWeights.openai) || 0,
+        anthropic: Number(backendWeights.anthropic) || 0,
+      });
+    }
+  }, [backendWeights.grok, backendWeights.openai, backendWeights.anthropic]);
+  const weightSum = (draftWeights.grok || 0) + (draftWeights.openai || 0) + (draftWeights.anthropic || 0);
+  const weightPct = (val) => weightSum > 0 ? Math.round((val / weightSum) * 100) : 0;
   const metaRowStyle = { display: "flex", justifyContent: "space-between", padding: "4px 0", borderBottom: "1px solid #1f1f22" };
   const metaLabelStyle = { fontSize: 10, color: "#555", fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1 };
   const metaValueStyle = { fontSize: 10, color: "#aaa", fontFamily: "'JetBrains Mono', monospace" };
@@ -2294,7 +2351,7 @@ function ProvidersPage({ statusData, providersStatusData, routingStatusData, sys
           {requestsMax > 0 && requestsUsed !== null && Number.isFinite(requestsUsed) && <MeterBar value={Math.min(requestsUsed, requestsMax)} max={requestsMax} color="#7faacc" label={`Daily request cap (${requestsMax})`} />}
         </RackPanel>
         <RackPanel>
-          <RackLabel>Provider Mode - Pre-Approved + Randomized</RackLabel>
+          <RackLabel>Provider Mode</RackLabel>
           {providerOptions.map((p) => (
             <button key={p.id} onClick={() => setProviderActive(p.id)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: ap === p.id ? "#2a2a2e" : "transparent", border: `1px solid ${ap === p.id ? "#7faacc44" : "#252528"}`, borderRadius: 3, padding: "10px 14px", marginBottom: 6, cursor: "pointer", boxSizing: "border-box" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -2306,6 +2363,48 @@ function ProvidersPage({ statusData, providersStatusData, routingStatusData, sys
             </button>
           ))}
           {!providerOptions.length && <AwaitingBlock style={{ padding: "6px 0" }} message="No providers configured" />}
+          {weightedActive && (
+            <div style={{ background: "#111114", border: "1px solid #1f1f22", borderRadius: 2, padding: "10px 14px", marginTop: 4, marginBottom: 4 }}>
+              <div style={{ fontSize: 10, color: "#555", fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1, marginBottom: 8 }}>PROVIDER WEIGHTS</div>
+              {[
+                { id: "grok", label: "Grok", color: "#7faacc" },
+                { id: "openai", label: "OpenAI", color: "#2ecc40" },
+                { id: "anthropic", label: "Anthropic", color: "#ff851b" },
+              ].map((pw) => (
+                <div key={pw.id} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+                  <span style={{ width: 70, fontSize: 10, color: "#888", fontFamily: "'JetBrains Mono', monospace" }}>{pw.label}</span>
+                  <input
+                    type="range" min={0} max={100} step={5}
+                    value={draftWeights[pw.id] || 0}
+                    onChange={(e) => setDraftWeights((prev) => ({ ...prev, [pw.id]: Number(e.target.value) }))}
+                    style={{ flex: 1, accentColor: pw.color, height: 4, cursor: "pointer" }}
+                  />
+                  <input
+                    type="number" min={0} max={100} step={5}
+                    value={draftWeights[pw.id] || 0}
+                    onChange={(e) => setDraftWeights((prev) => ({ ...prev, [pw.id]: Math.max(0, Math.min(100, Number(e.target.value) || 0)) }))}
+                    style={{ width: 40, background: "#1a1a1e", border: "1px solid #333", borderRadius: 2, color: "#ccc", fontSize: 10, fontFamily: "'JetBrains Mono', monospace", textAlign: "center", padding: "2px 4px" }}
+                  />
+                  <span style={{ width: 32, fontSize: 9, color: "#666", fontFamily: "'JetBrains Mono', monospace", textAlign: "right" }}>{weightPct(draftWeights[pw.id] || 0)}%</span>
+                </div>
+              ))}
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
+                <RackButton
+                  label="APPLY WEIGHTS"
+                  color={weightApplyState === "ok" ? "#2ecc40" : (weightApplyState === "err" ? "#ff4136" : "#7faacc")}
+                  onClick={async () => {
+                    setWeightApplyState(null);
+                    const ok = await patchProviderWeights(draftWeights);
+                    setWeightApplyState(ok ? "ok" : "err");
+                    setTimeout(() => setWeightApplyState(null), 1500);
+                  }}
+                />
+                <span style={{ fontSize: 9, color: "#555", fontFamily: "'JetBrains Mono', monospace" }}>
+                  {weightSum > 0 ? `${weightPct(draftWeights.grok || 0)}/${weightPct(draftWeights.openai || 0)}/${weightPct(draftWeights.anthropic || 0)} (G/O/A)` : "all zero — will use defaults"}
+                </span>
+              </div>
+            </div>
+          )}
           <div style={{ display: "flex", flexDirection: "column", gap: 0, background: "#111114", border: "1px solid #1f1f22", borderRadius: 2, padding: "6px 10px", marginTop: 8 }}>
             <div style={metaRowStyle}><span style={metaLabelStyle}>OPENAI MODEL</span><span style={metaValueStyle}>{openaiModel}</span></div>
             <div style={metaRowStyle}><span style={metaLabelStyle}>DIRECTOR MODEL</span><span style={metaValueStyle}>{directorModel}</span></div>
@@ -2315,9 +2414,11 @@ function ProvidersPage({ statusData, providersStatusData, routingStatusData, sys
           <div style={{ marginTop: 6, fontSize: 10, color: "#555", fontFamily: "'IBM Plex Sans', sans-serif" }}>
             {!routingEnabled
               ? "Grok routing disabled (Routing OFF)"
-              : (randomizedActive
-                ? "Randomized mode active: each response picks a provider from approved pool (OpenAI moderation still enforced)."
-                : "Grok receives music/culture routes when Routing is ON")}
+              : (weightedActive
+                ? "Weighted mode active: each response picks a provider based on configured weights (OpenAI moderation still enforced)."
+                : (randomizedActive
+                  ? "Randomized mode active: each response picks a provider from approved pool (OpenAI moderation still enforced)."
+                  : "Grok receives music/culture routes when Routing is ON"))}
           </div>
           <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
             <RackButton label={`ROUTING ${routingEnabled ? "ON" : "OFF"}`} color={routingEnabled ? "#2ecc40" : "#ff851b"} onClick={() => setRoutingEnabled(!routingEnabled)} />
@@ -3276,6 +3377,7 @@ export default function RoonieControlRoom() {
     uploadLibraryXml,
     setProviderActive,
     setProviderCaps,
+    patchProviderWeights,
     setRoutingEnabled,
     setActiveDirector,
     setDryRunEnabled,
@@ -3325,7 +3427,7 @@ export default function RoonieControlRoom() {
       case "announcements": return <AnnouncementsPage queueData={queueData} performAction={performAction} />;
       case "nowplaying": return <NowPlayingPage />;
       case "logs": return <LogsPage eventsData={logsEventsData} suppressionsData={logsSuppressionsData} operatorLogData={logsOperatorData} />;
-      case "providers": return <ProvidersPage statusData={statusData} providersStatusData={providersStatusData} routingStatusData={routingStatusData} systemHealthData={systemHealthData} readinessData={readinessData} setProviderActive={setProviderActive} setProviderCaps={setProviderCaps} setRoutingEnabled={setRoutingEnabled} setActiveDirector={setActiveDirector} setDryRunEnabled={setDryRunEnabled} />;
+      case "providers": return <ProvidersPage statusData={statusData} providersStatusData={providersStatusData} routingStatusData={routingStatusData} systemHealthData={systemHealthData} readinessData={readinessData} setProviderActive={setProviderActive} setProviderCaps={setProviderCaps} patchProviderWeights={patchProviderWeights} setRoutingEnabled={setRoutingEnabled} setActiveDirector={setActiveDirector} setDryRunEnabled={setDryRunEnabled} />;
       case "auth": return <AuthPage twitchStatusData={twitchStatusData} twitchConnectStart={twitchConnectStart} twitchConnectPoll={twitchConnectPoll} twitchDisconnect={twitchDisconnect} twitchNotice={twitchNotice} setTwitchNotice={setTwitchNotice} />;
       case "culture": return <CulturePage culturalNotesData={culturalNotesData} viewerNotesData={viewerNotesData} memoryPendingData={memoryPendingData} saveCulturalNote={saveCulturalNote} deleteCulturalNote={deleteCulturalNote} saveViewerNote={saveViewerNote} deleteViewerNote={deleteViewerNote} reviewMemoryPending={reviewMemoryPending} />;
       case "innercircle": return <InnerCirclePage innerCircleData={innerCircleData} saveInnerCircle={saveInnerCircle} />;
@@ -3421,9 +3523,11 @@ export default function RoonieControlRoom() {
             <div style={{ fontSize: 9, color: "#333", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", lineHeight: 1.8 }}>
               <div>STREAM: {String(statusData.mode || "offline").toUpperCase()}</div>
               <div>TWITCH: {statusData.twitch_connected ? "CONNECTED" : "DISCONNECTED"}</div>
-              <div>PROVIDER: {(String(routingStatusData?.general_route_mode || "").toLowerCase() === "random_approved"
-                ? "RANDOMIZED"
-                : (statusData.active_provider ? String(statusData.active_provider).toUpperCase() : "NONE"))}</div>
+              <div>PROVIDER: {(String(routingStatusData?.general_route_mode || "").toLowerCase() === "weighted_random"
+                ? "WEIGHTED"
+                : (String(routingStatusData?.general_route_mode || "").toLowerCase() === "random_approved"
+                  ? "RANDOMIZED"
+                  : (statusData.active_provider ? String(statusData.active_provider).toUpperCase() : "NONE")))}</div>
               <div>DIRECTOR: {String(statusData.active_director || "ProviderDirector").toUpperCase()}</div>
               <div>ROUTING: {statusData.routing_enabled ? "ON" : "OFF"}</div>
               <div

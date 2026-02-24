@@ -7,6 +7,8 @@ import os
 import re
 import threading
 import time
+import urllib.error
+import urllib.request
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,7 +21,8 @@ from providers.registry import ProviderRegistry
 _SUPPORTED_PROVIDERS = ("openai", "grok", "anthropic")
 _DEFAULT_APPROVED_PROVIDERS = ("openai", "grok", "anthropic")
 _ROUTING_OVERRIDE_MODES = ("default", "force_openai", "force_grok")
-_GENERAL_ROUTE_MODES = ("active_provider", "random_approved")
+_GENERAL_ROUTE_MODES = ("active_provider", "random_approved", "weighted_random")
+_DEFAULT_PROVIDER_WEIGHTS = {"grok": 50, "openai": 25, "anthropic": 25}
 _MODEL_DEFAULTS = {
     "OPENAI_MODEL": "gpt-5.2",
     "ROONIE_DIRECTOR_MODEL": "gpt-5.2",
@@ -43,14 +46,6 @@ _ROUTING_MUSIC_KEYWORDS = (
 )
 _ARTIST_TITLE_PATTERN = re.compile(r"\b[\w][\w .&'â€™]{1,80}\s-\s[\w][\w .&'â€™]{1,120}\b")
 _ARTIST_TITLE_HINT_PATTERN = re.compile(r"\b(track|id|song|tune|mix|remix)\b")
-_MODERATION_BLOCK_PHRASES = (
-    "phone number",
-    "home address",
-    "dox",
-    "doxx",
-    "suicidal",
-    "kill myself",
-)
 _BEARER_TOKEN_RE = re.compile(r"(Bearer\s+)[A-Za-z0-9_\-\.=:+/]+", re.IGNORECASE)
 try:
     _NY_TZ = ZoneInfo("America/New_York")
@@ -284,6 +279,7 @@ def _default_routing_config() -> Dict[str, Any]:
         "music_route_provider": "grok",
         "moderation_provider": "openai",
         "manual_override": "default",
+        "provider_weights": dict(_DEFAULT_PROVIDER_WEIGHTS),
         "classification_rules": {
             "music_culture_keywords": list(_ROUTING_MUSIC_KEYWORDS),
             "artist_title_pattern": True,
@@ -375,6 +371,20 @@ def _normalize_routing_config(raw: Dict[str, Any]) -> Dict[str, Any]:
     if manual_override not in _ROUTING_OVERRIDE_MODES:
         manual_override = "default"
     out["manual_override"] = manual_override
+    # Provider weights normalization.
+    weights_raw = raw.get("provider_weights", {})
+    if not isinstance(weights_raw, dict):
+        weights_raw = {}
+    weights_out: Dict[str, int] = {}
+    for name in _SUPPORTED_PROVIDERS:
+        try:
+            weights_out[name] = max(0, int(weights_raw.get(name, _DEFAULT_PROVIDER_WEIGHTS.get(name, 0))))
+        except (TypeError, ValueError):
+            weights_out[name] = _DEFAULT_PROVIDER_WEIGHTS.get(name, 0)
+    if all(v == 0 for v in weights_out.values()):
+        weights_out = dict(_DEFAULT_PROVIDER_WEIGHTS)
+    out["provider_weights"] = weights_out
+
     # Routing rules are fixed in v1 to avoid drift.
     out["classification_rules"] = deepcopy(base["classification_rules"])
     return out
@@ -571,7 +581,7 @@ def set_provider_active(provider: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 def update_routing_runtime_controls(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     if not isinstance(payload, dict):
         raise ValueError("routing payload must be an object.")
-    allowed = {"enabled", "manual_override", "general_route_mode"}
+    allowed = {"enabled", "manual_override", "general_route_mode", "provider_weights"}
     invalid = [key for key in payload.keys() if key not in allowed]
     if invalid:
         raise ValueError(f"unsupported routing fields: {', '.join(sorted(invalid))}")
@@ -592,8 +602,29 @@ def update_routing_runtime_controls(payload: Dict[str, Any]) -> Tuple[Dict[str, 
         if "general_route_mode" in payload:
             mode = str(payload.get("general_route_mode", "")).strip().lower()
             if mode not in _GENERAL_ROUTE_MODES:
-                raise ValueError("general_route_mode must be one of: active_provider, random_approved.")
+                raise ValueError(
+                    "general_route_mode must be one of: active_provider, random_approved, weighted_random."
+                )
             cfg["general_route_mode"] = mode
+        if "provider_weights" in payload:
+            raw_weights = payload.get("provider_weights")
+            if not isinstance(raw_weights, dict):
+                raise ValueError("provider_weights must be an object with provider name keys.")
+            validated: Dict[str, int] = {}
+            for name in _SUPPORTED_PROVIDERS:
+                val = raw_weights.get(name)
+                if val is None:
+                    validated[name] = cfg.get("provider_weights", {}).get(
+                        name, _DEFAULT_PROVIDER_WEIGHTS.get(name, 0)
+                    )
+                else:
+                    try:
+                        validated[name] = max(0, int(val))
+                    except (TypeError, ValueError):
+                        raise ValueError(f"provider_weights.{name} must be an integer.")
+            if all(v == 0 for v in validated.values()):
+                validated = dict(_DEFAULT_PROVIDER_WEIGHTS)
+            cfg["provider_weights"] = validated
         new = _save_routing_config_locked(path, cfg)
     return old, new
 
@@ -1300,6 +1331,36 @@ def _provider_for_name(
     return registry_default
 
 
+def _select_provider_weighted(
+    candidates: list[str],
+    weights: Dict[str, int],
+    digest: bytes,
+) -> str:
+    """Deterministic weighted selection using 2 bytes of SHA-256 digest."""
+    if not candidates:
+        return "openai"
+    if len(candidates) == 1:
+        return candidates[0]
+    # Build cumulative weight ranges for candidates with positive weight.
+    weighted_candidates: list[tuple[str, int]] = []
+    for name in candidates:
+        w = max(0, int(weights.get(name, 0)))
+        if w > 0:
+            weighted_candidates.append((name, w))
+    if not weighted_candidates:
+        # All-zero weights among candidates: fall back to uniform.
+        return candidates[int(digest[0]) % len(candidates)]
+    total = sum(w for _, w in weighted_candidates)
+    # Use 2 bytes (0–65535) for finer granularity than 1 byte.
+    value = int.from_bytes(digest[:2], "big") % total
+    cumulative = 0
+    for name, w in weighted_candidates:
+        cumulative += w
+        if value < cumulative:
+            return name
+    return weighted_candidates[-1][0]
+
+
 def _select_provider_from_routing(
     *,
     routing_cfg: Dict[str, Any],
@@ -1349,7 +1410,66 @@ def _select_provider_from_routing(
             context["general_route_mode"] = general_route_mode
             context["provider_roulette_candidates"] = list(candidates)
         return selected
+    if general_route_mode == "weighted_random":
+        approved = approved_providers or set()
+        candidates = [
+            name
+            for name in _SUPPORTED_PROVIDERS
+            if ((not approved) or (name in approved))
+        ]
+        if not candidates:
+            candidates = [str(fallback_provider).strip().lower() or "openai"]
+        weights = routing_cfg.get("provider_weights", {})
+        if not isinstance(weights, dict):
+            weights = dict(_DEFAULT_PROVIDER_WEIGHTS)
+        # Filter candidates to only those with positive weight.
+        weighted_candidates = [
+            name for name in candidates if int(weights.get(name, 0)) > 0
+        ]
+        if not weighted_candidates:
+            weighted_candidates = candidates
+        if len(weighted_candidates) == 1:
+            selected = weighted_candidates[0]
+        else:
+            seed_hint = str((context or {}).get("provider_roulette_seed", "")).strip()
+            if seed_hint:
+                seed_material = seed_hint
+            else:
+                seed_parts = [
+                    str((context or {}).get("session_id", "")).strip(),
+                    str((context or {}).get("event_id", "")).strip(),
+                    str((context or {}).get("message_text", "")).strip(),
+                ]
+                seed_material = "|".join(part for part in seed_parts if part)
+            if not seed_material:
+                seed_material = f"fallback:{str(fallback_provider).strip().lower() or 'openai'}"
+            digest = hashlib.sha256(seed_material.encode("utf-8")).digest()
+            selected = _select_provider_weighted(weighted_candidates, weights, digest)
+        if context is not None:
+            context["general_route_mode"] = general_route_mode
+            context["provider_roulette_candidates"] = list(candidates)
+            context["provider_weights"] = {k: int(weights.get(k, 0)) for k in _SUPPORTED_PROVIDERS}
+        return selected
     return str(fallback_provider).strip().lower() or "openai"
+
+
+def _call_openai_moderation_api(text: str) -> Dict[str, Any]:
+    """Call the OpenAI Moderation API. Returns parsed JSON or raises on failure."""
+    api_key = _resolve_secret_or_env("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY not available for moderation")
+    payload = json.dumps({"input": text, "model": "omni-moderation-latest"}).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/moderations",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
 
 def _moderation_allows_model_output(
@@ -1371,10 +1491,31 @@ def _moderation_allows_model_output(
     if forced == "allow":
         return True
 
-    normalized = str(text or "").strip().lower()
+    normalized = str(text or "").strip()
     if not normalized:
         return True
-    return not any(phrase in normalized for phrase in _MODERATION_BLOCK_PHRASES)
+
+    try:
+        result = _call_openai_moderation_api(normalized)
+        results = result.get("results", [])
+        if results and isinstance(results[0], dict):
+            entry = results[0]
+            if entry.get("flagged"):
+                categories = {
+                    k: v for k, v in (entry.get("categories", {}) or {}).items() if v
+                }
+                scores = entry.get("category_scores", {}) or {}
+                context["moderation_flagged_categories"] = categories
+                context["moderation_category_scores"] = {
+                    k: round(float(v), 4)
+                    for k, v in scores.items()
+                    if k in categories
+                }
+                return False
+        return True
+    except Exception:
+        context["moderation_api_error"] = True
+        return True
 
 
 def _mk_shadow_provider(name: str, enabled: bool) -> Provider:
