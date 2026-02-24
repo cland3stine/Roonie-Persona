@@ -96,6 +96,9 @@ class ContextBuffer:
             stored_tags["direct_address"] = bool(incoming["direct_address"])
         if category:
             stored_tags["category"] = category
+        user_tag = str(incoming.get("user", "")).strip().lower()
+        if user_tag:
+            stored_tags["user"] = user_tag
 
         turn = ContextTurn(
             ts=ts or self._now_iso(),

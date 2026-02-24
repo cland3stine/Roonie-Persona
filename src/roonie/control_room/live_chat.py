@@ -93,6 +93,11 @@ class LiveChatBridge:
             return True
         if nick and (f"@{nick}" in text or text.startswith(nick)):
             return True
+        # Twitch reply-to-bot: reply-parent-user-login matches bot nick.
+        tags = msg.tags if isinstance(msg.tags, dict) else {}
+        reply_parent = str(tags.get("reply-parent-user-login", "")).strip().lower()
+        if reply_parent and nick and reply_parent == nick:
+            return True
         return False
 
     def _sync_output_env(self, creds: Dict[str, Any]) -> None:

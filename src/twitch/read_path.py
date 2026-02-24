@@ -3,7 +3,7 @@
 import re
 import socket
 import ssl
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterator
 
 # Twitch may prepend IRCv3 tags to PRIVMSG lines.
@@ -22,6 +22,7 @@ class TwitchMsg:
     channel: str
     message: str
     raw: str
+    tags: dict = field(default_factory=dict)
 
 
 def _connect_tls(host: str, port: int, timeout_s: int) -> socket.socket:
@@ -110,9 +111,17 @@ def iter_twitch_messages(
 
         m = PRIVMSG_RE.match(line)
         if m:
+            parsed_tags: dict = {}
+            tag_str = m.group("tags") or ""
+            if tag_str:
+                for part in tag_str.split(";"):
+                    if "=" in part:
+                        k, v = part.split("=", 1)
+                        parsed_tags[k] = v
             yield TwitchMsg(
                 nick=m.group("nick"),
                 channel=m.group("chan"),
                 message=m.group("msg"),
                 raw=line,
+                tags=parsed_tags,
             )

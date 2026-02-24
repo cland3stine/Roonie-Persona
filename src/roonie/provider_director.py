@@ -392,7 +392,25 @@ class ProviderDirector:
         if bool(event.metadata.get("is_direct_mention")):
             return True
         msg = (event.message or "").strip().lower()
-        return "@roonie" in msg or msg.startswith("roonie")
+        return "roonie" in msg
+
+    def _is_conversation_continuation(self, event: Event) -> bool:
+        """True if Roonie's most recent response was to this same viewer."""
+        viewer = str((event.metadata or {}).get("user", "")).strip().lower()
+        if not viewer:
+            return False
+        turns = self.context_buffer.get_context(max_turns=8)
+        if not turns:
+            return False
+        # Walk backwards: find the most recent roonie turn,
+        # then check if the user turn before it was from this viewer.
+        for i in range(len(turns) - 1, -1, -1):
+            if turns[i].speaker == "roonie":
+                for j in range(i - 1, -1, -1):
+                    if turns[j].speaker == "user":
+                        return str(turns[j].tags.get("user", "")).strip().lower() == viewer
+                break  # Found roonie turn but no preceding user turn
+        return False
 
     @staticmethod
     def _is_trigger_message(message: str) -> bool:
@@ -792,6 +810,7 @@ class ProviderDirector:
 
         metadata = event.metadata if isinstance(event.metadata, dict) else {}
         addressed = self._is_direct_address(event)
+        continuation = (not addressed) and self._is_conversation_continuation(event)
         category = classify_behavior_category(message=event.message, metadata=metadata)
         short_ack_preferred = self._should_short_ack_direct_address(
             addressed=addressed,
@@ -865,7 +884,7 @@ class ProviderDirector:
             speaker="user",
             text=event.message,
             tags={
-                "direct_address": addressed,
+                "direct_address": addressed or continuation,
                 "category": str(event.metadata.get("category", "")).strip().lower(),
                 "user": str(event.metadata.get("user", "")).strip().lower(),
             },
@@ -877,13 +896,14 @@ class ProviderDirector:
             items_used=0,
             dropped_count=0,
         )
-        if addressed and trigger:
+        should_evaluate = (addressed and trigger) or continuation
+        if should_evaluate:
             memory_result = get_safe_injection(
                 db_path=_memory_db_path(),
                 max_chars=900,
                 max_items=10,
             )
-        if not addressed or not trigger:
+        if not should_evaluate:
             return DecisionRecord(
                 case_id=str(event.metadata.get("case_id", "live")),
                 event_id=event.event_id,
@@ -895,6 +915,7 @@ class ProviderDirector:
                         "type": "ProviderDirector",
                         "addressed_to_roonie": addressed,
                         "trigger": trigger,
+                        "conversation_continuation": continuation,
                     },
                     "behavior": {
                         "category": category,
@@ -1022,6 +1043,7 @@ class ProviderDirector:
                 "type": "ProviderDirector",
                 "addressed_to_roonie": addressed,
                 "trigger": trigger,
+                "conversation_continuation": continuation,
                 "routing_enabled": bool(routing_status.get("enabled", True)),
             },
             "behavior": {
