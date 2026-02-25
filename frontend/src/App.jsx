@@ -550,6 +550,9 @@ function useDashboardData(activePage) {
   const [readinessData, setReadinessData] = useState(null);
   const [routingStatusData, setRoutingStatusData] = useState(null);
   const [sensesStatusData, setSensesStatusData] = useState(null);
+  const [audioConfigData, setAudioConfigData] = useState(null);
+  const [audioStatusData, setAudioStatusData] = useState(null);
+  const [audioDevicesData, setAudioDevicesData] = useState([]);
   const [culturalNotesData, setCulturalNotesData] = useState([]);
   const [viewerNotesData, setViewerNotesData] = useState([]);
   const [memoryPendingData, setMemoryPendingData] = useState([]);
@@ -577,7 +580,7 @@ function useDashboardData(activePage) {
     }
     refreshDataInFlightRef.current = true;
     try {
-      const [authRes, statusRes, eventsRes, suppressionsRes, operatorRes, queueRes, studioProfileRes, libraryStatusRes, logsEventsRes, logsSuppressionsRes, logsOperatorRes, providersStatusRes, routingStatusRes, sensesStatusRes, memoryCulturalRes, memoryViewersRes, memoryPendingRes, twitchStatusRes, innerCircleRes, scheduleRes] = await Promise.all([
+      const [authRes, statusRes, eventsRes, suppressionsRes, operatorRes, queueRes, studioProfileRes, libraryStatusRes, logsEventsRes, logsSuppressionsRes, logsOperatorRes, providersStatusRes, routingStatusRes, sensesStatusRes, memoryCulturalRes, memoryViewersRes, memoryPendingRes, twitchStatusRes, innerCircleRes, scheduleRes, audioConfigRes] = await Promise.all([
         apiFetch(`${API_BASE}/api/auth/me`),
         apiFetch(`${API_BASE}/api/status`),
         apiFetch(`${API_BASE}/api/events?limit=5`),
@@ -598,6 +601,7 @@ function useDashboardData(activePage) {
         apiFetch(`${API_BASE}/api/twitch/status`),
         apiFetch(`${API_BASE}/api/inner_circle`),
         apiFetch(`${API_BASE}/api/stream_schedule`),
+        apiFetch(`${API_BASE}/api/audio_config`),
       ]);
       if (authRes.ok) {
         setAuthData(await authRes.json());
@@ -647,6 +651,9 @@ function useDashboardData(activePage) {
       }
       if (scheduleRes.ok) {
         setScheduleData(await scheduleRes.json());
+      }
+      if (audioConfigRes.ok) {
+        setAudioConfigData(await audioConfigRes.json());
       }
     } catch (_err) {
       // Polling errors keep prior data.
@@ -738,6 +745,10 @@ function useDashboardData(activePage) {
       if (page === "senses") {
         fetches.push(apiFetch(`${API_BASE}/api/senses/status`));
         handlers.push((res) => res.ok && res.json().then(setSensesStatusData));
+        fetches.push(apiFetch(`${API_BASE}/api/audio_config`));
+        handlers.push((res) => res.ok && res.json().then(setAudioConfigData));
+        fetches.push(apiFetch(`${API_BASE}/api/audio/devices`));
+        handlers.push(async (res) => { if (res.ok) { const body = await res.json(); setAudioDevicesData(Array.isArray(body?.devices) ? body.devices : []); } });
       }
       if (page === "innercircle") {
         fetches.push(apiFetch(`${API_BASE}/api/inner_circle`));
@@ -900,6 +911,30 @@ function useDashboardData(activePage) {
       console.error("[Dashboard] stream_schedule save error", err);
     } finally {
       await refreshData();
+    }
+  };
+
+  const saveAudioConfig = async (patch) => {
+    const headers = buildOperatorHeaders({ json: true });
+    try {
+      const response = await apiFetch(`${API_BASE}/api/audio_config`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify(patch || {}),
+      });
+      if (!response.ok) {
+        let detail = response.statusText;
+        try {
+          const body = await response.json();
+          detail = body.detail || body.error || detail;
+        } catch (_err) {}
+        console.error(`[Dashboard] audio_config save failed (${response.status}) ${detail}`);
+      } else {
+        const body = await response.json();
+        if (body && body.audio_config) setAudioConfigData(body.audio_config);
+      }
+    } catch (err) {
+      console.error("[Dashboard] audio_config save error", err);
     }
   };
 
@@ -1506,6 +1541,11 @@ function useDashboardData(activePage) {
     readinessData,
     routingStatusData,
     sensesStatusData,
+    audioConfigData,
+    audioStatusData,
+    setAudioStatusData,
+    audioDevicesData,
+    saveAudioConfig,
     culturalNotesData,
     viewerNotesData,
     memoryPendingData,
@@ -3441,18 +3481,248 @@ function CulturalSnapshotPage({ logsEventsData = [], logsSuppressionsData = [], 
 
 // --- PAGE: SENSES ---
 
-function SensesPage({ sensesStatusData }) {
-  const senses = [{ name: "Audio Analysis", desc: "Real-time frequency / BPM detection from stream audio" }, { name: "Visual Feed", desc: "Camera feed analysis for crowd or gesture detection" }, { name: "Emotion Detection", desc: "Chat sentiment beyond keyword matching" }, { name: "Voice Recognition", desc: "Operator voice commands via microphone" }];
+function SensesPage({ sensesStatusData, audioConfigData, audioStatusData, setAudioStatusData, audioDevicesData, saveAudioConfig, performAction }) {
   const status = sensesStatusData || {};
+  const config = audioConfigData || {};
+  const audioStatus = audioStatusData || {};
+  const devices = Array.isArray(audioDevicesData) ? audioDevicesData : [];
+  const sensesEnabled = !status.live_hard_disabled;
+  const audioEnabled = Boolean(config.enabled);
+  const audioRunning = Boolean(audioStatus.running);
+
+  // Local editable config state
+  const [editConfig, setEditConfig] = useState(null);
+  useEffect(() => {
+    if (audioConfigData) setEditConfig({ ...audioConfigData });
+  }, [audioConfigData]);
+  const ec = editConfig || config;
+  const configDirty = editConfig && JSON.stringify(editConfig) !== JSON.stringify(audioConfigData);
+
+  // Fast VU meter polling (300ms) — only while audio is enabled
+  useEffect(() => {
+    if (!audioEnabled) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await apiFetch(`${API_BASE}/api/audio/status`);
+        if (res.ok && !cancelled) {
+          const data = await res.json();
+          if (setAudioStatusData) setAudioStatusData(data);
+        }
+      } catch (_) {}
+    };
+    poll();
+    const iv = setInterval(poll, 300);
+    return () => { cancelled = true; clearInterval(iv); };
+  }, [audioEnabled]);
+
+  // Guardrails text
   const whitelist = Array.isArray(status.whitelist) && status.whitelist.length ? status.whitelist : null;
-  const guardrailsText = `Local-only: ${typeof status.local_only === "boolean" ? (status.local_only ? "yes" : "no") : "\u2014"} | Whitelist: ${whitelist ? whitelist.join(", ") : "none"} | Never initiate: ${typeof status.never_initiate === "boolean" ? (status.never_initiate ? "yes" : "no") : "\u2014"} | No viewer recognition: ${typeof status.no_viewer_recognition === "boolean" ? (status.no_viewer_recognition ? "yes" : "no") : "\u2014"}`;
-  const statusReason = status.reason || "No reason provided";
-  const purpose = status.purpose || "text-only operation";
+  const guardrailItems = [
+    `Local-only: ${typeof status.local_only === "boolean" ? (status.local_only ? "yes" : "no") : "\u2014"}`,
+    `Whitelist: ${whitelist ? whitelist.join(", ") : "none"}`,
+    `Never initiate: ${typeof status.never_initiate === "boolean" ? (status.never_initiate ? "yes" : "no") : "\u2014"}`,
+    `No viewer recognition: ${typeof status.no_viewer_recognition === "boolean" ? (status.no_viewer_recognition ? "yes" : "no") : "\u2014"}`,
+  ];
+
+  const levelRms = typeof audioStatus.level_rms === "number" ? audioStatus.level_rms : 0;
+  const levelColor = levelRms > 0.8 ? "#ff4136" : levelRms > 0.4 ? "#ff851b" : "#2ecc40";
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <div style={{ background: "#ff413608", border: "2px solid #ff413644", borderRadius: 4, padding: "20px 28px", display: "flex", alignItems: "center", gap: 16 }}><div style={{ width: 40, height: 40, borderRadius: "50%", border: "3px solid #ff4136", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, color: "#ff4136", flexShrink: 0 }}>OFF</div><div><div style={{ fontSize: 16, fontWeight: 800, color: "#ff4136", letterSpacing: 3, fontFamily: "'JetBrains Mono', monospace" }}>ALL SENSES CURRENTLY OFF</div><div style={{ fontSize: 12, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif", marginTop: 4, lineHeight: 1.5 }}>Roonie operates on text input only. Purpose: {purpose}. Future senses remain OFF by Canon until explicitly approved.</div></div></div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>{senses.map((s) => (<div key={s.name} style={{ background: "#1a1a1e", border: "1px solid #2a2a2e", borderRadius: 3, padding: 16, position: "relative", opacity: 0.35, pointerEvents: "none", userSelect: "none" }}><div style={{ position: "absolute", top: 6, left: 8, width: 4, height: 4, borderRadius: "50%", background: "#252528", border: "1px solid #333" }} /><div style={{ position: "absolute", top: 6, right: 8, width: 4, height: 4, borderRadius: "50%", background: "#252528", border: "1px solid #333" }} /><div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}><RackLabel>{s.name}</RackLabel><span style={{ fontSize: 9, padding: "3px 8px", background: "#ff413612", border: "1px solid #ff413633", borderRadius: 2, color: "#ff4136", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>HARD OFF</span></div><div style={{ fontSize: 11, color: "#555", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.5, marginBottom: 12 }}>{s.desc}</div><div style={{ borderTop: "1px solid #222", paddingTop: 8 }}><div style={{ fontSize: 9, color: "#444", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace" }}>GUARDRAILS</div><div style={{ fontSize: 10, color: "#555", fontFamily: "'IBM Plex Sans', sans-serif", marginTop: 4 }}>{guardrailsText}</div></div></div>))}</div>
-      <div style={{ padding: "12px 16px", background: "#15151a", border: "1px solid #1f1f22", borderRadius: 3, textAlign: "center" }}><div style={{ fontSize: 10, color: "#444", fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1.5 }}>ENABLING ANY SENSE REQUIRES A CODE-LEVEL CHANGE AND OPERATOR CONSENSUS</div><div style={{ fontSize: 10, color: "#333", fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1, marginTop: 4 }}>{statusReason}</div></div>
+      {/* Header with master senses toggle */}
+      <RackPanel>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <RackLabel style={{ marginBottom: 0 }}>Audio Sense</RackLabel>
+            <Led
+              color={audioRunning ? "#2ecc40" : audioEnabled ? "#ff851b" : "#ff4136"}
+              pulse={audioRunning}
+              label={audioRunning ? "RUNNING" : audioEnabled ? "ENABLED" : "OFF"}
+            />
+          </div>
+          <Toggle
+            on={sensesEnabled}
+            onToggle={() => performAction("/api/senses/enable", { enabled: !sensesEnabled })}
+          />
+        </div>
+        <div style={{ fontSize: 11, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.5 }}>
+          Voice recognition via Whisper STT. Captures audio from a local device, detects wake words, and emits voice events into the chat pipeline.
+        </div>
+      </RackPanel>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        {/* Left column */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {/* Input Device */}
+          <RackPanel>
+            <RackLabel>Input Device</RackLabel>
+            <select
+              value={ec.device_name || ""}
+              onChange={(e) => {
+                const val = e.target.value;
+                setEditConfig((prev) => ({ ...(prev || config), device_name: val }));
+              }}
+              style={{
+                width: "100%", padding: "8px 10px", background: "#15151a", border: "1px solid #333",
+                borderRadius: 2, color: "#aaa", fontSize: 12, fontFamily: "'IBM Plex Sans', sans-serif",
+                cursor: "pointer",
+              }}
+            >
+              <option value="">(system default)</option>
+              {devices.map((d) => (
+                <option key={d.index} value={d.name}>{d.name} ({d.max_input_channels}ch, {d.default_samplerate}Hz)</option>
+              ))}
+            </select>
+            {audioStatus.device && (
+              <div style={{ fontSize: 10, color: "#555", fontFamily: "'JetBrains Mono', monospace", marginTop: 6, letterSpacing: 0.5 }}>
+                Active: {audioStatus.device}
+              </div>
+            )}
+          </RackPanel>
+
+          {/* Audio Level */}
+          <RackPanel>
+            <RackLabel>Audio Level</RackLabel>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+              <div style={{ flex: 1, height: 12, background: "#15151a", borderRadius: 2, overflow: "hidden", border: "1px solid #333", position: "relative" }}>
+                <div style={{
+                  height: "100%",
+                  width: `${Math.min(levelRms * 100, 100)}%`,
+                  background: `linear-gradient(90deg, ${levelColor}88, ${levelColor})`,
+                  borderRadius: 2,
+                  transition: "width 0.15s ease",
+                }} />
+              </div>
+              <span style={{ fontSize: 11, color: "#888", fontFamily: "'JetBrains Mono', monospace", minWidth: 36, textAlign: "right" }}>
+                {levelRms.toFixed(2)}
+              </span>
+            </div>
+            <div style={{ display: "flex", gap: 16, fontSize: 10, color: "#555", fontFamily: "'JetBrains Mono', monospace", letterSpacing: 0.5 }}>
+              <span>Status: {audioRunning ? "RUNNING" : "STOPPED"}</span>
+              {audioStatus.sample_rate && <span>Rate: {audioStatus.sample_rate}Hz</span>}
+            </div>
+          </RackPanel>
+
+          {/* Stats */}
+          <RackPanel>
+            <RackLabel>Stats</RackLabel>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+              {[
+                { label: "Chunks", value: audioStatus.chunks_processed ?? 0 },
+                { label: "Wake words", value: audioStatus.wake_words_detected ?? 0 },
+                { label: "Events", value: audioStatus.events_emitted ?? 0 },
+              ].map((s) => (
+                <div key={s.label} style={{ background: "#15151a", border: "1px solid #222", borderRadius: 2, padding: "8px 10px", textAlign: "center" }}>
+                  <div style={{ fontSize: 18, color: "#ccc", fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>{s.value}</div>
+                  <div style={{ fontSize: 9, color: "#555", fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1, marginTop: 2 }}>{s.label.toUpperCase()}</div>
+                </div>
+              ))}
+            </div>
+            {audioStatus.last_transcription && (
+              <div style={{ marginTop: 10, padding: "8px 10px", background: "#15151a", border: "1px solid #222", borderRadius: 2 }}>
+                <div style={{ fontSize: 9, color: "#555", fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1, marginBottom: 4 }}>LAST TRANSCRIPTION</div>
+                <div style={{ fontSize: 11, color: "#aaa", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.5, fontStyle: "italic" }}>
+                  "{audioStatus.last_transcription}"
+                </div>
+              </div>
+            )}
+            {audioStatus.updated_at && (
+              <div style={{ fontSize: 9, color: "#444", fontFamily: "'JetBrains Mono', monospace", marginTop: 6, letterSpacing: 0.5 }}>
+                Updated: {new Date(audioStatus.updated_at).toLocaleTimeString()}
+              </div>
+            )}
+          </RackPanel>
+        </div>
+
+        {/* Right column */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {/* Configuration */}
+          <RackPanel>
+            <RackLabel>Configuration</RackLabel>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+              <span style={{ fontSize: 11, color: "#888", fontFamily: "'IBM Plex Sans', sans-serif" }}>Audio enabled</span>
+              <Toggle
+                on={Boolean(ec.enabled)}
+                onToggle={() => setEditConfig((prev) => ({ ...(prev || config), enabled: !ec.enabled }))}
+              />
+            </div>
+            {[
+              { label: "Whisper model", key: "whisper_model", type: "text" },
+              { label: "Whisper device", key: "whisper_device", type: "text" },
+              { label: "Interval (sec)", key: "transcription_interval_seconds", type: "number" },
+              { label: "Default user", key: "voice_default_user", type: "text" },
+            ].map((field) => (
+              <div key={field.key} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                <span style={{ fontSize: 11, color: "#888", fontFamily: "'IBM Plex Sans', sans-serif" }}>{field.label}</span>
+                <input
+                  type={field.type}
+                  value={ec[field.key] ?? ""}
+                  onChange={(e) => {
+                    const val = field.type === "number" ? parseFloat(e.target.value) || 0 : e.target.value;
+                    setEditConfig((prev) => ({ ...(prev || config), [field.key]: val }));
+                  }}
+                  style={{
+                    width: 140, padding: "5px 8px", background: "#15151a", border: "1px solid #333",
+                    borderRadius: 2, color: "#aaa", fontSize: 11, fontFamily: "'JetBrains Mono', monospace",
+                    textAlign: "right",
+                  }}
+                />
+              </div>
+            ))}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+              <span style={{ fontSize: 11, color: "#888", fontFamily: "'IBM Plex Sans', sans-serif" }}>Wake word</span>
+              <Toggle
+                on={Boolean(ec.wake_word_enabled)}
+                onToggle={() => setEditConfig((prev) => ({ ...(prev || config), wake_word_enabled: !ec.wake_word_enabled }))}
+              />
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 4 }}>
+              <RackButton
+                label="SAVE CHANGES"
+                color={configDirty ? "#2ecc40" : "#555"}
+                disabled={!configDirty}
+                onClick={() => {
+                  if (editConfig && saveAudioConfig) {
+                    saveAudioConfig(editConfig);
+                  }
+                }}
+              />
+            </div>
+          </RackPanel>
+
+          {/* Senses Policy */}
+          <RackPanel>
+            <RackLabel>Senses Policy</RackLabel>
+            {guardrailItems.map((item, i) => (
+              <div key={i} style={{ padding: "6px 10px", marginBottom: 3, background: "#15151a", borderLeft: "2px solid #ff851b33", borderRadius: "0 2px 2px 0" }}>
+                <div style={{ fontSize: 11, color: "#888", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.5 }}>{item}</div>
+              </div>
+            ))}
+            <div style={{ fontSize: 9, color: "#444", fontFamily: "'JetBrains Mono', monospace", marginTop: 8, letterSpacing: 1 }}>
+              Policy edits require code-level changes and operator consensus.
+            </div>
+          </RackPanel>
+
+          {/* Future Senses (grayed out) */}
+          <RackPanel style={{ opacity: 0.35, pointerEvents: "none", userSelect: "none" }}>
+            <RackLabel>Future Senses</RackLabel>
+            {[
+              { name: "Ambient Context", desc: "Roonie hears conversation without wake word (BL-SENSE-002)" },
+              { name: "Visual Feed", desc: "Camera feed analysis for crowd or gesture detection" },
+              { name: "Speaker ID", desc: "Identify individual speakers by voice (BL-SENSE-004)" },
+            ].map((s) => (
+              <div key={s.name} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 0", borderBottom: "1px solid #1f1f22" }}>
+                <div>
+                  <div style={{ fontSize: 11, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif" }}>{s.name}</div>
+                  <div style={{ fontSize: 9, color: "#444", fontFamily: "'IBM Plex Sans', sans-serif" }}>{s.desc}</div>
+                </div>
+                <span style={{ fontSize: 9, padding: "2px 8px", background: "#ff413612", border: "1px solid #ff413633", borderRadius: 2, color: "#ff4136", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>PLANNED</span>
+              </div>
+            ))}
+          </RackPanel>
+        </div>
+      </div>
     </div>
   );
 }
@@ -3541,6 +3811,11 @@ export default function RoonieControlRoom() {
     readinessData,
     routingStatusData,
     sensesStatusData,
+    audioConfigData,
+    audioStatusData,
+    setAudioStatusData,
+    audioDevicesData,
+    saveAudioConfig,
     culturalNotesData,
     viewerNotesData,
     memoryPendingData,
@@ -3614,7 +3889,7 @@ export default function RoonieControlRoom() {
       case "innercircle": return <InnerCirclePage innerCircleData={innerCircleData} saveInnerCircle={saveInnerCircle} />;
       case "schedule": return <SchedulePage scheduleData={scheduleData} saveStreamSchedule={saveStreamSchedule} />;
       case "snapshot": return <CulturalSnapshotPage logsEventsData={logsEventsData} logsSuppressionsData={logsSuppressionsData} statusData={statusData} />;
-      case "senses": return <SensesPage sensesStatusData={sensesStatusData} />;
+      case "senses": return <SensesPage sensesStatusData={sensesStatusData} audioConfigData={audioConfigData} audioStatusData={audioStatusData} setAudioStatusData={setAudioStatusData} audioDevicesData={audioDevicesData} saveAudioConfig={saveAudioConfig} performAction={performAction} />;
       case "governance": return <GovernancePage />;
       default: return <LivePage statusData={statusData} eventsData={eventsData} suppressionsData={suppressionsData} performAction={performAction} busyAction={busyAction} />;
     }

@@ -37,6 +37,8 @@ _SENSITIVE_GET_REQUIRED_ROLE: Dict[str, str] = {
     "/api/system/export": "director",
     "/api/routing/status": "operator",
     "/api/senses/status": "operator",
+    "/api/audio/status": "operator",
+    "/api/audio/devices": "operator",
     "/api/memory/cultural": "operator",
     "/api/memory/viewers": "operator",
     "/api/memory/pending": "operator",
@@ -871,6 +873,12 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
                 return
             if path == "/api/audio_config":
                 _json_response(self, storage.get_audio_config())
+                return
+            if path == "/api/audio/status":
+                _json_response(self, storage.get_audio_runtime_state())
+                return
+            if path == "/api/audio/devices":
+                _json_response(self, {"devices": storage.list_audio_devices()})
                 return
             if path == "/api/providers/status":
                 _json_response(self, storage.get_providers_status())

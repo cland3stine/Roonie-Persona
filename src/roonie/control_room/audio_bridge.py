@@ -160,6 +160,25 @@ class AudioInputBridge:
             f"interval={interval}s, wake_word={wake_word_enabled})"
         )
 
+        chunks_processed = 0
+        wake_words_detected = 0
+        events_emitted = 0
+        last_transcription = ""
+
+        def _push_state(*, running: bool = True, level_rms: float = 0.0) -> None:
+            if hasattr(self._storage, "set_audio_runtime_state"):
+                self._storage.set_audio_runtime_state({
+                    "running": running,
+                    "device": device or "(default)",
+                    "sample_rate": sample_rate,
+                    "level_rms": level_rms,
+                    "chunks_processed": chunks_processed,
+                    "wake_words_detected": wake_words_detected,
+                    "events_emitted": events_emitted,
+                    "last_transcription": last_transcription[:200],
+                    "updated_at": _utc_now_iso(),
+                })
+
         try:
             while not self._stop.is_set():
                 self._stop.wait(interval)
@@ -167,34 +186,45 @@ class AudioInputBridge:
                     break
 
                 chunk = capture.get_chunk()
+                level_rms = capture.get_level()
+
                 if chunk is None or len(chunk) == 0:
+                    _push_state(level_rms=level_rms)
                     continue
+
+                chunks_processed += 1
 
                 try:
                     text = transcriber.transcribe_text(chunk)
                 except Exception as exc:
                     self._log(f"[AudioInputBridge] transcription error: {exc}")
+                    _push_state(level_rms=level_rms)
                     continue
 
                 if not text.strip():
+                    _push_state(level_rms=level_rms)
                     continue
 
+                last_transcription = text.strip()
                 self._log(f"[AudioInputBridge] transcribed: {text[:120]}")
 
                 if not wake_word_enabled:
-                    # Without wake-word gating, every transcription is emitted.
                     self._emit_voice_event(
                         user=default_user,
                         message=text,
                         raw_text=text,
                         confidence=1.0,
                     )
+                    events_emitted += 1
+                    _push_state(level_rms=level_rms)
                     continue
 
                 result = detector.detect(text)
                 if not result.detected:
+                    _push_state(level_rms=level_rms)
                     continue
 
+                wake_words_detected += 1
                 message = result.remaining_text or text
                 self._log(
                     f"[AudioInputBridge] wake word detected "
@@ -207,9 +237,12 @@ class AudioInputBridge:
                     raw_text=text,
                     confidence=result.confidence,
                 )
+                events_emitted += 1
+                _push_state(level_rms=level_rms)
         except Exception:
             logger.exception("[AudioInputBridge] unexpected error in run loop")
         finally:
+            _push_state(running=False)
             capture.stop()
             capture.join(timeout=2.0)
             self._log("[AudioInputBridge] stopped")

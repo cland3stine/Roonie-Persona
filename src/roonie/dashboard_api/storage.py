@@ -371,6 +371,7 @@ class DashboardStorage:
             "reconnect_count": 0,
             "eventsub_last_error": None,
         }
+        self._audio_runtime_state: Dict[str, Any] = {}
         self._send_failure_state: Dict[str, Any] = {
             "fail_count": 0,
             "last_fail_reason": None,
@@ -4073,6 +4074,32 @@ class DashboardStorage:
     def get_eventsub_runtime_state(self) -> Dict[str, Any]:
         with self._lock:
             return dict(self._eventsub_runtime_state)
+
+    def set_audio_runtime_state(self, state: Dict[str, Any]) -> None:
+        with self._lock:
+            self._audio_runtime_state = dict(state)
+
+    def get_audio_runtime_state(self) -> Dict[str, Any]:
+        with self._lock:
+            return dict(self._audio_runtime_state)
+
+    @staticmethod
+    def list_audio_devices() -> list:
+        try:
+            import sounddevice as sd
+            devices = sd.query_devices()
+            return [
+                {
+                    "index": i,
+                    "name": d["name"],
+                    "max_input_channels": d["max_input_channels"],
+                    "default_samplerate": d["default_samplerate"],
+                }
+                for i, d in enumerate(devices)
+                if d["max_input_channels"] > 0
+            ]
+        except Exception:
+            return []
 
     def record_send_failure(self, reason: str) -> None:
         with self._lock:

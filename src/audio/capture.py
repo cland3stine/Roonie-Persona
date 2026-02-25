@@ -46,6 +46,7 @@ class AudioCapture:
 
         self._lock = threading.Lock()
         self._buffer: list[np.ndarray] = []
+        self._last_rms: float = 0.0
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._stream: object | None = None  # sounddevice.InputStream
@@ -87,11 +88,17 @@ class AudioCapture:
 
     # ── internals ───────────────────────────────────────────────
 
+    def get_level(self) -> float:
+        """Return current audio RMS level (0.0-1.0 range)."""
+        return self._last_rms
+
     def _callback(self, indata: np.ndarray, frames: int, time_info: object, status: object) -> None:
         if status:
             logger.debug("sounddevice status: %s", status)
+        samples = indata[:, 0].copy() if indata.ndim > 1 else indata.copy()
+        self._last_rms = float(np.sqrt(np.mean(samples ** 2)))
         with self._lock:
-            self._buffer.append(indata[:, 0].copy() if indata.ndim > 1 else indata.copy())
+            self._buffer.append(samples)
 
     def _run(self) -> None:
         try:
