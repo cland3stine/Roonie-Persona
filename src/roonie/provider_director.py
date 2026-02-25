@@ -900,8 +900,8 @@ class ProviderDirector:
         if should_evaluate:
             memory_result = get_safe_injection(
                 db_path=_memory_db_path(),
-                max_chars=900,
-                max_items=10,
+                max_chars=1500,
+                max_items=15,
             )
         if not should_evaluate:
             return DecisionRecord(
@@ -1074,6 +1074,8 @@ class ProviderDirector:
                 "model_selected": provider_model,
                 "moderation_provider_used": context.get("moderation_provider_used"),
                 "moderation_result": moderation_status,
+                "moderation_blocked_text": context.get("moderation_blocked_text"),
+                "moderation_flagged_categories": context.get("moderation_flagged_categories"),
                 "override_mode": str(context.get("override_mode", "default")),
                 "provider_error_attempts": context.get("provider_error_attempts"),
             },

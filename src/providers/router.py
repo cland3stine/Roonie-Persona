@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import os
 import re
 import threading
@@ -17,6 +18,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from providers.base import Provider
 from providers.registry import ProviderRegistry
+
+logger = logging.getLogger(__name__)
 
 _SUPPORTED_PROVIDERS = ("openai", "grok", "anthropic")
 _DEFAULT_APPROVED_PROVIDERS = ("openai", "grok", "anthropic")
@@ -1697,7 +1700,13 @@ def route_generate(
                 context["moderation_result"] = "block"
                 context["suppression_reason"] = "MODERATION_BLOCK"
                 context["provider_block_reason"] = "MODERATION_BLOCK"
+                context["moderation_blocked_text"] = str(out)
                 _record_moderation_block(primary.name)
+                logger.info(
+                    "Moderation blocked output from %s: categories=%s",
+                    primary.name,
+                    context.get("moderation_flagged_categories", {}),
+                )
                 return None
             context["moderation_result"] = "allow"
 
