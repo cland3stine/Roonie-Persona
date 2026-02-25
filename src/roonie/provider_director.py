@@ -976,6 +976,7 @@ class ProviderDirector:
         context: Dict[str, Any] = {
             "use_provider_config": True,
             "message_text": event.message,
+            "event_id": str(event.event_id or "").strip(),
             "category": str(event.metadata.get("category", "")).strip().lower(),
             "utility_source": str(event.metadata.get("utility_source", "")).strip().lower(),
             "session_id": session_id,
