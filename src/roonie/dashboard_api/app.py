@@ -87,11 +87,27 @@ def _cors_allowlist() -> set[str]:
     return allowlist
 
 
+def _is_private_network_origin(origin: str) -> bool:
+    """Return True if origin is from a private/LAN IP (RFC 1918 + loopback)."""
+    try:
+        from ipaddress import ip_address
+        parsed = urlparse(origin)
+        host = str(parsed.hostname or "").strip()
+        if not host:
+            return False
+        addr = ip_address(host)
+        return addr.is_private
+    except (ValueError, TypeError):
+        return False
+
+
 def _cors_origin(handler: BaseHTTPRequestHandler) -> Optional[str]:
     origin = _normalize_origin(handler.headers.get("Origin"))
     if not origin:
         return None
     if origin in _cors_allowlist():
+        return origin
+    if _is_private_network_origin(origin):
         return origin
     return None
 
