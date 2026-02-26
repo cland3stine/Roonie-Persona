@@ -214,6 +214,13 @@ class LiveChatBridge:
                     if isinstance(prev_enrich, dict) and prev_enrich:
                         prev_data["enrichment"] = prev_enrich
                     metadata["previous_track"] = prev_data
+        # TRACKR skill toggle → metadata
+        if hasattr(self._storage, "get_trackr_config"):
+            try:
+                trackr_cfg = self._storage.get_trackr_config()
+                metadata["track_id_skill_enabled"] = bool(trackr_cfg.get("track_id_skill_enabled"))
+            except Exception:
+                pass
         if hasattr(self._storage, "get_studio_profile"):
             try:
                 profile = self._storage.get_studio_profile()

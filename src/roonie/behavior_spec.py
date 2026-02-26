@@ -33,11 +33,22 @@ EVENT_COOLDOWN_SECONDS = {
 GREETING_COOLDOWN_SECONDS = 15.0
 
 
+_TRACK_CMD_RE = re.compile(r"^!(trackid|id|previous|track)\b", re.IGNORECASE)
+
 _TRACK_ID_RE = re.compile(
     r"\b(track\s*id|what(?:'s| is)?\s+(?:this|that)\s+track|id\?|what\s+track|track\?)\b",
     re.IGNORECASE,
 )
 _QUESTION_RE = re.compile(r"\?")
+
+
+def detect_track_command(message: str) -> Optional[str]:
+    """Return 'current', 'previous', or None for bang commands."""
+    m = _TRACK_CMD_RE.match(str(message or "").strip())
+    if not m:
+        return None
+    cmd = m.group(1).lower()
+    return "previous" if cmd == "previous" else "current"
 
 
 def classify_behavior_category(*, message: str, metadata: Dict[str, Any]) -> str:
@@ -48,6 +59,8 @@ def classify_behavior_category(*, message: str, metadata: Dict[str, Any]) -> str
     text = str(message or "").strip()
     if not text:
         return CATEGORY_OTHER
+    if _TRACK_CMD_RE.match(text):
+        return CATEGORY_TRACK_ID
     if _TRACK_ID_RE.search(text):
         return CATEGORY_TRACK_ID
     if is_pure_greeting_message(text):
@@ -65,10 +78,16 @@ def behavior_guidance(
     enrichment_available: bool = False,
     topic_anchor: str = "",
     short_ack_preferred: bool = False,
+    track_command: str = "",
 ) -> str:
     lines: List[str] = []
     if category == CATEGORY_TRACK_ID:
-        lines.append("This is a track ID question. Don't guess track names you're not sure about. Show you're curious about the track too.")
+        if track_command == "previous":
+            lines.append("This is a !previous command. They want the previous track, not the current one. Give it directly and concisely.")
+        elif track_command == "current":
+            lines.append("This is a !trackid command. Give the track info directly and concisely — track name, and label/year/style if you have enrichment data. One or two sentences.")
+        else:
+            lines.append("This is a track ID question. Don't guess track names you're not sure about. Show you're curious about the track too.")
         if now_playing_available:
             lines.append("You have now-playing info available to reference.")
             if enrichment_available:

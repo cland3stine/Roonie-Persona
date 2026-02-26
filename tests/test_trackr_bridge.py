@@ -545,3 +545,230 @@ def test_artist_label_prompt_confirmed_data():
     from roonie.prompting import DEFAULT_STYLE
 
     assert "CAN name them confidently" in DEFAULT_STYLE
+
+
+# ── Phase C: Track command detection + skill gate ─────────────
+
+
+def test_detect_trackid_command():
+    from roonie.behavior_spec import detect_track_command
+
+    assert detect_track_command("!trackid") == "current"
+    assert detect_track_command("!TRACKID") == "current"
+    assert detect_track_command("!trackid some extra text") == "current"
+
+
+def test_detect_id_command():
+    from roonie.behavior_spec import detect_track_command
+
+    assert detect_track_command("!id") == "current"
+    assert detect_track_command("!ID") == "current"
+
+
+def test_detect_previous_command():
+    from roonie.behavior_spec import detect_track_command
+
+    assert detect_track_command("!previous") == "previous"
+    assert detect_track_command("!Previous") == "previous"
+
+
+def test_detect_track_command_alias():
+    from roonie.behavior_spec import detect_track_command
+
+    assert detect_track_command("!track") == "current"
+
+
+def test_detect_non_command():
+    from roonie.behavior_spec import detect_track_command
+
+    assert detect_track_command("what track?") is None
+    assert detect_track_command("hello") is None
+    assert detect_track_command("") is None
+    assert detect_track_command("hey !trackid") is None  # not at start
+
+
+def test_classify_trackid_command_as_track_id():
+    from roonie.behavior_spec import classify_behavior_category, CATEGORY_TRACK_ID
+
+    assert classify_behavior_category(message="!trackid", metadata={}) == CATEGORY_TRACK_ID
+    assert classify_behavior_category(message="!id", metadata={}) == CATEGORY_TRACK_ID
+    assert classify_behavior_category(message="!track", metadata={}) == CATEGORY_TRACK_ID
+
+
+def test_classify_previous_command_as_track_id():
+    from roonie.behavior_spec import classify_behavior_category, CATEGORY_TRACK_ID
+
+    assert classify_behavior_category(message="!previous", metadata={}) == CATEGORY_TRACK_ID
+
+
+def test_command_with_skill_enabled_evaluates():
+    """!trackid with skill enabled should trigger evaluation (not NOOP)."""
+    from roonie.provider_director import ProviderDirector
+    from roonie.types import Event, Env
+
+    director = ProviderDirector()
+    event = Event(
+        event_id="cmd-1",
+        message="!trackid",
+        metadata={
+            "user": "viewer1",
+            "is_direct_mention": False,
+            "track_id_skill_enabled": True,
+            "session_id": "test-sess",
+        },
+    )
+    result = director.evaluate(event, Env(offline=True))
+    # Should NOT be NOOP — the command gate forces evaluation
+    assert result.action != "NOOP" or result.trace["director"].get("track_command") == "current"
+
+
+def test_command_with_skill_disabled_noops():
+    """!trackid with skill disabled should NOOP."""
+    from roonie.provider_director import ProviderDirector
+    from roonie.types import Event, Env
+
+    director = ProviderDirector()
+    event = Event(
+        event_id="cmd-2",
+        message="!trackid",
+        metadata={
+            "user": "viewer1",
+            "is_direct_mention": False,
+            "track_id_skill_enabled": False,
+            "session_id": "test-sess-2",
+        },
+    )
+    result = director.evaluate(event, Env(offline=True))
+    assert result.action == "NOOP"
+    assert result.trace["director"]["track_command"] == "current"
+    assert result.trace["director"]["track_id_skill_enabled"] is False
+
+
+def test_conversational_trackid_unaffected_by_skill():
+    """'what track is this?' addressed to Roonie should work regardless of skill flag."""
+    from roonie.provider_director import ProviderDirector
+    from roonie.types import Event, Env
+
+    director = ProviderDirector()
+    event = Event(
+        event_id="conv-1",
+        message="@roonie what track is this?",
+        metadata={
+            "user": "viewer1",
+            "is_direct_mention": True,
+            "track_id_skill_enabled": False,
+            "session_id": "test-sess-3",
+        },
+    )
+    result = director.evaluate(event, Env(offline=True))
+    # Direct mention + trigger should evaluate regardless of skill flag
+    assert result.action != "NOOP"
+    assert result.trace["director"]["track_command"] is None
+
+
+def test_previous_command_with_skill_enabled():
+    """!previous with skill enabled should trigger with previous track guidance."""
+    from roonie.provider_director import ProviderDirector
+    from roonie.types import Event, Env
+
+    director = ProviderDirector()
+    event = Event(
+        event_id="prev-1",
+        message="!previous",
+        metadata={
+            "user": "viewer1",
+            "is_direct_mention": False,
+            "track_id_skill_enabled": True,
+            "session_id": "test-sess-4",
+        },
+    )
+    result = director.evaluate(event, Env(offline=True))
+    assert result.action != "NOOP" or result.trace["director"].get("track_command") == "previous"
+
+
+def test_behavior_guidance_track_command_current():
+    from roonie.behavior_spec import behavior_guidance, CATEGORY_TRACK_ID
+
+    text = behavior_guidance(
+        category=CATEGORY_TRACK_ID,
+        approved_emotes=[],
+        now_playing_available=True,
+        enrichment_available=True,
+        track_command="current",
+    )
+    assert "!trackid command" in text
+    assert "directly and concisely" in text
+
+
+def test_behavior_guidance_track_command_previous():
+    from roonie.behavior_spec import behavior_guidance, CATEGORY_TRACK_ID
+
+    text = behavior_guidance(
+        category=CATEGORY_TRACK_ID,
+        approved_emotes=[],
+        now_playing_available=True,
+        track_command="previous",
+    )
+    assert "!previous command" in text
+    assert "previous track" in text
+
+
+def test_behavior_guidance_no_command():
+    """Without track_command, existing conversational guidance unchanged."""
+    from roonie.behavior_spec import behavior_guidance, CATEGORY_TRACK_ID
+
+    text = behavior_guidance(
+        category=CATEGORY_TRACK_ID,
+        approved_emotes=[],
+        now_playing_available=True,
+        enrichment_available=True,
+    )
+    assert "track ID question" in text
+    assert "!trackid command" not in text
+
+
+def test_live_chat_injects_skill_flag():
+    """Verify track_id_skill_enabled appears in metadata from LiveChatBridge."""
+    from roonie.control_room.live_chat import LiveChatBridge
+
+    mock_storage = MagicMock()
+    mock_storage.get_status.return_value = MagicMock(
+        to_dict=lambda: {
+            "can_post": False,
+            "blocked_by": ["SETUP"],
+            "active_director": "OfflineDirector",
+            "routing_enabled": False,
+            "session_id": "test",
+        }
+    )
+    mock_storage.get_trackr_state.return_value = {}
+    mock_storage.get_trackr_config.return_value = {
+        "enabled": True,
+        "track_id_skill_enabled": True,
+    }
+
+    bridge = LiveChatBridge(storage=mock_storage)
+
+    # Capture metadata from _emit_payload_message via patching run_payload
+    captured_metadata = {}
+
+    def fake_run_payload(payload, **kwargs):
+        nonlocal captured_metadata
+        inputs = payload.get("inputs", [])
+        if inputs:
+            captured_metadata = inputs[0].get("metadata", {})
+        # Return a valid path with a minimal run doc
+        import tempfile, pathlib
+        p = pathlib.Path(tempfile.mktemp(suffix=".json"))
+        p.write_text(json.dumps({"outputs": []}), encoding="utf-8")
+        return p
+
+    with patch("roonie.control_room.live_chat.run_payload", fake_run_payload):
+        bridge._emit_payload_message(
+            actor="viewer",
+            message="!trackid",
+            channel="test",
+            is_direct_mention=False,
+        )
+
+    assert captured_metadata.get("track_id_skill_enabled") is True

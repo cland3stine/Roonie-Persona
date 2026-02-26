@@ -16,6 +16,7 @@ from roonie.behavior_spec import (
     CATEGORY_TRACK_ID,
     behavior_guidance,
     classify_behavior_category,
+    detect_track_command,
 )
 from roonie.language_rules import starts_with_direct_verb
 from providers.registry import ProviderRegistry
@@ -775,6 +776,7 @@ class ProviderDirector:
         music_fact_question: bool,
         short_ack_preferred: bool = False,
         safety_classification: str = "allowed",
+        track_command: str = "",
     ) -> str:
         base_prompt = build_roonie_prompt(
             message=event.message,
@@ -798,6 +800,7 @@ class ProviderDirector:
             enrichment_available=bool(enrichment_text),
             topic_anchor=topic_anchor,
             short_ack_preferred=short_ack_preferred,
+            track_command=track_command,
         )
         grounding_block = ""
         if library_block:
@@ -949,6 +952,17 @@ class ProviderDirector:
             dropped_count=0,
         )
         should_evaluate = (addressed and trigger) or continuation
+
+        # Phase C: bang-command gate (skill toggle)
+        track_cmd = detect_track_command(event.message)
+        if track_cmd:
+            skill_enabled = metadata.get("track_id_skill_enabled", False)
+            if skill_enabled:
+                should_evaluate = True
+                addressed = True  # treat as addressed for context storage
+            else:
+                should_evaluate = False  # NOOP — Streamer.bot handles
+
         if should_evaluate:
             memory_result = get_safe_injection(
                 db_path=_memory_db_path(),
@@ -968,6 +982,8 @@ class ProviderDirector:
                         "addressed_to_roonie": addressed,
                         "trigger": trigger,
                         "conversation_continuation": continuation,
+                        "track_command": track_cmd,
+                        "track_id_skill_enabled": metadata.get("track_id_skill_enabled"),
                     },
                     "behavior": {
                         "category": category,
@@ -1028,6 +1044,7 @@ class ProviderDirector:
             music_fact_question=bool(music_fact_question),
             short_ack_preferred=short_ack_preferred,
             safety_classification=safety_classification,
+            track_command=track_cmd or "",
         )
         context: Dict[str, Any] = {
             "use_provider_config": True,
@@ -1102,6 +1119,8 @@ class ProviderDirector:
                 "trigger": trigger,
                 "conversation_continuation": continuation,
                 "routing_enabled": bool(routing_status.get("enabled", True)),
+                "track_command": track_cmd,
+                "track_id_skill_enabled": metadata.get("track_id_skill_enabled"),
             },
             "behavior": {
                 "category": category,
