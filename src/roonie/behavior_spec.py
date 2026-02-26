@@ -62,6 +62,7 @@ def behavior_guidance(
     category: str,
     approved_emotes: List[str],
     now_playing_available: bool,
+    enrichment_available: bool = False,
     topic_anchor: str = "",
     short_ack_preferred: bool = False,
 ) -> str:
@@ -70,6 +71,8 @@ def behavior_guidance(
         lines.append("This is a track ID question. Don't guess track names you're not sure about. Show you're curious about the track too.")
         if now_playing_available:
             lines.append("You have now-playing info available to reference.")
+            if enrichment_available:
+                lines.append("You have track info — label, year, style. Weave it in naturally, don't list it like a database.")
         else:
             lines.append("You don't have track info right now. Ask for a timestamp or clip if needed.")
     elif category in EVENT_COOLDOWN_SECONDS:

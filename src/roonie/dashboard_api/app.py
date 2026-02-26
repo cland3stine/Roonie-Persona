@@ -39,6 +39,8 @@ _SENSITIVE_GET_REQUIRED_ROLE: Dict[str, str] = {
     "/api/senses/status": "operator",
     "/api/audio/status": "operator",
     "/api/audio/devices": "operator",
+    "/api/trackr/config": "operator",
+    "/api/trackr/status": "operator",
     "/api/memory/cultural": "operator",
     "/api/memory/viewers": "operator",
     "/api/memory/pending": "operator",
@@ -791,6 +793,47 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
             )
             _json_response(self, {"ok": True, "audio_config": config, "audit": audit.to_dict()})
 
+        def _handle_trackr_config_write(self, *, patch: bool) -> None:
+            ok_body, payload = self._read_json_body()
+            if not ok_body:
+                _json_response(
+                    self,
+                    {"ok": False, "error": "bad_request", "detail": "Invalid JSON body."},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            identity = self._authorize_write(
+                action="TRACKR_CONFIG_UPDATE",
+                payload=payload,
+                required_role="operator",
+            )
+            if identity is None:
+                return
+            try:
+                config, diff_payload = storage.update_trackr_config(
+                    payload,
+                    actor=(identity.get("username") or identity.get("actor")),
+                    patch=patch,
+                )
+            except ValueError as exc:
+                _json_response(
+                    self,
+                    {"ok": False, "error": "bad_request", "detail": str(exc)},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            audit = storage.record_operator_action(
+                operator=identity["operator"],
+                action="TRACKR_CONFIG_UPDATE",
+                payload=diff_payload,
+                result="OK",
+                actor=identity["actor"],
+                username=identity.get("username"),
+                role=identity.get("role"),
+                auth_mode=identity.get("auth_mode"),
+            )
+            _json_response(self, {"ok": True, "trackr_config": config, "audit": audit.to_dict()})
+
         def do_GET(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
             query = parse_qs(parsed.query)
@@ -895,6 +938,12 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
                 return
             if path == "/api/audio/devices":
                 _json_response(self, {"devices": storage.list_audio_devices()})
+                return
+            if path == "/api/trackr/config":
+                _json_response(self, storage.get_trackr_config())
+                return
+            if path == "/api/trackr/status":
+                _json_response(self, storage.get_trackr_state())
                 return
             if path == "/api/providers/status":
                 _json_response(self, storage.get_providers_status())
@@ -2246,6 +2295,9 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
             if parsed.path == "/api/audio_config":
                 self._handle_audio_config_write(patch=False)
                 return
+            if parsed.path == "/api/trackr/config":
+                self._handle_trackr_config_write(patch=False)
+                return
             _json_response(
                 self,
                 {"ok": False, "error": "not_found", "path": parsed.path},
@@ -2270,6 +2322,9 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
                 return
             if parsed.path == "/api/audio_config":
                 self._handle_audio_config_write(patch=True)
+                return
+            if parsed.path == "/api/trackr/config":
+                self._handle_trackr_config_write(patch=True)
                 return
             if parsed.path.startswith("/api/memory/cultural/"):
                 ok_body, payload = self._read_json_body()

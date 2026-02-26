@@ -500,6 +500,53 @@ class ProviderDirector:
         return normalized
 
     @staticmethod
+    def _track_enrichment_block(metadata: Dict[str, Any]) -> str:
+        enrichment = metadata.get("track_enrichment")
+        if not isinstance(enrichment, dict) or not enrichment:
+            return ""
+        parts = []
+        year = enrichment.get("year")
+        label = enrichment.get("label")
+        styles = enrichment.get("styles", [])
+        genres = enrichment.get("genres", [])
+        if year and label:
+            parts.append(f"Released {year} on {label}.")
+        elif year:
+            parts.append(f"Released {year}.")
+        elif label:
+            parts.append(f"Label: {label}.")
+        style_list = styles or genres
+        if style_list:
+            parts.append(f"Style: {', '.join(style_list[:3])}.")
+        if not parts:
+            return ""
+        return "Track info: " + " ".join(parts)
+
+    @staticmethod
+    def _previous_track_block(metadata: Dict[str, Any]) -> str:
+        prev = metadata.get("previous_track")
+        if not isinstance(prev, dict) or not prev.get("raw"):
+            return ""
+        line = f"Previous track: {prev['raw']}"
+        enrichment = prev.get("enrichment")
+        if isinstance(enrichment, dict) and enrichment:
+            parts = []
+            year = enrichment.get("year")
+            label = enrichment.get("label")
+            if year and label:
+                parts.append(f"{year} on {label}")
+            elif year:
+                parts.append(str(year))
+            elif label:
+                parts.append(label)
+            styles = enrichment.get("styles", []) or enrichment.get("genres", [])
+            if styles:
+                parts.append(", ".join(styles[:3]))
+            if parts:
+                line += f" ({'; '.join(parts)})"
+        return line
+
+    @staticmethod
     def _now_playing_text(metadata: Dict[str, Any]) -> str:
         direct = str(
             metadata.get("now_playing")
@@ -718,6 +765,8 @@ class ProviderDirector:
         approved_emotes: List[str],
         now_playing_available: bool,
         now_playing_text: str = "",
+        enrichment_text: str = "",
+        previous_track_text: str = "",
         inner_circle_text: str = "",
         schedule_text: str = "",
         memory_hints: str,
@@ -737,6 +786,8 @@ class ProviderDirector:
             max_context_turns=8,
             max_context_chars=1200,
             now_playing_text=now_playing_text,
+            enrichment_text=enrichment_text,
+            previous_track_text=previous_track_text,
             inner_circle_text=inner_circle_text,
             schedule_text=schedule_text,
         )
@@ -744,6 +795,7 @@ class ProviderDirector:
             category=category,
             approved_emotes=approved_emotes,
             now_playing_available=now_playing_available,
+            enrichment_available=bool(enrichment_text),
             topic_anchor=topic_anchor,
             short_ack_preferred=short_ack_preferred,
         )
@@ -956,6 +1008,8 @@ class ProviderDirector:
 
         inner_circle_text = self._inner_circle_block(metadata)
         schedule_text = self._stream_schedule_block(metadata)
+        enrichment_text = self._track_enrichment_block(metadata)
+        previous_track_text = self._previous_track_block(metadata)
 
         prompt = self._build_prompt(
             event,
@@ -964,6 +1018,8 @@ class ProviderDirector:
             approved_emotes=approved_emotes,
             now_playing_available=now_playing_available,
             now_playing_text=now_playing,
+            enrichment_text=enrichment_text,
+            previous_track_text=previous_track_text,
             inner_circle_text=inner_circle_text,
             schedule_text=schedule_text,
             memory_hints=memory_result.text_snippet,

@@ -5,7 +5,6 @@ import threading
 import time
 import json
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from live_shim.record_run import run_payload
@@ -145,36 +144,6 @@ class LiveChatBridge:
                 pass
         return 8
 
-    @staticmethod
-    def _now_playing_path() -> Optional[Path]:
-        explicit = str(os.getenv("ROONIE_NOW_PLAYING_PATH", "")).strip()
-        if explicit:
-            return Path(explicit)
-        legacy = str(os.getenv("ROONIE_NOWPLAYING_PATH", "")).strip()
-        if legacy:
-            return Path(legacy)
-        overlay_dir = str(os.getenv("ROONIE_NOW_PLAYING_OVERLAY_DIR", "")).strip()
-        if not overlay_dir:
-            overlay_dir = str(os.getenv("ROONIE_OVERLAY_DIR", "")).strip()
-        if overlay_dir:
-            return Path(overlay_dir) / "nowplaying_chat.txt"
-        return None
-
-    @staticmethod
-    def _read_now_playing_line() -> str:
-        path = LiveChatBridge._now_playing_path()
-        if path is None:
-            return ""
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
-            return ""
-        for raw_line in text.splitlines():
-            line = str(raw_line or "").strip()
-            if line:
-                return line
-        return ""
-
     def _next_event_id(self) -> str:
         self._event_counter += 1
         return f"live-{int(time.time() * 1000)}-{self._event_counter}"
@@ -224,10 +193,27 @@ class LiveChatBridge:
             "active_director": normalized_director,
             "routing_enabled": routing_enabled,
         }
-        now_playing_line = self._read_now_playing_line()
-        if now_playing_line:
-            metadata["now_playing"] = now_playing_line
-            metadata["track_line"] = now_playing_line
+        # TRACKR API state → now_playing + enrichment
+        if hasattr(self._storage, "get_trackr_state"):
+            try:
+                trackr_state = self._storage.get_trackr_state()
+            except Exception:
+                trackr_state = {}
+            if isinstance(trackr_state, dict) and trackr_state.get("connected"):
+                current = trackr_state.get("current", {})
+                if isinstance(current, dict) and current.get("raw"):
+                    metadata["now_playing"] = current["raw"]
+                    metadata["track_line"] = current["raw"]
+                enrichment = trackr_state.get("current_enrichment")
+                if isinstance(enrichment, dict) and enrichment:
+                    metadata["track_enrichment"] = enrichment
+                prev = trackr_state.get("previous", {})
+                if isinstance(prev, dict) and prev.get("raw"):
+                    prev_data = {"raw": prev["raw"], "artist": prev.get("artist", ""), "title": prev.get("title", "")}
+                    prev_enrich = trackr_state.get("previous_enrichment")
+                    if isinstance(prev_enrich, dict) and prev_enrich:
+                        prev_data["enrichment"] = prev_enrich
+                    metadata["previous_track"] = prev_data
         if hasattr(self._storage, "get_studio_profile"):
             try:
                 profile = self._storage.get_studio_profile()

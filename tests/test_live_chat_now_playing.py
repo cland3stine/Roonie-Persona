@@ -1,3 +1,4 @@
+"""Tests for now-playing metadata injection via TRACKR API state."""
 from __future__ import annotations
 
 import json
@@ -8,6 +9,9 @@ from roonie.control_room.live_chat import LiveChatBridge
 
 
 class _DummyStorage:
+    def __init__(self, trackr_state=None):
+        self._trackr_state = trackr_state or {}
+
     def get_status(self):
         class _S:
             def to_dict(self_inner):
@@ -20,6 +24,9 @@ class _DummyStorage:
                 }
 
         return _S()
+
+    def get_trackr_state(self):
+        return dict(self._trackr_state)
 
 
 def _stub_run_payload(tmp_path: Path, captured: Dict[str, Any]):
@@ -46,41 +53,47 @@ def _stub_run_payload(tmp_path: Path, captured: Dict[str, Any]):
     return _fake_run_payload
 
 
-def test_emit_payload_injects_now_playing_from_explicit_path(tmp_path: Path, monkeypatch) -> None:
-    now_playing_path = tmp_path / "overlay" / "nowplaying_chat.txt"
-    now_playing_path.parent.mkdir(parents=True, exist_ok=True)
-    now_playing_path.write_text("Now Playing: Artist A - Track One\n", encoding="utf-8")
-    monkeypatch.setenv("ROONIE_NOW_PLAYING_PATH", str(now_playing_path))
+def test_emit_payload_injects_now_playing_from_trackr_state(tmp_path: Path, monkeypatch) -> None:
+    trackr_state = {
+        "connected": True,
+        "current": {"raw": "Hernan Cattaneo - Slow Motion", "artist": "Hernan Cattaneo", "title": "Slow Motion"},
+        "current_enrichment": {"year": 2023, "label": "Sudbeat", "styles": ["Progressive House"]},
+        "previous": {"raw": "Lane 8 - Brightest Lights", "artist": "Lane 8", "title": "Brightest Lights"},
+        "previous_enrichment": {"year": 2021, "label": "This Never Happened"},
+    }
 
     captured: Dict[str, Any] = {}
     monkeypatch.setattr("roonie.control_room.live_chat.run_payload", _stub_run_payload(tmp_path, captured))
 
-    bridge = LiveChatBridge(storage=_DummyStorage(), account="bot")
+    bridge = LiveChatBridge(storage=_DummyStorage(trackr_state), account="bot")
     _ = bridge._emit_payload_message(
         actor="alice",
         message="@RoonieTheCat what track is this",
-        channel="ruleofrune",
+        channel="clandestineandcorcyra",
         is_direct_mention=True,
         metadata_extra=None,
     )
 
     metadata = captured["payload"]["inputs"][0]["metadata"]
-    assert metadata["now_playing"] == "Now Playing: Artist A - Track One"
-    assert metadata["track_line"] == "Now Playing: Artist A - Track One"
+    assert metadata["now_playing"] == "Hernan Cattaneo - Slow Motion"
+    assert metadata["track_line"] == "Hernan Cattaneo - Slow Motion"
+    assert metadata["track_enrichment"]["year"] == 2023
+    assert metadata["track_enrichment"]["label"] == "Sudbeat"
+    assert metadata["previous_track"]["raw"] == "Lane 8 - Brightest Lights"
+    assert metadata["previous_track"]["enrichment"]["year"] == 2021
 
 
-def test_emit_payload_skips_now_playing_when_file_is_missing(tmp_path: Path, monkeypatch) -> None:
-    missing_path = tmp_path / "overlay" / "does_not_exist.txt"
-    monkeypatch.setenv("ROONIE_NOW_PLAYING_PATH", str(missing_path))
+def test_emit_payload_no_now_playing_when_trackr_disconnected(tmp_path: Path, monkeypatch) -> None:
+    trackr_state = {"connected": False}
 
     captured: Dict[str, Any] = {}
     monkeypatch.setattr("roonie.control_room.live_chat.run_payload", _stub_run_payload(tmp_path, captured))
 
-    bridge = LiveChatBridge(storage=_DummyStorage(), account="bot")
+    bridge = LiveChatBridge(storage=_DummyStorage(trackr_state), account="bot")
     _ = bridge._emit_payload_message(
         actor="alice",
         message="@RoonieTheCat hey",
-        channel="ruleofrune",
+        channel="clandestineandcorcyra",
         is_direct_mention=True,
         metadata_extra=None,
     )
@@ -88,3 +101,22 @@ def test_emit_payload_skips_now_playing_when_file_is_missing(tmp_path: Path, mon
     metadata = captured["payload"]["inputs"][0]["metadata"]
     assert "now_playing" not in metadata
     assert "track_line" not in metadata
+    assert "track_enrichment" not in metadata
+
+
+def test_emit_payload_no_now_playing_when_no_trackr_state(tmp_path: Path, monkeypatch) -> None:
+    captured: Dict[str, Any] = {}
+    monkeypatch.setattr("roonie.control_room.live_chat.run_payload", _stub_run_payload(tmp_path, captured))
+
+    bridge = LiveChatBridge(storage=_DummyStorage({}), account="bot")
+    _ = bridge._emit_payload_message(
+        actor="alice",
+        message="@RoonieTheCat hey",
+        channel="clandestineandcorcyra",
+        is_direct_mention=True,
+        metadata_extra=None,
+    )
+
+    metadata = captured["payload"]["inputs"][0]["metadata"]
+    assert "now_playing" not in metadata
+    assert "track_enrichment" not in metadata

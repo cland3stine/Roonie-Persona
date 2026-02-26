@@ -8,7 +8,7 @@ const PAGES_TOP = [
   { id: "library", label: "LIBRARY INDEX" },
   { id: "culture", label: "CULTURAL NOTES" },
   { id: "innercircle", label: "INNER CIRCLE" },
-  { id: "nowplaying", label: "NOW PLAYING" },
+  { id: "trackr", label: "TRACKR" },
   { id: "schedule", label: "SCHEDULE" },
 ];
 
@@ -553,6 +553,8 @@ function useDashboardData(activePage) {
   const [audioConfigData, setAudioConfigData] = useState(null);
   const [audioStatusData, setAudioStatusData] = useState(null);
   const [audioDevicesData, setAudioDevicesData] = useState([]);
+  const [trackrConfigData, setTrackrConfigData] = useState(null);
+  const [trackrStatusData, setTrackrStatusData] = useState(null);
   const [culturalNotesData, setCulturalNotesData] = useState([]);
   const [viewerNotesData, setViewerNotesData] = useState([]);
   const [memoryPendingData, setMemoryPendingData] = useState([]);
@@ -580,7 +582,7 @@ function useDashboardData(activePage) {
     }
     refreshDataInFlightRef.current = true;
     try {
-      const [authRes, statusRes, eventsRes, suppressionsRes, operatorRes, queueRes, studioProfileRes, libraryStatusRes, logsEventsRes, logsSuppressionsRes, logsOperatorRes, providersStatusRes, routingStatusRes, sensesStatusRes, memoryCulturalRes, memoryViewersRes, memoryPendingRes, twitchStatusRes, innerCircleRes, scheduleRes, audioConfigRes] = await Promise.all([
+      const [authRes, statusRes, eventsRes, suppressionsRes, operatorRes, queueRes, studioProfileRes, libraryStatusRes, logsEventsRes, logsSuppressionsRes, logsOperatorRes, providersStatusRes, routingStatusRes, sensesStatusRes, memoryCulturalRes, memoryViewersRes, memoryPendingRes, twitchStatusRes, innerCircleRes, scheduleRes, audioConfigRes, trackrConfigRes] = await Promise.all([
         apiFetch(`${API_BASE}/api/auth/me`),
         apiFetch(`${API_BASE}/api/status`),
         apiFetch(`${API_BASE}/api/events?limit=5`),
@@ -602,6 +604,7 @@ function useDashboardData(activePage) {
         apiFetch(`${API_BASE}/api/inner_circle`),
         apiFetch(`${API_BASE}/api/stream_schedule`),
         apiFetch(`${API_BASE}/api/audio_config`),
+        apiFetch(`${API_BASE}/api/trackr/config`),
       ]);
       if (authRes.ok) {
         setAuthData(await authRes.json());
@@ -654,6 +657,9 @@ function useDashboardData(activePage) {
       }
       if (audioConfigRes.ok) {
         setAudioConfigData(await audioConfigRes.json());
+      }
+      if (trackrConfigRes.ok) {
+        setTrackrConfigData(await trackrConfigRes.json());
       }
     } catch (_err) {
       // Polling errors keep prior data.
@@ -757,6 +763,12 @@ function useDashboardData(activePage) {
       if (page === "schedule") {
         fetches.push(apiFetch(`${API_BASE}/api/stream_schedule`));
         handlers.push((res) => res.ok && res.json().then(setScheduleData));
+      }
+      if (page === "trackr") {
+        fetches.push(apiFetch(`${API_BASE}/api/trackr/config`));
+        handlers.push((res) => res.ok && res.json().then(setTrackrConfigData));
+        fetches.push(apiFetch(`${API_BASE}/api/trackr/status`));
+        handlers.push((res) => res.ok && res.json().then(setTrackrStatusData));
       }
       if (fetches.length) {
         const results = await Promise.all(fetches);
@@ -935,6 +947,30 @@ function useDashboardData(activePage) {
       }
     } catch (err) {
       console.error("[Dashboard] audio_config save error", err);
+    }
+  };
+
+  const saveTrackrConfig = async (patch) => {
+    const headers = buildOperatorHeaders({ json: true });
+    try {
+      const response = await apiFetch(`${API_BASE}/api/trackr/config`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify(patch || {}),
+      });
+      if (!response.ok) {
+        let detail = response.statusText;
+        try {
+          const body = await response.json();
+          detail = body.detail || body.error || detail;
+        } catch (_err) {}
+        console.error(`[Dashboard] trackr_config save failed (${response.status}) ${detail}`);
+      } else {
+        const body = await response.json();
+        if (body && body.trackr_config) setTrackrConfigData(body.trackr_config);
+      }
+    } catch (err) {
+      console.error("[Dashboard] trackr_config save error", err);
     }
   };
 
@@ -1546,6 +1582,9 @@ function useDashboardData(activePage) {
     setAudioStatusData,
     audioDevicesData,
     saveAudioConfig,
+    trackrConfigData,
+    trackrStatusData,
+    saveTrackrConfig,
     culturalNotesData,
     viewerNotesData,
     memoryPendingData,
@@ -2097,21 +2136,149 @@ function AnnouncementsPage({ queueData, performAction }) {
   );
 }
 
-// --- PAGE: NOW PLAYING ---
+// --- PAGE: TRACKR ---
 
-function NowPlayingPage() {
+function TrackrPage({ trackrConfigData, trackrStatusData, saveTrackrConfig }) {
+  const config = trackrConfigData || {};
+  const status = trackrStatusData || {};
+  const [localConfig, setLocalConfig] = useState({});
+  const [dirty, setDirty] = useState(false);
+
+  useEffect(() => {
+    if (trackrConfigData) {
+      setLocalConfig({ ...trackrConfigData });
+      setDirty(false);
+    }
+  }, [trackrConfigData]);
+
+  const updateField = (key, value) => {
+    setLocalConfig((prev) => ({ ...prev, [key]: value }));
+    setDirty(true);
+  };
+
+  const handleSave = async () => {
+    await saveTrackrConfig(localConfig);
+    setDirty(false);
+  };
+
+  const handleToggle = async (key) => {
+    const next = !config[key];
+    await saveTrackrConfig({ [key]: next });
+  };
+
+  const connected = Boolean(status.connected);
+  const enabled = Boolean(config.enabled);
+  const trackrRunning = Boolean(status.trackr_running);
+  const currentTrack = status.current || {};
+  const previousTrack = status.previous || {};
+  const deviceCount = status.device_count || 0;
+  const error = status.error || null;
+
+  const connLedColor = connected ? "#2ecc40" : enabled ? "#ff851b" : "#ff4136";
+  const connLabel = connected ? "CONNECTED" : enabled ? "CONNECTING..." : "DISABLED";
+
+  const metaRow = { display: "flex", justifyContent: "space-between", padding: "4px 0", borderBottom: "1px solid #1f1f22" };
+  const metaLabel = { fontSize: 10, color: "#666", letterSpacing: 1.2, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 };
+  const metaValue = { fontSize: 12, color: "#ccc", fontFamily: "'IBM Plex Sans', sans-serif" };
+  const trackTitle = { fontSize: 14, color: "#e8e8e8", fontWeight: 700, fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.5 };
+  const trackArtist = { fontSize: 12, color: "#999", fontFamily: "'IBM Plex Sans', sans-serif" };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {/* Connection + Current Track */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-        <RackPanel><RackLabel>File Status</RackLabel><div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}><Led color="#ff851b" size={10} pulse={false} /><AwaitingInline style={{ color: "#ff851b", fontWeight: 700 }} message="No track loaded" /></div><RackLabel>Last Updated</RackLabel><AwaitingBlock message="No updates" /><div style={{ marginTop: 12 }}><RackButton label="NOT AVAILABLE" color="#7faacc" disabled /></div></RackPanel>
-        <RackPanel><RackLabel>File Source</RackLabel><div style={{ padding: "10px 14px", background: "#111114", border: "1px solid #2a2a2e", borderRadius: 2, wordBreak: "break-all" }}><AwaitingInline message="No source configured" /></div><div style={{ marginTop: 8, fontSize: 10, color: "#555", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.6 }}>Read-only track source.</div></RackPanel>
+        <RackPanel>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+            <RackLabel>TRACKR Connection</RackLabel>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <Led color={connLedColor} size={10} pulse={connected} />
+              <span style={{ fontSize: 9, color: connLedColor, letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>{connLabel}</span>
+            </div>
+          </div>
+          <div style={metaRow}><span style={metaLabel}>DEVICES</span><span style={metaValue}>{connected ? deviceCount : "--"}</span></div>
+          <div style={metaRow}><span style={metaLabel}>TRACKR RUNNING</span><span style={metaValue}>{connected ? (trackrRunning ? "YES" : "NO") : "--"}</span></div>
+          <div style={metaRow}><span style={metaLabel}>LAST UPDATE</span><span style={metaValue}>{status.updated_at ? new Date(status.updated_at).toLocaleTimeString() : "--"}</span></div>
+          {error && <div style={{ marginTop: 8, padding: "6px 10px", background: "#ff413612", border: "1px solid #ff413633", borderRadius: 2, fontSize: 10, color: "#ff4136", fontFamily: "'JetBrains Mono', monospace" }}>{error}</div>}
+          <div style={{ marginTop: 12 }}>
+            <RackButton label={enabled ? "DISABLE TRACKR" : "ENABLE TRACKR"} color={enabled ? "#ff4136" : "#2ecc40"} onClick={() => handleToggle("enabled")} />
+          </div>
+        </RackPanel>
+
+        <RackPanel>
+          <RackLabel>Now Playing</RackLabel>
+          {currentTrack.raw ? (
+            <div style={{ marginTop: 4 }}>
+              <div style={trackTitle}>{currentTrack.title || currentTrack.raw}</div>
+              {currentTrack.artist && <div style={trackArtist}>{currentTrack.artist}</div>}
+            </div>
+          ) : (
+            <AwaitingBlock message="No track loaded" />
+          )}
+          <div style={{ borderTop: "1px solid #222", marginTop: 12, paddingTop: 8 }}>
+            <RackLabel>Previous Track</RackLabel>
+            {previousTrack.raw ? (
+              <div style={{ marginTop: 4 }}>
+                <div style={{ ...trackTitle, fontSize: 12, color: "#aaa" }}>{previousTrack.title || previousTrack.raw}</div>
+                {previousTrack.artist && <div style={{ ...trackArtist, fontSize: 10 }}>{previousTrack.artist}</div>}
+              </div>
+            ) : (
+              <AwaitingInline message="None" />
+            )}
+          </div>
+        </RackPanel>
       </div>
-      <div style={{ background: "#1a1a1e", border: "1px solid #2a2a2e", borderRadius: 3, padding: 16, position: "relative", opacity: 0.35, pointerEvents: "none", userSelect: "none" }}>
-        <div style={{ position: "absolute", top: 6, left: 8, width: 4, height: 4, borderRadius: "50%", background: "#252528", border: "1px solid #333" }} /><div style={{ position: "absolute", top: 6, right: 8, width: 4, height: 4, borderRadius: "50%", background: "#252528", border: "1px solid #333" }} />
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}><RackLabel>API Source (Later)</RackLabel><span style={{ fontSize: 9, padding: "3px 8px", background: "#ff413612", border: "1px solid #ff413633", borderRadius: 2, color: "#ff4136", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>OFF</span></div>
-        <AwaitingBlock style={{ marginBottom: 8 }} message="Not connected" />
-        <div style={{ borderTop: "1px solid #222", paddingTop: 8 }}><div style={{ fontSize: 9, color: "#444", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace" }}>NOT AVAILABLE</div></div>
-      </div>
+
+      {/* Config */}
+      <RackPanel>
+        <RackLabel>TRACKR Configuration</RackLabel>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 8 }}>
+          <div>
+            <div style={{ fontSize: 10, color: "#666", marginBottom: 4, fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1 }}>API URL</div>
+            <input
+              type="text"
+              value={localConfig.api_url || ""}
+              onChange={(e) => updateField("api_url", e.target.value)}
+              style={{ width: "100%", background: "#111114", border: "1px solid #2a2a2e", borderRadius: 2, padding: "6px 10px", color: "#ccc", fontFamily: "'JetBrains Mono', monospace", fontSize: 11, boxSizing: "border-box" }}
+            />
+          </div>
+          <div>
+            <div style={{ fontSize: 10, color: "#666", marginBottom: 4, fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1 }}>POLL INTERVAL</div>
+            <select
+              value={localConfig.poll_interval_seconds || 3}
+              onChange={(e) => updateField("poll_interval_seconds", parseFloat(e.target.value))}
+              style={{ width: "100%", background: "#111114", border: "1px solid #2a2a2e", borderRadius: 2, padding: "6px 10px", color: "#ccc", fontFamily: "'JetBrains Mono', monospace", fontSize: 11 }}
+            >
+              <option value={1}>1s</option>
+              <option value={2}>2s</option>
+              <option value={3}>3s (default)</option>
+              <option value={5}>5s</option>
+              <option value={10}>10s</option>
+            </select>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 12, marginTop: 12 }}>
+          <RackButton label={dirty ? "SAVE CONFIG" : "SAVED"} color={dirty ? "#7faacc" : "#444"} disabled={!dirty} onClick={handleSave} />
+        </div>
+      </RackPanel>
+
+      {/* Skill Toggles */}
+      <RackPanel>
+        <RackLabel>Track-ID Skill</RackLabel>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 8 }}>
+          <div>
+            <div style={{ fontSize: 11, color: "#ccc", fontFamily: "'IBM Plex Sans', sans-serif" }}>Roonie handles !trackid / !id / !previous</div>
+            <div style={{ fontSize: 9, color: "#555", fontFamily: "'IBM Plex Sans', sans-serif", marginTop: 2 }}>When OFF, Streamer.bot handles track commands</div>
+          </div>
+          <RackButton label={config.track_id_skill_enabled ? "ON" : "OFF"} color={config.track_id_skill_enabled ? "#2ecc40" : "#ff4136"} onClick={() => handleToggle("track_id_skill_enabled")} />
+        </div>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 12, paddingTop: 8, borderTop: "1px solid #222" }}>
+          <div>
+            <div style={{ fontSize: 11, color: "#ccc", fontFamily: "'IBM Plex Sans', sans-serif" }}>Proactive Favorites</div>
+            <div style={{ fontSize: 9, color: "#555", fontFamily: "'IBM Plex Sans', sans-serif", marginTop: 2 }}>Roonie comments on tracks played 3+ times</div>
+          </div>
+          <RackButton label={config.proactive_favorites_enabled ? "ON" : "OFF"} color={config.proactive_favorites_enabled ? "#2ecc40" : "#ff4136"} onClick={() => handleToggle("proactive_favorites_enabled")} />
+        </div>
+      </RackPanel>
     </div>
   );
 }
@@ -3822,6 +3989,9 @@ export default function RoonieControlRoom() {
     setAudioStatusData,
     audioDevicesData,
     saveAudioConfig,
+    trackrConfigData,
+    trackrStatusData,
+    saveTrackrConfig,
     culturalNotesData,
     viewerNotesData,
     memoryPendingData,
@@ -3887,7 +4057,7 @@ export default function RoonieControlRoom() {
       case "studio": return <StudioProfilePage studioProfileData={studioProfileData} saveStudioProfile={saveStudioProfile} fetchChannelEmotes={fetchChannelEmotes} />;
       case "library": return <LibraryIndexPage libraryStatusData={libraryStatusData} librarySearchData={librarySearchData} searchLibraryIndex={searchLibraryIndex} uploadLibraryXml={uploadLibraryXml} />;
       case "announcements": return <AnnouncementsPage queueData={queueData} performAction={performAction} />;
-      case "nowplaying": return <NowPlayingPage />;
+      case "trackr": return <TrackrPage trackrConfigData={trackrConfigData} trackrStatusData={trackrStatusData} saveTrackrConfig={saveTrackrConfig} />;
       case "logs": return <LogsPage eventsData={logsEventsData} suppressionsData={logsSuppressionsData} operatorLogData={logsOperatorData} />;
       case "providers": return <ProvidersPage statusData={statusData} providersStatusData={providersStatusData} routingStatusData={routingStatusData} systemHealthData={systemHealthData} readinessData={readinessData} setProviderActive={setProviderActive} setProviderCaps={setProviderCaps} patchProviderWeights={patchProviderWeights} setRoutingEnabled={setRoutingEnabled} setActiveDirector={setActiveDirector} setDryRunEnabled={setDryRunEnabled} />;
       case "auth": return <AuthPage twitchStatusData={twitchStatusData} twitchConnectStart={twitchConnectStart} twitchConnectPoll={twitchConnectPoll} twitchDisconnect={twitchDisconnect} twitchNotice={twitchNotice} setTwitchNotice={setTwitchNotice} />;

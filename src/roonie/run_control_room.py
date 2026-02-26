@@ -314,6 +314,7 @@ def main(argv: list[str] | None = None) -> int:
     live_bridge = None
     eventsub_bridge = None
     audio_bridge = None
+    trackr_bridge = None
     refresh_thread = None
     refresh_stop = threading.Event()
     if bool(args.start_live_chat) and storage is not None and hasattr(storage, "refresh_twitch_tokens_if_needed"):
@@ -378,6 +379,15 @@ def main(argv: list[str] | None = None) -> int:
         eventsub_bridge.start()
         _append_log(paths.control_log_path, "EVENTSUB: started (websocket transport)")
         print("EventSub bridge started.")
+        from roonie.control_room.trackr_bridge import TrackrBridge
+
+        trackr_bridge = TrackrBridge(
+            storage=storage,
+            logger=lambda line: _append_log(paths.control_log_path, line),
+        )
+        trackr_bridge.start()
+        _append_log(paths.control_log_path, "TRACKR: bridge started (polls when enabled)")
+        print("TRACKR bridge started.")
     elif bool(args.start_live_chat):
         _append_log(paths.control_log_path, "LIVE-CHAT: not started (storage unavailable)")
         print("Live chat bridge not started: storage unavailable.")
@@ -408,6 +418,9 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        if trackr_bridge is not None:
+            trackr_bridge.stop()
+            trackr_bridge.join(timeout=2.0)
         if audio_bridge is not None:
             audio_bridge.stop()
             audio_bridge.join(timeout=2.0)

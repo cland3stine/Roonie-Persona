@@ -338,6 +338,7 @@ class DashboardStorage:
         self._inner_circle_path = self.data_dir / "inner_circle.json"
         self._stream_schedule_path = self.data_dir / "stream_schedule.json"
         self._audio_config_path = self.data_dir / "audio_config.json"
+        self._trackr_config_path = self.data_dir / "trackr_config.json"
         self._library_dir = self.data_dir / "library"
         self._library_xml_path = self._library_dir / "rekordbox.xml"
         self._library_index_path = self._library_dir / "library_index.json"
@@ -372,6 +373,7 @@ class DashboardStorage:
             "eventsub_last_error": None,
         }
         self._audio_runtime_state: Dict[str, Any] = {}
+        self._trackr_runtime_state: Dict[str, Any] = {}
         self._send_failure_state: Dict[str, Any] = {
             "fail_count": 0,
             "last_fail_reason": None,
@@ -4082,6 +4084,111 @@ class DashboardStorage:
     def get_audio_runtime_state(self) -> Dict[str, Any]:
         with self._lock:
             return dict(self._audio_runtime_state)
+
+    # ── trackr_config ──────────────────────────────────────────
+
+    @staticmethod
+    def _default_trackr_config() -> Dict[str, Any]:
+        return {
+            "enabled": False,
+            "api_url": "http://127.0.0.1:8755",
+            "poll_interval_seconds": 3.0,
+            "track_id_skill_enabled": False,
+            "proactive_favorites_enabled": False,
+            "proactive_play_threshold": 3,
+            "proactive_max_per_session": 3,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_by": "system",
+        }
+
+    def _normalize_trackr_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        base = self._default_trackr_config()
+        raw = payload if isinstance(payload, dict) else {}
+        api_url = self._bounded_text(
+            raw.get("api_url", base["api_url"]),
+            field_name="api_url", max_len=200, required=False,
+        ) or base["api_url"]
+        poll_interval = raw.get("poll_interval_seconds", base["poll_interval_seconds"])
+        if not isinstance(poll_interval, (int, float)) or not (1.0 <= poll_interval <= 30.0):
+            poll_interval = 3.0
+        play_threshold = raw.get("proactive_play_threshold", base["proactive_play_threshold"])
+        if not isinstance(play_threshold, int) or not (1 <= play_threshold <= 100):
+            play_threshold = 3
+        max_per_session = raw.get("proactive_max_per_session", base["proactive_max_per_session"])
+        if not isinstance(max_per_session, int) or not (0 <= max_per_session <= 50):
+            max_per_session = 3
+        return {
+            "enabled": _to_bool(raw.get("enabled"), bool(base["enabled"])),
+            "api_url": api_url,
+            "poll_interval_seconds": float(poll_interval),
+            "track_id_skill_enabled": _to_bool(raw.get("track_id_skill_enabled"), bool(base["track_id_skill_enabled"])),
+            "proactive_favorites_enabled": _to_bool(raw.get("proactive_favorites_enabled"), bool(base["proactive_favorites_enabled"])),
+            "proactive_play_threshold": int(play_threshold),
+            "proactive_max_per_session": int(max_per_session),
+        }
+
+    def _read_or_create_trackr_config_locked(self) -> Dict[str, Any]:
+        raw = _safe_read_json(self._trackr_config_path)
+        if isinstance(raw, dict):
+            config = self._normalize_trackr_config(raw)
+        else:
+            config = self._normalize_trackr_config(self._default_trackr_config())
+        config.setdefault("updated_at", datetime.now(timezone.utc).isoformat())
+        config.setdefault("updated_by", "system")
+        self._write_json_atomic(self._trackr_config_path, config)
+        return config
+
+    def get_trackr_config(self) -> Dict[str, Any]:
+        with self._lock:
+            config = self._read_or_create_trackr_config_locked()
+            return deepcopy(config)
+
+    def update_trackr_config(
+        self,
+        payload: Dict[str, Any],
+        *,
+        actor: Optional[str] = None,
+        patch: bool = False,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid JSON payload.")
+        actor_norm = self.normalize_actor(actor)
+        with self._lock:
+            old = self._read_or_create_trackr_config_locked()
+            merged = (
+                self._merge_dicts(old, payload)
+                if patch
+                else self._merge_dicts(self._default_trackr_config(), payload)
+            )
+            new = self._normalize_trackr_config(merged)
+            new["updated_at"] = datetime.now(timezone.utc).isoformat()
+            new["updated_by"] = actor_norm
+            self._write_json_atomic(self._trackr_config_path, new)
+        changed_keys = [
+            key for key in ("enabled", "api_url", "poll_interval_seconds",
+                            "track_id_skill_enabled", "proactive_favorites_enabled",
+                            "proactive_play_threshold", "proactive_max_per_session")
+            if old.get(key) != new.get(key)
+        ]
+        old_hash = _json_sha256(old)
+        new_hash = _json_sha256(new)
+        audit_payload = {
+            "changed_keys": changed_keys,
+            "old_snapshot_hash": old_hash,
+            "new_snapshot_hash": new_hash,
+            "mode": "patch" if patch else "put",
+        }
+        return new, audit_payload
+
+    # ── trackr runtime state ───────────────────────────────────
+
+    def set_trackr_state(self, state: Dict[str, Any]) -> None:
+        with self._lock:
+            self._trackr_runtime_state = dict(state)
+
+    def get_trackr_state(self) -> Dict[str, Any]:
+        with self._lock:
+            return dict(self._trackr_runtime_state)
 
     @staticmethod
     def list_audio_devices() -> list:
