@@ -3486,7 +3486,6 @@ function SensesPage({ sensesStatusData, audioConfigData, audioStatusData, setAud
   const config = audioConfigData || {};
   const audioStatus = audioStatusData || {};
   const devices = Array.isArray(audioDevicesData) ? audioDevicesData : [];
-  const sensesEnabled = !status.live_hard_disabled;
   const audioEnabled = Boolean(config.enabled);
   const audioRunning = Boolean(audioStatus.running);
 
@@ -3528,11 +3527,27 @@ function SensesPage({ sensesStatusData, audioConfigData, audioStatusData, setAud
   const levelRms = typeof audioStatus.level_rms === "number" ? audioStatus.level_rms : 0;
   const levelColor = levelRms > 0.8 ? "#ff4136" : levelRms > 0.4 ? "#ff851b" : "#2ecc40";
 
+  // Master toggle: flip config.enabled and immediately PATCH
+  const handleMasterToggle = () => {
+    const next = { ...(editConfig || config), enabled: !audioEnabled };
+    setEditConfig(next);
+    if (saveAudioConfig) saveAudioConfig(next);
+  };
+
+  // Meta-row styles (matches ProvidersPage pattern)
+  const metaRowStyle = { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: "1px solid #1f1f22" };
+  const metaLabelStyle = { fontSize: 11, color: "#888", fontFamily: "'IBM Plex Sans', sans-serif" };
+  const selectStyle = {
+    width: 150, padding: "4px 8px", background: "#15151a", border: "1px solid #333",
+    borderRadius: 2, color: "#aaa", fontSize: 11, fontFamily: "'JetBrains Mono', monospace",
+    cursor: "pointer", textAlign: "right",
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      {/* Header with master senses toggle */}
+      {/* Header with master audio toggle */}
       <RackPanel>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <RackLabel style={{ marginBottom: 0 }}>Audio Sense</RackLabel>
             <Led
@@ -3542,21 +3557,18 @@ function SensesPage({ sensesStatusData, audioConfigData, audioStatusData, setAud
             />
           </div>
           <Toggle
-            on={sensesEnabled}
-            onToggle={() => performAction("/api/senses/enable", { enabled: !sensesEnabled })}
+            on={audioEnabled}
+            onToggle={handleMasterToggle}
           />
-        </div>
-        <div style={{ fontSize: 11, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.5 }}>
-          Voice recognition via Whisper STT. Captures audio from a local device, detects wake words, and emits voice events into the chat pipeline.
         </div>
       </RackPanel>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
         {/* Left column */}
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {/* Input Device */}
+          {/* Input & Level (merged) */}
           <RackPanel>
-            <RackLabel>Input Device</RackLabel>
+            <RackLabel>Input & Level</RackLabel>
             <select
               value={ec.device_name || ""}
               onChange={(e) => {
@@ -3566,7 +3578,7 @@ function SensesPage({ sensesStatusData, audioConfigData, audioStatusData, setAud
               style={{
                 width: "100%", padding: "8px 10px", background: "#15151a", border: "1px solid #333",
                 borderRadius: 2, color: "#aaa", fontSize: 12, fontFamily: "'IBM Plex Sans', sans-serif",
-                cursor: "pointer",
+                cursor: "pointer", marginBottom: 10,
               }}
             >
               <option value="">(system default)</option>
@@ -3574,16 +3586,6 @@ function SensesPage({ sensesStatusData, audioConfigData, audioStatusData, setAud
                 <option key={d.index} value={d.name}>{d.name} ({d.max_input_channels}ch, {d.default_samplerate}Hz)</option>
               ))}
             </select>
-            {audioStatus.device && (
-              <div style={{ fontSize: 10, color: "#555", fontFamily: "'JetBrains Mono', monospace", marginTop: 6, letterSpacing: 0.5 }}>
-                Active: {audioStatus.device}
-              </div>
-            )}
-          </RackPanel>
-
-          {/* Audio Level */}
-          <RackPanel>
-            <RackLabel>Audio Level</RackLabel>
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
               <div style={{ flex: 1, height: 12, background: "#15151a", borderRadius: 2, overflow: "hidden", border: "1px solid #333", position: "relative" }}>
                 <div style={{
@@ -3601,6 +3603,7 @@ function SensesPage({ sensesStatusData, audioConfigData, audioStatusData, setAud
             <div style={{ display: "flex", gap: 16, fontSize: 10, color: "#555", fontFamily: "'JetBrains Mono', monospace", letterSpacing: 0.5 }}>
               <span>Status: {audioRunning ? "RUNNING" : "STOPPED"}</span>
               {audioStatus.sample_rate && <span>Rate: {audioStatus.sample_rate}Hz</span>}
+              {audioStatus.device && <span>Device: {audioStatus.device}</span>}
             </div>
           </RackPanel>
 
@@ -3640,44 +3643,65 @@ function SensesPage({ sensesStatusData, audioConfigData, audioStatusData, setAud
           {/* Configuration */}
           <RackPanel>
             <RackLabel>Configuration</RackLabel>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-              <span style={{ fontSize: 11, color: "#888", fontFamily: "'IBM Plex Sans', sans-serif" }}>Audio enabled</span>
-              <Toggle
-                on={Boolean(ec.enabled)}
-                onToggle={() => setEditConfig((prev) => ({ ...(prev || config), enabled: !ec.enabled }))}
-              />
-            </div>
-            {[
-              { label: "Whisper model", key: "whisper_model", type: "text" },
-              { label: "Whisper device", key: "whisper_device", type: "text" },
-              { label: "Interval (sec)", key: "transcription_interval_seconds", type: "number" },
-              { label: "Default user", key: "voice_default_user", type: "text" },
-            ].map((field) => (
-              <div key={field.key} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-                <span style={{ fontSize: 11, color: "#888", fontFamily: "'IBM Plex Sans', sans-serif" }}>{field.label}</span>
+            <div style={{ display: "flex", flexDirection: "column", gap: 0, background: "#111114", border: "1px solid #1f1f22", borderRadius: 2, padding: "2px 10px" }}>
+              <div style={metaRowStyle}>
+                <span style={metaLabelStyle}>Whisper model</span>
+                <select
+                  value={ec.whisper_model ?? "base.en"}
+                  onChange={(e) => setEditConfig((prev) => ({ ...(prev || config), whisper_model: e.target.value }))}
+                  style={selectStyle}
+                >
+                  {["tiny.en", "base.en", "small.en", "medium.en", "large-v3"].map((m) => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
+              </div>
+              <div style={metaRowStyle}>
+                <span style={metaLabelStyle}>Whisper device</span>
+                <select
+                  value={ec.whisper_device ?? "cuda"}
+                  onChange={(e) => setEditConfig((prev) => ({ ...(prev || config), whisper_device: e.target.value }))}
+                  style={selectStyle}
+                >
+                  {["cuda", "cpu"].map((d) => (
+                    <option key={d} value={d}>{d}</option>
+                  ))}
+                </select>
+              </div>
+              <div style={metaRowStyle}>
+                <span style={metaLabelStyle}>Interval</span>
+                <select
+                  value={ec.transcription_interval_seconds ?? 3}
+                  onChange={(e) => setEditConfig((prev) => ({ ...(prev || config), transcription_interval_seconds: Number(e.target.value) }))}
+                  style={selectStyle}
+                >
+                  {[1, 2, 3, 5, 10].map((v) => (
+                    <option key={v} value={v}>{v}s</option>
+                  ))}
+                </select>
+              </div>
+              <div style={metaRowStyle}>
+                <span style={metaLabelStyle}>Default user</span>
                 <input
-                  type={field.type}
-                  value={ec[field.key] ?? ""}
-                  onChange={(e) => {
-                    const val = field.type === "number" ? parseFloat(e.target.value) || 0 : e.target.value;
-                    setEditConfig((prev) => ({ ...(prev || config), [field.key]: val }));
-                  }}
+                  type="text"
+                  value={ec.voice_default_user ?? ""}
+                  onChange={(e) => setEditConfig((prev) => ({ ...(prev || config), voice_default_user: e.target.value }))}
                   style={{
-                    width: 140, padding: "5px 8px", background: "#15151a", border: "1px solid #333",
+                    width: 150, padding: "4px 8px", background: "#15151a", border: "1px solid #333",
                     borderRadius: 2, color: "#aaa", fontSize: 11, fontFamily: "'JetBrains Mono', monospace",
                     textAlign: "right",
                   }}
                 />
               </div>
-            ))}
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-              <span style={{ fontSize: 11, color: "#888", fontFamily: "'IBM Plex Sans', sans-serif" }}>Wake word</span>
-              <Toggle
-                on={Boolean(ec.wake_word_enabled)}
-                onToggle={() => setEditConfig((prev) => ({ ...(prev || config), wake_word_enabled: !ec.wake_word_enabled }))}
-              />
+              <div style={{ ...metaRowStyle, borderBottom: "none" }}>
+                <span style={metaLabelStyle}>Wake word</span>
+                <Toggle
+                  on={Boolean(ec.wake_word_enabled)}
+                  onToggle={() => setEditConfig((prev) => ({ ...(prev || config), wake_word_enabled: !ec.wake_word_enabled }))}
+                />
+              </div>
             </div>
-            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 4 }}>
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
               <RackButton
                 label="SAVE CHANGES"
                 color={configDirty ? "#2ecc40" : "#555"}
@@ -3702,24 +3726,6 @@ function SensesPage({ sensesStatusData, audioConfigData, audioStatusData, setAud
             <div style={{ fontSize: 9, color: "#444", fontFamily: "'JetBrains Mono', monospace", marginTop: 8, letterSpacing: 1 }}>
               Policy edits require code-level changes and operator consensus.
             </div>
-          </RackPanel>
-
-          {/* Future Senses (grayed out) */}
-          <RackPanel style={{ opacity: 0.35, pointerEvents: "none", userSelect: "none" }}>
-            <RackLabel>Future Senses</RackLabel>
-            {[
-              { name: "Ambient Context", desc: "Roonie hears conversation without wake word (BL-SENSE-002)" },
-              { name: "Visual Feed", desc: "Camera feed analysis for crowd or gesture detection" },
-              { name: "Speaker ID", desc: "Identify individual speakers by voice (BL-SENSE-004)" },
-            ].map((s) => (
-              <div key={s.name} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 0", borderBottom: "1px solid #1f1f22" }}>
-                <div>
-                  <div style={{ fontSize: 11, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif" }}>{s.name}</div>
-                  <div style={{ fontSize: 9, color: "#444", fontFamily: "'IBM Plex Sans', sans-serif" }}>{s.desc}</div>
-                </div>
-                <span style={{ fontSize: 9, padding: "2px 8px", background: "#ff413612", border: "1px solid #ff413633", borderRadius: 2, color: "#ff4136", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>PLANNED</span>
-              </div>
-            ))}
           </RackPanel>
         </div>
       </div>
