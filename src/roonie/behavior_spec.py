@@ -13,6 +13,7 @@ CATEGORY_EVENT_FOLLOW = "EVENT_FOLLOW"
 CATEGORY_EVENT_SUB = "EVENT_SUB"
 CATEGORY_EVENT_CHEER = "EVENT_CHEER"
 CATEGORY_EVENT_RAID = "EVENT_RAID"
+CATEGORY_PROACTIVE_FAVORITE = "PROACTIVE_FAVORITE"
 CATEGORY_OTHER = "OTHER"
 
 
@@ -21,6 +22,7 @@ EVENT_TYPE_TO_CATEGORY = {
     "SUB": CATEGORY_EVENT_SUB,
     "CHEER": CATEGORY_EVENT_CHEER,
     "RAID": CATEGORY_EVENT_RAID,
+    "PROACTIVE_FAVORITE": CATEGORY_PROACTIVE_FAVORITE,
 }
 
 
@@ -29,6 +31,7 @@ EVENT_COOLDOWN_SECONDS = {
     CATEGORY_EVENT_SUB: 20.0,
     CATEGORY_EVENT_CHEER: 20.0,
     CATEGORY_EVENT_RAID: 30.0,
+    CATEGORY_PROACTIVE_FAVORITE: 120.0,
 }
 GREETING_COOLDOWN_SECONDS = 15.0
 
@@ -94,6 +97,10 @@ def behavior_guidance(
                 lines.append("You have track info — label, year, style. Weave it in naturally, don't list it like a database.")
         else:
             lines.append("You don't have track info right now. Ask for a timestamp or clip if needed.")
+    elif category == CATEGORY_PROACTIVE_FAVORITE:
+        lines.append("This track is getting heavy rotation today. Give a brief, natural shoutout — mention the artist/track and that it's been coming up a lot. One sentence, max two. Vary your phrasing each time.")
+        if enrichment_available:
+            lines.append("You have track info — label, year, style. Weave it in naturally if it fits.")
     elif category in EVENT_COOLDOWN_SECONDS:
         lines.append("Quick thank-you for the event. Be warm and hyped, make them feel like it matters. Keep it brief.")
     elif category == CATEGORY_GREETING:

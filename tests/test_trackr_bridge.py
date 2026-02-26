@@ -772,3 +772,278 @@ def test_live_chat_injects_skill_flag():
         )
 
     assert captured_metadata.get("track_id_skill_enabled") is True
+
+
+# ── Phase D: Proactive favorites ──────────────────────────────
+
+
+def test_play_count_increments_on_track_change():
+    from roonie.control_room.trackr_bridge import TrackrBridge
+
+    mock_storage = MagicMock()
+    mock_storage.get_trackr_config.return_value = {"enabled": False}
+    bridge = TrackrBridge(storage=mock_storage)
+
+    key = bridge._normalize_track_key("Artist - Title")
+    bridge._play_counts[key] = bridge._play_counts.get(key, 0) + 1
+    assert bridge._play_counts[key] == 1
+    bridge._play_counts[key] = bridge._play_counts.get(key, 0) + 1
+    assert bridge._play_counts[key] == 2
+
+
+def test_play_count_uses_normalized_key():
+    from roonie.control_room.trackr_bridge import TrackrBridge
+
+    bridge = TrackrBridge(storage=MagicMock())
+    assert bridge._normalize_track_key("  Artist - Title  ") == "artist - title"
+    assert bridge._normalize_track_key("ARTIST - TITLE") == "artist - title"
+    assert bridge._normalize_track_key("") == ""
+
+
+def test_proactive_not_triggered_when_disabled():
+    from roonie.control_room.trackr_bridge import TrackrBridge
+
+    mock_bridge = MagicMock()
+    bridge = TrackrBridge(storage=MagicMock(), live_bridge=mock_bridge)
+    bridge._play_counts = {"artist - title": 5}
+
+    config = {"proactive_favorites_enabled": False}
+    bridge._maybe_proactive_shoutout("Artist - Title", config)
+    mock_bridge.ingest_proactive_favorite.assert_not_called()
+
+
+def test_proactive_not_triggered_below_threshold():
+    from roonie.control_room.trackr_bridge import TrackrBridge
+
+    mock_bridge = MagicMock()
+    bridge = TrackrBridge(storage=MagicMock(), live_bridge=mock_bridge)
+    bridge._play_counts = {"artist - title": 2}
+
+    config = {"proactive_favorites_enabled": True, "proactive_play_threshold": 3}
+    bridge._maybe_proactive_shoutout("Artist - Title", config)
+    mock_bridge.ingest_proactive_favorite.assert_not_called()
+
+
+def test_proactive_not_triggered_when_session_cap_reached():
+    from roonie.control_room.trackr_bridge import TrackrBridge
+
+    mock_bridge = MagicMock()
+    bridge = TrackrBridge(storage=MagicMock(), live_bridge=mock_bridge)
+    bridge._play_counts = {"artist - title": 5}
+    bridge._proactive_shoutouts_sent = 3
+
+    config = {
+        "proactive_favorites_enabled": True,
+        "proactive_play_threshold": 3,
+        "proactive_max_per_session": 3,
+    }
+    bridge._maybe_proactive_shoutout("Artist - Title", config)
+    mock_bridge.ingest_proactive_favorite.assert_not_called()
+
+
+def test_proactive_not_triggered_for_already_shouted_track():
+    from roonie.control_room.trackr_bridge import TrackrBridge
+
+    mock_bridge = MagicMock()
+    bridge = TrackrBridge(storage=MagicMock(), live_bridge=mock_bridge)
+    bridge._play_counts = {"artist - title": 5}
+    bridge._shouted_tracks.add("artist - title")
+
+    config = {
+        "proactive_favorites_enabled": True,
+        "proactive_play_threshold": 3,
+        "proactive_max_per_session": 10,
+    }
+    bridge._maybe_proactive_shoutout("Artist - Title", config)
+    mock_bridge.ingest_proactive_favorite.assert_not_called()
+
+
+def test_proactive_triggered_when_all_conditions_met():
+    from roonie.control_room.trackr_bridge import TrackrBridge
+
+    mock_bridge = MagicMock()
+    bridge = TrackrBridge(storage=MagicMock(), live_bridge=mock_bridge)
+    bridge._play_counts = {"artist - title": 4}
+
+    config = {
+        "proactive_favorites_enabled": True,
+        "proactive_play_threshold": 3,
+        "proactive_max_per_session": 5,
+    }
+    with patch("roonie.control_room.trackr_bridge.random.random", return_value=0.0):
+        bridge._maybe_proactive_shoutout("Artist - Title", config)
+
+    mock_bridge.ingest_proactive_favorite.assert_called_once_with(
+        track_raw="Artist - Title",
+        play_count=4,
+    )
+    assert "artist - title" in bridge._shouted_tracks
+    assert bridge._proactive_shoutouts_sent == 1
+
+
+def test_proactive_not_triggered_when_random_gate_blocks():
+    from roonie.control_room.trackr_bridge import TrackrBridge
+
+    mock_bridge = MagicMock()
+    bridge = TrackrBridge(storage=MagicMock(), live_bridge=mock_bridge)
+    bridge._play_counts = {"artist - title": 4}
+
+    config = {
+        "proactive_favorites_enabled": True,
+        "proactive_play_threshold": 3,
+        "proactive_max_per_session": 5,
+    }
+    with patch("roonie.control_room.trackr_bridge.random.random", return_value=0.99):
+        bridge._maybe_proactive_shoutout("Artist - Title", config)
+
+    mock_bridge.ingest_proactive_favorite.assert_not_called()
+    assert bridge._proactive_shoutouts_sent == 0
+
+
+def test_proactive_live_bridge_none_backward_compat():
+    """live_bridge=None should not crash."""
+    from roonie.control_room.trackr_bridge import TrackrBridge
+
+    bridge = TrackrBridge(storage=MagicMock(), live_bridge=None)
+    bridge._play_counts = {"artist - title": 5}
+
+    config = {
+        "proactive_favorites_enabled": True,
+        "proactive_play_threshold": 3,
+        "proactive_max_per_session": 5,
+    }
+    with patch("roonie.control_room.trackr_bridge.random.random", return_value=0.0):
+        bridge._maybe_proactive_shoutout("Artist - Title", config)
+    # No crash, no shoutout recorded
+    assert bridge._proactive_shoutouts_sent == 0
+
+
+def test_proactive_increments_session_counter():
+    from roonie.control_room.trackr_bridge import TrackrBridge
+
+    mock_bridge = MagicMock()
+    bridge = TrackrBridge(storage=MagicMock(), live_bridge=mock_bridge)
+    bridge._play_counts = {"track a": 3, "track b": 4}
+
+    config = {
+        "proactive_favorites_enabled": True,
+        "proactive_play_threshold": 3,
+        "proactive_max_per_session": 5,
+    }
+    with patch("roonie.control_room.trackr_bridge.random.random", return_value=0.0):
+        bridge._maybe_proactive_shoutout("Track A", config)
+        bridge._maybe_proactive_shoutout("Track B", config)
+
+    assert bridge._proactive_shoutouts_sent == 2
+    assert mock_bridge.ingest_proactive_favorite.call_count == 2
+
+
+def test_play_counts_in_pushed_state():
+    from roonie.control_room.trackr_bridge import TrackrBridge
+
+    mock_storage = MagicMock()
+    bridge = TrackrBridge(storage=mock_storage)
+    bridge._play_counts = {"artist - title": 3, "another - track": 1}
+    bridge._proactive_shoutouts_sent = 1
+
+    bridge._push_state(connected=True, enabled=True, last_current="Artist - Title")
+    state = mock_storage.set_trackr_state.call_args[0][0]
+    assert state["play_counts"] == {"artist - title": 3, "another - track": 1}
+    assert state["proactive_shoutouts_sent"] == 1
+
+
+def test_play_counts_not_in_state_when_empty():
+    from roonie.control_room.trackr_bridge import TrackrBridge
+
+    mock_storage = MagicMock()
+    bridge = TrackrBridge(storage=mock_storage)
+
+    bridge._push_state(connected=True, enabled=True)
+    state = mock_storage.set_trackr_state.call_args[0][0]
+    assert "play_counts" not in state
+    assert state["proactive_shoutouts_sent"] == 0
+
+
+def test_ingest_proactive_favorite_calls_emit():
+    """ingest_proactive_favorite calls _emit_payload_message with correct metadata."""
+    from roonie.control_room.live_chat import LiveChatBridge
+
+    mock_storage = MagicMock()
+    mock_storage.get_status.return_value = MagicMock(
+        to_dict=lambda: {
+            "can_post": False,
+            "blocked_by": ["SETUP"],
+            "active_director": "OfflineDirector",
+            "routing_enabled": False,
+            "session_id": "test",
+        }
+    )
+    mock_storage.get_trackr_state.return_value = {}
+    mock_storage.get_trackr_config.return_value = {"enabled": False}
+
+    bridge = LiveChatBridge(storage=mock_storage)
+    captured_metadata = {}
+
+    def fake_run_payload(payload, **kwargs):
+        nonlocal captured_metadata
+        inputs = payload.get("inputs", [])
+        if inputs:
+            captured_metadata = inputs[0].get("metadata", {})
+        import tempfile, pathlib
+        p = pathlib.Path(tempfile.mktemp(suffix=".json"))
+        p.write_text(json.dumps({"outputs": []}), encoding="utf-8")
+        return p
+
+    with patch("roonie.control_room.live_chat.run_payload", fake_run_payload):
+        bridge.ingest_proactive_favorite(track_raw="Artist - Title", play_count=4)
+
+    assert captured_metadata.get("source") == "trackr_proactive"
+    assert captured_metadata.get("event_type") == "PROACTIVE_FAVORITE"
+    assert captured_metadata.get("play_count") == 4
+    assert captured_metadata.get("track_raw") == "Artist - Title"
+    assert captured_metadata.get("is_direct_mention") is True
+    assert captured_metadata.get("user") == "roonie-internal"
+
+
+def test_category_proactive_favorite_classified():
+    from roonie.behavior_spec import classify_behavior_category, CATEGORY_PROACTIVE_FAVORITE
+
+    result = classify_behavior_category(
+        message="[Proactive: this track has been played 4 times today]",
+        metadata={"event_type": "PROACTIVE_FAVORITE"},
+    )
+    assert result == CATEGORY_PROACTIVE_FAVORITE
+
+
+def test_behavior_guidance_proactive_favorite():
+    from roonie.behavior_spec import behavior_guidance, CATEGORY_PROACTIVE_FAVORITE
+
+    text = behavior_guidance(
+        category=CATEGORY_PROACTIVE_FAVORITE,
+        approved_emotes=[],
+        now_playing_available=True,
+        enrichment_available=False,
+    )
+    assert "heavy rotation" in text
+    assert "shoutout" in text
+
+
+def test_behavior_guidance_proactive_with_enrichment():
+    from roonie.behavior_spec import behavior_guidance, CATEGORY_PROACTIVE_FAVORITE
+
+    text = behavior_guidance(
+        category=CATEGORY_PROACTIVE_FAVORITE,
+        approved_emotes=[],
+        now_playing_available=True,
+        enrichment_available=True,
+    )
+    assert "label, year, style" in text
+
+
+def test_cooldown_proactive_favorite():
+    from roonie.behavior_spec import cooldown_for_category, CATEGORY_PROACTIVE_FAVORITE
+
+    cat, seconds, reason = cooldown_for_category(CATEGORY_PROACTIVE_FAVORITE)
+    assert cat == CATEGORY_PROACTIVE_FAVORITE
+    assert seconds == 120.0
+    assert reason == "EVENT_COOLDOWN"

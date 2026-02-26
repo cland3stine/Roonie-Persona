@@ -509,6 +509,25 @@ class LiveChatBridge:
                 continue
             self._process_retry_item(item)
 
+    def ingest_proactive_favorite(self, *, track_raw: str, play_count: int) -> Dict[str, Any]:
+        message = (
+            f"[Proactive: this track has been played {play_count} times today"
+            " — give it a brief, natural shoutout]"
+        )
+        metadata_extra = {
+            "source": "trackr_proactive",
+            "event_type": "PROACTIVE_FAVORITE",
+            "play_count": int(play_count),
+            "track_raw": str(track_raw or ""),
+        }
+        return self._emit_payload_message(
+            actor="roonie-internal",
+            message=message,
+            channel="",
+            is_direct_mention=True,
+            metadata_extra=metadata_extra,
+        )
+
     def ingest_eventsub_event(self, normalized_event: Dict[str, Any], *, text: str) -> Dict[str, Any]:
         metadata_extra = {
             "source": "eventsub",

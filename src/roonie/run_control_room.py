@@ -383,6 +383,7 @@ def main(argv: list[str] | None = None) -> int:
 
         trackr_bridge = TrackrBridge(
             storage=storage,
+            live_bridge=live_bridge,
             logger=lambda line: _append_log(paths.control_log_path, line),
         )
         trackr_bridge.start()

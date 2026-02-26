@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import threading
 import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -61,15 +62,21 @@ class TrackrBridge:
         self,
         *,
         storage: Any,
+        live_bridge: Any = None,
         logger: Optional[Callable[[str], None]] = None,
     ) -> None:
         self._storage = storage
+        self._live_bridge = live_bridge
         self._ext_logger = logger
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._enricher: Any = None
         self._current_enrichment: Dict[str, Any] = {}
         self._previous_enrichment: Dict[str, Any] = {}
+        # Phase D: proactive favorites state
+        self._play_counts: Dict[str, int] = {}
+        self._proactive_shoutouts_sent: int = 0
+        self._shouted_tracks: Set[str] = set()
         self._init_enricher()
 
     # ── Discogs enrichment ─────────────────────────────────────
@@ -154,6 +161,45 @@ class TrackrBridge:
                 pass
         print(line)
 
+    # ── proactive favorites ─────────────────────────────────────
+
+    @staticmethod
+    def _normalize_track_key(raw: str) -> str:
+        return str(raw or "").strip().lower()
+
+    def _maybe_proactive_shoutout(self, track_raw: str, config: Dict[str, Any]) -> None:
+        if not config.get("proactive_favorites_enabled", False):
+            return
+        key = self._normalize_track_key(track_raw)
+        if not key:
+            return
+        count = self._play_counts.get(key, 0)
+        threshold = int(config.get("proactive_play_threshold", 3))
+        if count < threshold:
+            return
+        if key in self._shouted_tracks:
+            return
+        max_per_session = int(config.get("proactive_max_per_session", 3))
+        if self._proactive_shoutouts_sent >= max_per_session:
+            return
+        if random.random() >= 0.4:
+            return
+        # All gates passed — fire proactive shoutout
+        if self._live_bridge is None:
+            return
+        if not hasattr(self._live_bridge, "ingest_proactive_favorite"):
+            return
+        try:
+            self._live_bridge.ingest_proactive_favorite(
+                track_raw=track_raw,
+                play_count=count,
+            )
+            self._shouted_tracks.add(key)
+            self._proactive_shoutouts_sent += 1
+            self._log(f"[TrackrBridge] proactive shoutout: {track_raw} (play #{count})")
+        except Exception as exc:
+            self._log(f"[TrackrBridge] proactive shoutout error: {exc}")
+
     # ── core loop ───────────────────────────────────────────────
 
     def _run(self) -> None:
@@ -213,6 +259,11 @@ class TrackrBridge:
                     self._log(
                         f"[TrackrBridge] enriched: {self._current_enrichment}"
                     )
+                # Phase D: increment play count and check proactive trigger
+                track_key = self._normalize_track_key(current_raw)
+                if track_key:
+                    self._play_counts[track_key] = self._play_counts.get(track_key, 0) + 1
+                self._maybe_proactive_shoutout(current_raw, config)
                 last_current = current_raw
 
             if previous_raw != last_previous:
@@ -277,4 +328,7 @@ class TrackrBridge:
             state["current_enrichment"] = dict(self._current_enrichment)
         if self._previous_enrichment:
             state["previous_enrichment"] = dict(self._previous_enrichment)
+        if self._play_counts:
+            state["play_counts"] = dict(self._play_counts)
+        state["proactive_shoutouts_sent"] = self._proactive_shoutouts_sent
         self._storage.set_trackr_state(state)
