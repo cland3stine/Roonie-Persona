@@ -43,6 +43,7 @@ _DEICTIC_FOLLOWUP_RE = re.compile(
     r"\b(it|that|this|the latest one|latest one|that one|which one|which track|remind me|what was it)\b",
     re.IGNORECASE,
 )
+_SKIP_RE = re.compile(r"^\[?skip\]?$", re.IGNORECASE)
 _ANCHOR_STOPWORDS = {
     "the",
     "a",
@@ -251,6 +252,7 @@ class ProviderDirector:
     _library_cache_mtime_ns: int = field(default=0, init=False, repr=False)
     _library_cache_tracks: List[Dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     _pending_assistant_turns: Dict[str, Dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
+    _continuation_streak: Dict[str, int] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._persona_policy_text = _load_persona_policy_text()
@@ -396,21 +398,27 @@ class ProviderDirector:
         return "roonie" in msg
 
     def _is_conversation_continuation(self, event: Event) -> bool:
-        """True if Roonie's most recent response was to this same viewer."""
+        """True if Roonie's most recent response was to this same viewer
+        AND the conversation hasn't moved on (recency gate: ≤3 user messages since)."""
         viewer = str((event.metadata or {}).get("user", "")).strip().lower()
         if not viewer:
             return False
         turns = self.context_buffer.get_context(max_turns=8)
         if not turns:
             return False
-        # Walk backwards: find the most recent roonie turn,
-        # then check if the user turn before it was from this viewer.
+        # Walk backwards: count user messages since last roonie turn.
+        # If 4+ user messages have passed, conversation has moved on.
+        messages_since_roonie = 0
         for i in range(len(turns) - 1, -1, -1):
             if turns[i].speaker == "roonie":
+                if messages_since_roonie > 3:
+                    return False  # Conversation has moved on
                 for j in range(i - 1, -1, -1):
                     if turns[j].speaker == "user":
                         return str(turns[j].tags.get("user", "")).strip().lower() == viewer
                 break  # Found roonie turn but no preceding user turn
+            else:
+                messages_since_roonie += 1
         return False
 
     @staticmethod
@@ -777,6 +785,7 @@ class ProviderDirector:
         short_ack_preferred: bool = False,
         safety_classification: str = "allowed",
         track_command: str = "",
+        continuation: bool = False,
     ) -> str:
         base_prompt = build_roonie_prompt(
             message=event.message,
@@ -843,11 +852,25 @@ class ProviderDirector:
                 "Do not ask follow-up questions about their emotional state. "
                 "Do not play therapist or counselor. A short, genuine acknowledgment is enough."
             )
+        continuation_block = ""
+        if continuation:
+            continuation_block = (
+                "\n\n"
+                "Awareness note: This message was NOT directed at you. The viewer was chatting "
+                "with you recently, so this might be a follow-up — or they might have moved on "
+                "to talking to someone else or the room in general.\n"
+                "Read the room:\n"
+                "- Is this a natural follow-up to what you were just discussing?\n"
+                "- Is the viewer talking to or about someone else? (Look for @mentions, names, greetings)\n"
+                "- Would jumping in here feel natural, or would you be inserting yourself?\n"
+                "If this isn't for you, or you have nothing worth adding, respond with exactly: [SKIP]\n"
+                "Silence is always an option and often the right one."
+            )
         if not self._persona_policy_text:
-            return f"{base_prompt}\n\n{behavior_block}{grounding_block}{music_fact_block}{memory_block}{safety_block}\n"
+            return f"{base_prompt}\n\n{behavior_block}{grounding_block}{music_fact_block}{memory_block}{safety_block}{continuation_block}\n"
         return (
             f"{base_prompt}\n\n"
-            f"{behavior_block}{grounding_block}{music_fact_block}{memory_block}{safety_block}\n\n"
+            f"{behavior_block}{grounding_block}{music_fact_block}{memory_block}{safety_block}{continuation_block}\n\n"
             "Canonical Persona Policy (do not violate):\n"
             f"{self._persona_policy_text}\n"
         )
@@ -862,6 +885,7 @@ class ProviderDirector:
             self._topic_anchor_turn = 0
             self._topic_anchor_kind = ""
             self._pending_assistant_turns.clear()
+            self._continuation_streak.clear()
 
         metadata = event.metadata if isinstance(event.metadata, dict) else {}
         addressed = self._is_direct_address(event)
@@ -939,7 +963,8 @@ class ProviderDirector:
             speaker="user",
             text=event.message,
             tags={
-                "direct_address": addressed or continuation,
+                "direct_address": addressed,
+                "continuation": continuation,
                 "category": str(event.metadata.get("category", "")).strip().lower(),
                 "user": str(event.metadata.get("user", "")).strip().lower(),
             },
@@ -951,6 +976,16 @@ class ProviderDirector:
             items_used=0,
             dropped_count=0,
         )
+        # Safety cap: reset streak on direct address, block after 4 consecutive continuation replies
+        viewer_key = str((event.metadata or {}).get("user", "")).strip().lower()
+        continuation_capped = False
+        if addressed and viewer_key:
+            self._continuation_streak.pop(viewer_key, None)
+        if continuation and viewer_key:
+            if self._continuation_streak.get(viewer_key, 0) >= 4:
+                continuation = False
+                continuation_capped = True
+
         should_evaluate = (addressed and trigger) or continuation
 
         # Phase C: bang-command gate (skill toggle)
@@ -966,7 +1001,7 @@ class ProviderDirector:
         if should_evaluate:
             memory_result = get_safe_injection(
                 db_path=_memory_db_path(),
-                max_chars=1500,
+                max_chars=2000,
                 max_items=15,
             )
         if not should_evaluate:
@@ -982,6 +1017,8 @@ class ProviderDirector:
                         "addressed_to_roonie": addressed,
                         "trigger": trigger,
                         "conversation_continuation": continuation,
+                        "continuation_capped": continuation_capped,
+                        "continuation_streak": self._continuation_streak.get(viewer_key, 0) if viewer_key else 0,
                         "track_command": track_cmd,
                         "track_id_skill_enabled": metadata.get("track_id_skill_enabled"),
                     },
@@ -1045,6 +1082,7 @@ class ProviderDirector:
             short_ack_preferred=short_ack_preferred,
             safety_classification=safety_classification,
             track_command=track_cmd or "",
+            continuation=continuation,
         )
         context: Dict[str, Any] = {
             "use_provider_config": True,
@@ -1090,17 +1128,32 @@ class ProviderDirector:
         response_text: Optional[str] = None
         action = "NOOP"
         route = "none"
+        continuation_skipped = False
         if isinstance(out, str) and out.strip():
-            response_text = out.strip()
-            if str(os.getenv("ROONIE_SANITIZE_PROVIDER_STUB_OUTPUT", "")).strip().lower() in {"1", "true", "yes", "on"}:
-                response_text = self._sanitize_stub_output(
-                    response_text,
-                    category=category,
-                    user_message=event.message,
-                )
-            response_text = self._normalize_emote_spacing(response_text, approved_emotes)
-            action = "RESPOND_PUBLIC"
-            route = f"primary:{provider_used}"
+            raw = out.strip()
+            # [SKIP] opt-out: only for continuation messages — LLM decided this isn't for Roonie
+            if continuation and _SKIP_RE.match(raw):
+                response_text = None
+                action = "NOOP"
+                continuation_skipped = True
+            else:
+                response_text = raw
+                if str(os.getenv("ROONIE_SANITIZE_PROVIDER_STUB_OUTPUT", "")).strip().lower() in {"1", "true", "yes", "on"}:
+                    response_text = self._sanitize_stub_output(
+                        response_text,
+                        category=category,
+                        user_message=event.message,
+                    )
+                response_text = self._normalize_emote_spacing(response_text, approved_emotes)
+                action = "RESPOND_PUBLIC"
+                route = f"primary:{provider_used}"
+
+        # Continuation streak tracking
+        if continuation and response_text and viewer_key:
+            self._continuation_streak[viewer_key] = self._continuation_streak.get(viewer_key, 0) + 1
+        elif continuation_skipped and viewer_key:
+            # LLM opted out — don't increment, but don't reset either
+            pass
 
         event_id = str(event.event_id or "").strip()
         if event_id:
@@ -1118,6 +1171,9 @@ class ProviderDirector:
                 "addressed_to_roonie": addressed,
                 "trigger": trigger,
                 "conversation_continuation": continuation,
+                "continuation_capped": continuation_capped,
+                "continuation_skipped": continuation_skipped,
+                "continuation_streak": self._continuation_streak.get(viewer_key, 0) if viewer_key else 0,
                 "routing_enabled": bool(routing_status.get("enabled", True)),
                 "track_command": track_cmd,
                 "track_id_skill_enabled": metadata.get("track_id_skill_enabled"),

@@ -42,8 +42,10 @@ class ContextBuffer:
         return self._now_fn().isoformat()
 
     @staticmethod
-    def _is_user_relevant(*, text: str, direct_address: bool, category: str) -> bool:
+    def _is_user_relevant(*, text: str, direct_address: bool, category: str, continuation: bool = False) -> bool:
         if direct_address:
+            return True
+        if continuation:
             return True
         if "?" in text:
             return True
@@ -78,10 +80,11 @@ class ContextBuffer:
 
         incoming = dict(tags or {})
         direct_address = bool(incoming.get("direct_address", False))
+        continuation = bool(incoming.get("continuation", False))
         category = str(incoming.get("category", "")).strip().lower()
 
         if speaker_norm == "user":
-            if not self._is_user_relevant(text=text_norm, direct_address=direct_address, category=category):
+            if not self._is_user_relevant(text=text_norm, direct_address=direct_address, category=category, continuation=continuation):
                 return False
         else:
             if not sent:
@@ -94,6 +97,8 @@ class ContextBuffer:
         stored_tags: Dict[str, Any] = {}
         if "direct_address" in incoming:
             stored_tags["direct_address"] = bool(incoming["direct_address"])
+        if continuation:
+            stored_tags["continuation"] = True
         if category:
             stored_tags["category"] = category
         user_tag = str(incoming.get("user", "")).strip().lower()
