@@ -105,6 +105,7 @@ def behavior_guidance(
         lines.append("Quick thank-you for the event. Be warm and hyped, make them feel like it matters. Keep it brief.")
     elif category == CATEGORY_GREETING:
         lines.append("Greet them like a friend you're happy to see. Match their energy or bring it up a notch.")
+        lines.append("You know what's playing but don't shoehorn track names into a greeting. Only mention music if they brought it up.")
     elif category == CATEGORY_BANTER:
         if short_ack_preferred:
             lines.append("Viewer shared a status update without a question. Reply with one short acknowledgment sentence.")
@@ -112,6 +113,7 @@ def behavior_guidance(
         if topic_anchor:
             lines.append(f"Recent topic: {topic_anchor}. Pick up the thread if relevant.")
         lines.append("Chat naturally. Be warm, react to what they actually said. Light teasing with people you know well is welcome if the moment is right.")
+        lines.append("You know what's playing but don't force track references into every reply. Only mention music when the conversation is about it or it fits naturally.")
         lines.append("If you need to dodge a topic, do it smoothly — redirect to what's happening in the set, ask about something else, or just let it pass. Never sound like you're reading a policy.")
         lines.append("If the recent chat shows you repeating the same joke or theme, drop it and respond fresh to what the viewer just said.")
     if topic_anchor and category != CATEGORY_BANTER:

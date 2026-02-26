@@ -1254,6 +1254,11 @@ class DashboardStorage:
                 )
                 """
             )
+            # Migration: add ttl_hours column for temp notes with configurable expiry.
+            try:
+                conn.execute("ALTER TABLE cultural_notes ADD COLUMN ttl_hours INTEGER")
+            except sqlite3.OperationalError:
+                pass  # column already exists
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_cultural_notes_updated ON cultural_notes(updated_at DESC)"
             )
@@ -1387,6 +1392,9 @@ class DashboardStorage:
             "source": str(row.get("source", self._memory_source())),
             "is_active": bool(int(row.get("is_active", 0) or 0)),
         }
+        raw_ttl = row.get("ttl_hours")
+        if raw_ttl is not None:
+            out["ttl_hours"] = int(raw_ttl)
         viewer = row.get("viewer_handle")
         if viewer is not None:
             out["viewer_handle"] = self.normalize_viewer_handle(viewer, required=False)
@@ -1469,7 +1477,7 @@ class DashboardStorage:
                 )
                 rows = conn.execute(
                     f"""
-                    SELECT id, created_at, updated_at, created_by, updated_by, note, tags, source, is_active
+                    SELECT id, created_at, updated_at, created_by, updated_by, note, tags, source, is_active, ttl_hours
                     FROM cultural_notes
                     {where_sql}
                     ORDER BY updated_at DESC, created_at DESC
@@ -1539,6 +1547,11 @@ class DashboardStorage:
         tags = self._normalize_tags(payload.get("tags"))
         actor = str(username or "unknown").strip().lower() or "unknown"
         now = datetime.now(timezone.utc).isoformat()
+        ttl_hours = payload.get("ttl_hours")
+        if ttl_hours is not None:
+            ttl_hours = int(ttl_hours)
+            if ttl_hours <= 0:
+                ttl_hours = None
         item = {
             "id": str(uuid4()),
             "created_at": now,
@@ -1550,13 +1563,15 @@ class DashboardStorage:
             "source": self._memory_source(),
             "is_active": True,
         }
+        if ttl_hours is not None:
+            item["ttl_hours"] = ttl_hours
         with self._lock:
             with sqlite3.connect(str(self._memory_db_path)) as conn:
                 conn.execute(
                     """
                     INSERT INTO cultural_notes (
-                        id, created_at, updated_at, created_by, updated_by, note, tags, source, is_active
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        id, created_at, updated_at, created_by, updated_by, note, tags, source, is_active, ttl_hours
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         item["id"],
@@ -1568,6 +1583,7 @@ class DashboardStorage:
                         self._encode_tags(item["tags"]),
                         item["source"],
                         1,
+                        ttl_hours,
                     ),
                 )
                 self._record_memory_audit_locked(
@@ -1600,7 +1616,7 @@ class DashboardStorage:
         if not row_id:
             raise ValueError("Missing cultural note id.")
         actor = str(username or "unknown").strip().lower() or "unknown"
-        allowed = {"note", "tags", "is_active"}
+        allowed = {"note", "tags", "is_active", "ttl_hours"}
         unknown = [key for key in payload.keys() if key not in allowed]
         if unknown:
             raise ValueError("Unsupported fields in payload.")
@@ -1609,7 +1625,7 @@ class DashboardStorage:
                 conn.row_factory = sqlite3.Row
                 row = conn.execute(
                     """
-                    SELECT id, created_at, updated_at, created_by, updated_by, note, tags, source, is_active
+                    SELECT id, created_at, updated_at, created_by, updated_by, note, tags, source, is_active, ttl_hours
                     FROM cultural_notes
                     WHERE id = ?
                     """,
@@ -1629,6 +1645,10 @@ class DashboardStorage:
                 if "is_active" in payload:
                     updated["is_active"] = bool(payload.get("is_active"))
                     changed_fields.append("is_active")
+                if "ttl_hours" in payload:
+                    raw_ttl = payload.get("ttl_hours")
+                    updated["ttl_hours"] = int(raw_ttl) if raw_ttl is not None and int(raw_ttl) > 0 else None
+                    changed_fields.append("ttl_hours")
                 if not changed_fields:
                     return before
                 updated["updated_by"] = actor
@@ -1636,7 +1656,7 @@ class DashboardStorage:
                 conn.execute(
                     """
                     UPDATE cultural_notes
-                    SET updated_at = ?, updated_by = ?, note = ?, tags = ?, is_active = ?
+                    SET updated_at = ?, updated_by = ?, note = ?, tags = ?, is_active = ?, ttl_hours = ?
                     WHERE id = ?
                     """,
                     (
@@ -1645,6 +1665,7 @@ class DashboardStorage:
                         updated["note"],
                         self._encode_tags(updated["tags"]),
                         1 if updated["is_active"] else 0,
+                        updated.get("ttl_hours"),
                         row_id,
                     ),
                 )
@@ -1680,7 +1701,7 @@ class DashboardStorage:
                 conn.row_factory = sqlite3.Row
                 row = conn.execute(
                     """
-                    SELECT id, created_at, updated_at, created_by, updated_by, note, tags, source, is_active
+                    SELECT id, created_at, updated_at, created_by, updated_by, note, tags, source, is_active, ttl_hours
                     FROM cultural_notes
                     WHERE id = ?
                     """,

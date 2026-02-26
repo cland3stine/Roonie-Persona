@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import re
@@ -14,6 +15,9 @@ DEFAULT_ALLOWED_KEYS: tuple[str, ...] = (
     "stream_norms",
     "approved_phrases",
     "do_not_do",
+    "personality",
+    "lore",
+    "temp",
 )
 
 _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
@@ -143,7 +147,7 @@ def get_safe_injection(
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 """
-                SELECT note, tags, updated_at, created_at
+                SELECT note, tags, updated_at, created_at, ttl_hours
                 FROM cultural_notes
                 WHERE is_active = 1
                 ORDER BY updated_at DESC, created_at DESC
@@ -153,6 +157,7 @@ def get_safe_injection(
     except sqlite3.Error:
         return SafeInjectionResult("", [], 0, 0, 0)
 
+    now_utc = datetime.now(timezone.utc)
     keys_used: List[str] = []
     lines: List[str] = []
     dropped_count = 0
@@ -170,6 +175,19 @@ def get_safe_injection(
         matched_key = next((key for key in normalized_allowed if key in row_tags), "")
         if not matched_key:
             continue
+        # Temp note expiry: skip if created_at + ttl_hours is in the past.
+        if matched_key == "temp":
+            raw_ttl = row["ttl_hours"]
+            if raw_ttl is not None and int(raw_ttl) > 0:
+                try:
+                    created = datetime.fromisoformat(str(row["created_at"]))
+                    if created.tzinfo is None:
+                        created = created.replace(tzinfo=timezone.utc)
+                    if now_utc >= created + timedelta(hours=int(raw_ttl)):
+                        dropped_count += 1
+                        continue
+                except (ValueError, TypeError):
+                    pass  # malformed timestamp — let it through
         line = f"- {matched_key}: {note}"
         current = "\n".join(lines)
         separator = "\n" if current else ""

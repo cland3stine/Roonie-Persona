@@ -671,11 +671,12 @@ function useDashboardData(activePage) {
 
   const refreshCoreData = async () => {
     try {
-      const [authRes, statusRes, providersStatusRes, twitchStatusRes] = await Promise.all([
+      const [authRes, statusRes, providersStatusRes, twitchStatusRes, trackrStatusRes] = await Promise.all([
         apiFetch(`${API_BASE}/api/auth/me`),
         apiFetch(`${API_BASE}/api/status`),
         apiFetch(`${API_BASE}/api/providers/status`),
         apiFetch(`${API_BASE}/api/twitch/status`),
+        apiFetch(`${API_BASE}/api/trackr/status`),
       ]);
       if (authRes.ok) {
         setAuthData(await authRes.json());
@@ -686,6 +687,7 @@ function useDashboardData(activePage) {
       if (statusRes.ok) setStatusData(await statusRes.json());
       if (providersStatusRes.ok) setProvidersStatusData(await providersStatusRes.json());
       if (twitchStatusRes.ok) setTwitchStatusData(await twitchStatusRes.json());
+      if (trackrStatusRes.ok) setTrackrStatusData(await trackrStatusRes.json());
     } catch (_err) {
       setAuthChecked(true);
     }
@@ -1237,6 +1239,8 @@ function useDashboardData(activePage) {
     const noteId = opts.id || "";
     const headers = buildOperatorHeaders({ json: true });
     const payload = { note, tags: Array.isArray(opts.tags) ? opts.tags : [] };
+    if (opts.is_active !== undefined) payload.is_active = opts.is_active;
+    if (opts.ttl_hours !== undefined && opts.ttl_hours !== null) payload.ttl_hours = opts.ttl_hours;
     const url = method === "POST"
       ? `${API_BASE}/api/memory/cultural`
       : `${API_BASE}/api/memory/cultural/${encodeURIComponent(String(noteId))}`;
@@ -2208,8 +2212,8 @@ function TrackrPage({ trackrConfigData, trackrStatusData, saveTrackrConfig }) {
           <RackLabel>Now Playing</RackLabel>
           {currentTrack.raw ? (
             <div style={{ marginTop: 4 }}>
-              <div style={trackTitle}>{currentTrack.title || currentTrack.raw}</div>
               {currentTrack.artist && <div style={trackArtist}>{currentTrack.artist}</div>}
+              <div style={trackTitle}>{currentTrack.title || currentTrack.raw}</div>
             </div>
           ) : (
             <AwaitingBlock message="No track loaded" />
@@ -2218,8 +2222,8 @@ function TrackrPage({ trackrConfigData, trackrStatusData, saveTrackrConfig }) {
             <RackLabel>Previous Track</RackLabel>
             {previousTrack.raw ? (
               <div style={{ marginTop: 4 }}>
-                <div style={{ ...trackTitle, fontSize: 12, color: "#aaa" }}>{previousTrack.title || previousTrack.raw}</div>
                 {previousTrack.artist && <div style={{ ...trackArtist, fontSize: 10 }}>{previousTrack.artist}</div>}
+                <div style={{ ...trackTitle, fontSize: 12, color: "#aaa" }}>{previousTrack.title || previousTrack.raw}</div>
               </div>
             ) : (
               <AwaitingInline message="None" />
@@ -3184,6 +3188,34 @@ function AuthPage({ twitchStatusData, twitchConnectStart, twitchConnectPoll, twi
 
 // --- PAGE: CULTURAL NOTES ---
 
+const TAG_OPTIONS = [
+  { value: "lore", label: "LORE" },
+  { value: "personality", label: "PERSONALITY" },
+  { value: "stream_norms", label: "STREAM NORMS" },
+  { value: "tone_preferences", label: "TONE PREFERENCES" },
+  { value: "do_not_do", label: "DO NOT DO" },
+  { value: "approved_phrases", label: "APPROVED PHRASES" },
+  { value: "temp", label: "TEMP" },
+];
+
+const TTL_OPTIONS = [
+  { value: 6, label: "6 hours" },
+  { value: 12, label: "12 hours" },
+  { value: 24, label: "24 hours" },
+  { value: 48, label: "48 hours" },
+  { value: 168, label: "7 days" },
+];
+
+const TAG_COLORS = {
+  lore: "#7faacc",
+  personality: "#cc7fa0",
+  stream_norms: "#ccaa7f",
+  tone_preferences: "#7fccc0",
+  do_not_do: "#cc7f7f",
+  approved_phrases: "#aa7fcc",
+  temp: "#e8a838",
+};
+
 function CulturePage({
   culturalNotesData = [],
   viewerNotesData = [],
@@ -3198,67 +3230,125 @@ function CulturePage({
   const viewerNotes = Array.isArray(viewerNotesData) ? viewerNotesData : [];
   const pendingNotes = Array.isArray(memoryPendingData) ? memoryPendingData : [];
 
-  const addCulturalNote = async () => {
-    const note = window.prompt("Add cultural note");
-    if (note == null) return;
-    const text = String(note).trim();
-    if (!text) return;
-    await saveCulturalNote(text, { method: "POST", tags: [] });
+  const [editingCultural, setEditingCultural] = useState(false);
+  const [culturalDraft, setCulturalDraft] = useState([]);
+  const [editingViewer, setEditingViewer] = useState(false);
+  const [viewerDraft, setViewerDraft] = useState([]);
+
+  const inputStyle = { background: "#111114", border: "1px solid #2a2a2e", borderRadius: 2, padding: "4px 8px", color: "#aaa", fontSize: 11, fontFamily: "'IBM Plex Sans', sans-serif", outline: "none", boxSizing: "border-box" };
+  const textareaStyle = { ...inputStyle, resize: "vertical", minHeight: 36, lineHeight: 1.4 };
+  const selectStyle = { ...inputStyle, cursor: "pointer" };
+  const editBtnStyle = { background: "transparent", border: "1px dashed #333", color: "#555", padding: "8px 16px", fontSize: 10, letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", cursor: "pointer", borderRadius: 2, width: "100%" };
+  const saveBtnStyle = { ...editBtnStyle, border: "1px solid #2ecc4066", color: "#2ecc40" };
+  const cancelBtnStyle = { ...editBtnStyle };
+
+  const getTag = (item) => (Array.isArray(item.tags) && item.tags.length > 0 ? item.tags[0] : "lore");
+
+  // --- Cultural Notes editing ---
+  const startEditingCultural = () => {
+    setCulturalDraft(culturalNotes.map((n) => ({ ...n, _tag: getTag(n), _ttl: n.ttl_hours || 24 })));
+    setEditingCultural(true);
+  };
+  const cancelEditingCultural = () => setEditingCultural(false);
+  const updateCulturalDraft = (idx, field, value) => {
+    const next = [...culturalDraft];
+    next[idx] = { ...next[idx], [field]: value };
+    setCulturalDraft(next);
   };
 
-  const editCulturalNote = async (item) => {
-    if (!item?.id) return;
-    const next = window.prompt("Edit cultural note (blank = delete)", String(item.note || ""));
-    if (next == null) return;
-    const text = String(next).trim();
-    if (!text) {
-      if (window.confirm("Delete this cultural note?")) {
-        await deleteCulturalNote(item.id);
+  const saveCulturalNotes = async () => {
+    const origById = {};
+    for (const n of culturalNotes) { if (n.id) origById[n.id] = n; }
+
+    const draftIds = new Set();
+    for (const d of culturalDraft) {
+      const text = String(d.note || "").trim();
+      if (!text) continue;
+      const tag = d._tag || "lore";
+      const tags = [tag];
+      const isActive = d.is_active !== false;
+      const ttlHours = tag === "temp" ? (d._ttl || 24) : null;
+      if (d.id) {
+        draftIds.add(d.id);
+        const orig = origById[d.id];
+        const origTag = getTag(orig);
+        const origTtl = orig.ttl_hours || null;
+        if (text !== orig.note || tag !== origTag || isActive !== (orig.is_active !== false) || ttlHours !== origTtl) {
+          await saveCulturalNote(text, { method: "PATCH", id: d.id, tags, is_active: isActive, ttl_hours: ttlHours });
+        }
+      } else {
+        await saveCulturalNote(text, { method: "POST", tags, ttl_hours: ttlHours });
       }
-      return;
     }
-    await saveCulturalNote(text, { method: "PATCH", id: item.id, tags: Array.isArray(item.tags) ? item.tags : [] });
-  };
-
-  const addViewerNote = async () => {
-    const handleRaw = window.prompt("Viewer handle (without @ preferred)");
-    if (handleRaw == null) return;
-    const viewerHandle = String(handleRaw).trim().replace(/^@+/, "");
-    if (!viewerHandle) return;
-    const noteRaw = window.prompt(`Viewer note for @${viewerHandle}`);
-    if (noteRaw == null) return;
-    const note = String(noteRaw).trim();
-    if (!note) return;
-    await saveViewerNote({ viewer_handle: viewerHandle, note, tags: [] }, { method: "POST" });
-  };
-
-  const editViewerNote = async (item) => {
-    if (!item?.id) return;
-    const next = window.prompt("Edit viewer note (blank = delete)", String(item.note || ""));
-    if (next == null) return;
-    const text = String(next).trim();
-    if (!text) {
-      if (window.confirm("Delete this viewer note?")) {
-        await deleteViewerNote(item.id);
+    for (const orig of culturalNotes) {
+      if (orig.id && !draftIds.has(orig.id)) {
+        await deleteCulturalNote(orig.id);
       }
-      return;
     }
-    await saveViewerNote(
-      { note: text, tags: Array.isArray(item.tags) ? item.tags : [], is_active: item.is_active !== false },
-      { method: "PATCH", id: item.id },
-    );
+    setEditingCultural(false);
   };
 
+  // --- Viewer Notes editing ---
+  const startEditingViewer = () => {
+    setViewerDraft(viewerNotes.map((v) => ({ ...v })));
+    setEditingViewer(true);
+  };
+  const cancelEditingViewer = () => setEditingViewer(false);
+  const updateViewerDraft = (idx, field, value) => {
+    const next = [...viewerDraft];
+    next[idx] = { ...next[idx], [field]: value };
+    setViewerDraft(next);
+  };
+
+  const saveViewerNotes = async () => {
+    const origById = {};
+    for (const v of viewerNotes) { if (v.id) origById[v.id] = v; }
+
+    const draftIds = new Set();
+    for (const d of viewerDraft) {
+      const handle = String(d.viewer_handle || "").trim().replace(/^@+/, "");
+      const text = String(d.note || "").trim();
+      if (!handle || !text) continue;
+      const isActive = d.is_active !== false;
+      if (d.id) {
+        draftIds.add(d.id);
+        const orig = origById[d.id];
+        if (text !== orig.note || handle !== orig.viewer_handle || isActive !== (orig.is_active !== false)) {
+          await saveViewerNote(
+            { viewer_handle: handle, note: text, tags: Array.isArray(orig.tags) ? orig.tags : [], is_active: isActive },
+            { method: "PATCH", id: d.id },
+          );
+        }
+      } else {
+        await saveViewerNote({ viewer_handle: handle, note: text, tags: [] }, { method: "POST" });
+      }
+    }
+    for (const orig of viewerNotes) {
+      if (orig.id && !draftIds.has(orig.id)) {
+        await deleteViewerNote(orig.id);
+      }
+    }
+    setEditingViewer(false);
+  };
+
+  // --- Pending notes (unchanged) ---
   const approvePending = async (item) => {
     if (!item?.id) return;
     await reviewMemoryPending(item.id, "approve");
   };
-
   const denyPending = async (item) => {
     if (!item?.id) return;
     const reasonRaw = window.prompt("Optional deny reason");
     if (reasonRaw == null) return;
     await reviewMemoryPending(item.id, "deny", String(reasonRaw || "").trim());
+  };
+
+  const tagBadge = (tagValue) => {
+    const color = TAG_COLORS[tagValue] || "#666";
+    const label = (TAG_OPTIONS.find((t) => t.value === tagValue) || {}).label || tagValue.toUpperCase();
+    return (
+      <span style={{ fontSize: 8, color, fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1.2, fontWeight: 600, background: color + "18", padding: "1px 6px", borderRadius: 2, border: `1px solid ${color}33` }}>{label}</span>
+    );
   };
 
   return (
@@ -3287,15 +3377,111 @@ function CulturePage({
         <div style={{ borderTop: "1px solid #1f1f22", margin: "10px 0" }} />
         <RackLabel>Cultural Notes - Room Level</RackLabel>
         <div style={{ fontSize: 10, color: "#555", fontFamily: "'IBM Plex Sans', sans-serif", marginBottom: 12 }}>These shape how Roonie reads the room and responds. Apply to all interactions.</div>
-        {culturalNotes.map((item) => (
-          <div key={item.id} onClick={() => editCulturalNote(item)} style={{ padding: "10px 12px", borderLeft: "2px solid #7faacc44", marginBottom: 6, background: "#15151a", borderRadius: "0 2px 2px 0", cursor: "pointer" }}>
-            <div style={{ fontSize: 12, color: "#aaa", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.5 }}>{item.note}</div>
+
+        {editingCultural ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {culturalDraft.length > 0 && (
+              <div style={{ display: "grid", gridTemplateColumns: "130px 1fr 60px 20px", gap: 6, marginBottom: 2 }}>
+                <span style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>TAG</span>
+                <span style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>NOTE</span>
+                <span style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>ACTIVE</span>
+                <span />
+              </div>
+            )}
+            {culturalDraft.map((d, i) => (
+              <div key={d.id || `new-${i}`} style={{ display: "grid", gridTemplateColumns: "130px 1fr 60px 20px", gap: 6, alignItems: "start" }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <select value={d._tag || "lore"} onChange={(e) => updateCulturalDraft(i, "_tag", e.target.value)} style={selectStyle}>
+                    {TAG_OPTIONS.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                  </select>
+                  {(d._tag || "lore") === "temp" && (
+                    <select value={d._ttl || 24} onChange={(e) => updateCulturalDraft(i, "_ttl", Number(e.target.value))} style={{ ...selectStyle, fontSize: 9 }}>
+                      {TTL_OPTIONS.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                    </select>
+                  )}
+                </div>
+                <textarea value={d.note || ""} onChange={(e) => updateCulturalDraft(i, "note", e.target.value)} rows={2} placeholder="Cultural note..." style={textareaStyle} />
+                <label style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer", fontSize: 10, color: d.is_active !== false ? "#2ecc40" : "#666", fontFamily: "'JetBrains Mono', monospace" }}>
+                  <input type="checkbox" checked={d.is_active !== false} onChange={(e) => updateCulturalDraft(i, "is_active", e.target.checked)} style={{ accentColor: "#2ecc40" }} />
+                  {d.is_active !== false ? "ON" : "OFF"}
+                </label>
+                <span onClick={() => { const next = [...culturalDraft]; next.splice(i, 1); setCulturalDraft(next); }} style={{ color: "#ff4136", fontSize: 13, cursor: "pointer", fontFamily: "'JetBrains Mono', monospace", textAlign: "center", marginTop: 4 }}>&times;</span>
+              </div>
+            ))}
+            <div onClick={() => setCulturalDraft([...culturalDraft, { note: "", _tag: "lore", _ttl: 24, is_active: true }])} style={{ fontSize: 10, color: "#555", letterSpacing: 1, fontFamily: "'JetBrains Mono', monospace", cursor: "pointer", marginTop: 4 }}>+ ADD NOTE</div>
+            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+              <button onClick={saveCulturalNotes} style={saveBtnStyle}>SAVE</button>
+              <button onClick={cancelEditingCultural} style={cancelBtnStyle}>CANCEL</button>
+            </div>
           </div>
-        ))}
-        {!culturalNotes.length ? <div style={{ padding: "6px 0", fontSize: 11, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif" }}>No cultural notes added</div> : null}
-        <button onClick={addCulturalNote} style={{ marginTop: 8, background: "transparent", border: "1px dashed #333", color: "#555", padding: "8px 16px", fontSize: 10, letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", cursor: "pointer", borderRadius: 2, width: "100%" }}>+ ADD CULTURAL NOTE</button>
+        ) : (
+          <div>
+            {culturalNotes.map((item) => (
+              <div key={item.id} style={{ padding: "10px 12px", borderLeft: "2px solid " + (TAG_COLORS[getTag(item)] || "#7faacc") + "44", marginBottom: 6, background: "#15151a", borderRadius: "0 2px 2px 0" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                  {tagBadge(getTag(item))}
+                  {getTag(item) === "temp" && item.ttl_hours && <span style={{ fontSize: 8, color: "#e8a838", fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1 }}>{item.ttl_hours >= 168 ? "7d" : item.ttl_hours + "h"}</span>}
+                  {item.is_active === false && <span style={{ fontSize: 8, color: "#ff4136", fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1 }}>INACTIVE</span>}
+                </div>
+                <div style={{ fontSize: 12, color: item.is_active === false ? "#555" : "#aaa", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.5 }}>{item.note}</div>
+              </div>
+            ))}
+            {!culturalNotes.length ? <div style={{ padding: "6px 0", fontSize: 11, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif" }}>No cultural notes added</div> : null}
+            <button onClick={startEditingCultural} style={{ ...editBtnStyle, marginTop: 8 }}>EDIT CULTURAL NOTES</button>
+          </div>
+        )}
       </RackPanel>
-      <RackPanel><RackLabel>Viewer Notes - Individual</RackLabel><div style={{ fontSize: 10, color: "#555", fontFamily: "'IBM Plex Sans', sans-serif", marginBottom: 12 }}>Observable behavior only. No subjective labels or inferred traits.</div>{viewerNotes.map((v) => (<div key={v.id} style={{ padding: "10px 12px", marginBottom: 6, background: "#15151a", border: "1px solid #222", borderRadius: 2, display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}><div style={{ flex: 1 }}><div style={{ fontSize: 11, color: "#7faacc", fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, marginBottom: 4 }}>@{v.viewer_handle}</div><div style={{ fontSize: 12, color: "#999", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.4 }}>{v.note}</div></div><div style={{ display: "flex", gap: 4, flexShrink: 0 }}><button onClick={() => editViewerNote(v)} style={{ background: "none", border: "1px solid #333", borderRadius: 2, color: "#666", padding: "2px 6px", fontSize: 10, cursor: "pointer", fontFamily: "'JetBrains Mono', monospace" }}>EDIT</button><button onClick={() => deleteViewerNote(v.id)} style={{ background: "none", border: "1px solid #ff413633", borderRadius: 2, color: "#ff4136", padding: "2px 6px", fontSize: 10, cursor: "pointer", fontFamily: "'JetBrains Mono', monospace" }}>X</button></div></div>))}{!viewerNotes.length ? <div style={{ padding: "6px 0", fontSize: 11, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif" }}>No viewer notes added</div> : null}<button onClick={addViewerNote} style={{ marginTop: 8, background: "transparent", border: "1px dashed #333", color: "#555", padding: "8px 16px", fontSize: 10, letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", cursor: "pointer", borderRadius: 2, width: "100%" }}>+ ADD VIEWER NOTE</button></RackPanel>
+
+      <RackPanel>
+        <RackLabel>Viewer Notes - Individual</RackLabel>
+        <div style={{ fontSize: 10, color: "#555", fontFamily: "'IBM Plex Sans', sans-serif", marginBottom: 12 }}>Observable behavior only. No subjective labels or inferred traits.</div>
+
+        {editingViewer ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {viewerDraft.length > 0 && (
+              <div style={{ display: "grid", gridTemplateColumns: "110px 1fr 60px 20px", gap: 6, marginBottom: 2 }}>
+                <span style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>HANDLE</span>
+                <span style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>NOTE</span>
+                <span style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>ACTIVE</span>
+                <span />
+              </div>
+            )}
+            {viewerDraft.map((v, i) => (
+              <div key={v.id || `new-${i}`} style={{ display: "grid", gridTemplateColumns: "110px 1fr 60px 20px", gap: 6, alignItems: "start" }}>
+                <div style={{ position: "relative" }}>
+                  <span style={{ position: "absolute", left: 8, top: 5, fontSize: 11, color: "#555", fontFamily: "'JetBrains Mono', monospace", pointerEvents: "none" }}>@</span>
+                  <input type="text" value={v.viewer_handle || ""} onChange={(e) => updateViewerDraft(i, "viewer_handle", e.target.value.replace(/^@+/, ""))} placeholder="handle" style={{ ...inputStyle, paddingLeft: 18, width: "100%" }} />
+                </div>
+                <textarea value={v.note || ""} onChange={(e) => updateViewerDraft(i, "note", e.target.value)} rows={2} placeholder="Viewer note..." style={textareaStyle} />
+                <label style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer", fontSize: 10, color: v.is_active !== false ? "#2ecc40" : "#666", fontFamily: "'JetBrains Mono', monospace" }}>
+                  <input type="checkbox" checked={v.is_active !== false} onChange={(e) => updateViewerDraft(i, "is_active", e.target.checked)} style={{ accentColor: "#2ecc40" }} />
+                  {v.is_active !== false ? "ON" : "OFF"}
+                </label>
+                <span onClick={() => { const next = [...viewerDraft]; next.splice(i, 1); setViewerDraft(next); }} style={{ color: "#ff4136", fontSize: 13, cursor: "pointer", fontFamily: "'JetBrains Mono', monospace", textAlign: "center", marginTop: 4 }}>&times;</span>
+              </div>
+            ))}
+            <div onClick={() => setViewerDraft([...viewerDraft, { viewer_handle: "", note: "", is_active: true }])} style={{ fontSize: 10, color: "#555", letterSpacing: 1, fontFamily: "'JetBrains Mono', monospace", cursor: "pointer", marginTop: 4 }}>+ ADD VIEWER NOTE</div>
+            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+              <button onClick={saveViewerNotes} style={saveBtnStyle}>SAVE</button>
+              <button onClick={cancelEditingViewer} style={cancelBtnStyle}>CANCEL</button>
+            </div>
+          </div>
+        ) : (
+          <div>
+            {viewerNotes.map((v) => (
+              <div key={v.id} style={{ padding: "10px 12px", marginBottom: 6, background: "#15151a", border: "1px solid #222", borderRadius: 2 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                  <span style={{ fontSize: 11, color: "#7faacc", fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>@{v.viewer_handle}</span>
+                  {v.is_active === false && <span style={{ fontSize: 8, color: "#ff4136", fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1 }}>INACTIVE</span>}
+                </div>
+                <div style={{ fontSize: 12, color: v.is_active === false ? "#555" : "#999", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.4 }}>{v.note}</div>
+              </div>
+            ))}
+            {!viewerNotes.length ? <div style={{ padding: "6px 0", fontSize: 11, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif" }}>No viewer notes added</div> : null}
+            <button onClick={startEditingViewer} style={{ ...editBtnStyle, marginTop: 8 }}>EDIT VIEWER NOTES</button>
+          </div>
+        )}
+      </RackPanel>
     </div>
   );
 }
@@ -4112,11 +4298,15 @@ export default function RoonieControlRoom() {
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", justifyContent: "center", gap: 1, overflow: "hidden" }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 8, whiteSpace: "nowrap" }}>
             <span style={{ fontSize: 8, color: "#555", letterSpacing: 2, fontFamily: "'JetBrains Mono', monospace", flexShrink: 0 }}>CURRENTLY PLAYING</span>
-            <span style={{ fontSize: 11, color: "#ccc", fontFamily: "'IBM Plex Sans', sans-serif", fontWeight: 600 }}>No track loaded</span>
+            <span style={{ fontSize: 11, color: "#ccc", fontFamily: "'IBM Plex Sans', sans-serif", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis" }}>
+              {trackrStatusData?.current?.raw || "No track loaded"}
+            </span>
           </div>
           <div style={{ display: "flex", alignItems: "baseline", gap: 8, whiteSpace: "nowrap" }}>
             <span style={{ fontSize: 8, color: "#444", letterSpacing: 2, fontFamily: "'JetBrains Mono', monospace", flexShrink: 0 }}>PREVIOUS</span>
-            <span style={{ fontSize: 10, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif" }}>{"\u2014"}</span>
+            <span style={{ fontSize: 10, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif", overflow: "hidden", textOverflow: "ellipsis" }}>
+              {trackrStatusData?.previous?.raw || "\u2014"}
+            </span>
           </div>
         </div>
 

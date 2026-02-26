@@ -26,7 +26,8 @@ def _init_memory_db(path: Path) -> None:
                 note TEXT,
                 tags TEXT,
                 source TEXT,
-                is_active INTEGER DEFAULT 1
+                is_active INTEGER DEFAULT 1,
+                ttl_hours INTEGER
             )
             """
         )
