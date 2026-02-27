@@ -21,17 +21,21 @@ def _event(
     *,
     user: str = "c0rcyra",
     is_direct_mention: bool = False,
+    metadata_extra: Dict[str, Any] | None = None,
 ) -> Event:
+    metadata = {
+        "user": user,
+        "is_direct_mention": is_direct_mention,
+        "mode": "live",
+        "platform": "twitch",
+        "session_id": SESSION,
+    }
+    if isinstance(metadata_extra, dict):
+        metadata.update(metadata_extra)
     return Event(
         event_id=event_id,
         message=message,
-        metadata={
-            "user": user,
-            "is_direct_mention": is_direct_mention,
-            "mode": "live",
-            "platform": "twitch",
-            "session_id": SESSION,
-        },
+        metadata=metadata,
     )
 
 
@@ -49,9 +53,9 @@ def _stub_route(monkeypatch):
     return captured
 
 
-def _say(director, env, event_id, message, *, user="c0rcyra", mention=False, send=True):
+def _say(director, env, event_id, message, *, user="c0rcyra", mention=False, send=True, metadata_extra=None):
     """Helper: evaluate a message and optionally confirm send."""
-    e = _event(event_id, message, user=user, is_direct_mention=mention)
+    e = _event(event_id, message, user=user, is_direct_mention=mention, metadata_extra=metadata_extra)
     result = director.evaluate(e, env)
     if send and result.action == "RESPOND_PUBLIC":
         director.apply_output_feedback(
@@ -326,14 +330,13 @@ def test_session_reset_clears_continuation(monkeypatch):
 # ===========================================================================
 # SCENARIO 10: Continuation with "roonie" mention by OTHER viewer
 # Real pattern: viewer_a is chatting with Roonie, viewer_b says "roonie is
-# a cool cat" — viewer_b's message is addressed (has "roonie"), but
-# viewer_a should still be able to continue after Roonie responds to viewer_b
+# a cool cat" — viewer_b's message is a third-person reference, not direct address.
+# It should not steal viewer_a's continuation.
 # ===========================================================================
 
 
-def test_other_viewer_mentions_roonie_steals_conversation(monkeypatch):
-    """When another viewer mentions 'roonie', Roonie responds to them,
-    breaking the first viewer's continuation."""
+def test_other_viewer_mentions_roonie_does_not_steal_conversation(monkeypatch):
+    """Third-person 'roonie' references should not trigger a handoff."""
     _stub_route(monkeypatch)
     d = ProviderDirector()
     env = Env(offline=False)
@@ -341,14 +344,15 @@ def test_other_viewer_mentions_roonie_steals_conversation(monkeypatch):
     # viewer_a starts conversation
     _say(d, env, "e1", "@RoonieTheCat hey!", user="viewer_a", mention=True)
 
-    # viewer_b mentions roonie in text (addressed via text match)
+    # viewer_b mentions roonie in third person (not addressed)
     r2 = _say(d, env, "e2", "haha roonie is such a vibe", user="viewer_b")
-    # "roonie" in text makes this addressed
-    assert r2.trace["director"]["addressed_to_roonie"] is True
+    assert r2.trace["director"]["addressed_to_roonie"] is False
+    assert r2.action == "NOOP"
 
-    # viewer_a's continuation is now broken (Roonie responded to viewer_b)
+    # viewer_a should still retain continuation
     r3 = _say(d, env, "e3", "yeah the vibes are real", user="viewer_a", send=False)
-    assert r3.action == "NOOP"
+    assert r3.action == "RESPOND_PUBLIC"
+    assert r3.trace["director"]["conversation_continuation"] is True
 
 
 # ===========================================================================
@@ -576,3 +580,167 @@ def test_c0rcyra_cardboard_box_scenario(monkeypatch):
     assert r2.action == "RESPOND_PUBLIC"
     assert r2.trace["director"]["conversation_continuation"] is True
     assert r2.trace["director"]["addressed_to_roonie"] is False
+
+
+# ===========================================================================
+# SCENARIO 19: Same viewer greets someone else — continuation should not butt in
+# ===========================================================================
+
+
+def test_greeting_named_other_blocks_continuation(monkeypatch):
+    _stub_route(monkeypatch)
+    d = ProviderDirector()
+    env = Env(offline=False)
+
+    _say(d, env, "e1", "@RoonieTheCat what's the vibe tonight?", user="cland3stine", mention=True)
+    r2 = _say(d, env, "e2", "Hey Jack! Its so good to see you!", user="cland3stine", send=False)
+
+    assert r2.action == "NOOP"
+    assert r2.trace["director"]["conversation_continuation"] is False
+    assert r2.trace["director"]["continuation_reason"] == "GREETING_OTHER_USER"
+
+
+# ===========================================================================
+# SCENARIO 20: Same viewer @mentions someone else — continuation should no-op
+# ===========================================================================
+
+
+def test_third_party_mention_blocks_continuation(monkeypatch):
+    _stub_route(monkeypatch)
+    d = ProviderDirector()
+    env = Env(offline=False)
+
+    _say(d, env, "e1", "@RoonieTheCat track id please?", user="cland3stine", mention=True)
+    r2 = _say(d, env, "e2", "Hey hey @umbrellaflyer - how you doing?", user="cland3stine", send=False)
+
+    assert r2.action == "NOOP"
+    assert r2.trace["director"]["conversation_continuation"] is False
+    assert r2.trace["director"]["continuation_reason"] == "MENTION_OTHER_USER"
+
+
+# ===========================================================================
+# SCENARIO 21: Twitch reply-parent targets someone else — continuation should no-op
+# ===========================================================================
+
+
+def test_reply_parent_other_blocks_continuation(monkeypatch):
+    _stub_route(monkeypatch)
+    d = ProviderDirector()
+    env = Env(offline=False)
+
+    _say(d, env, "e1", "@RoonieTheCat are you AI?", user="cland3stine", mention=True)
+    r2 = _say(
+        d,
+        env,
+        "e2",
+        "what do you think?",
+        user="cland3stine",
+        send=False,
+        metadata_extra={"reply_parent_user_login": "some_other_user"},
+    )
+
+    assert r2.action == "NOOP"
+    assert r2.trace["director"]["conversation_continuation"] is False
+    assert r2.trace["director"]["continuation_reason"] == "REPLY_PARENT_OTHER"
+
+
+# ===========================================================================
+# SCENARIO 22: Multi-mention direct social message should still be addressable
+# ===========================================================================
+
+
+def test_multimention_direct_message_still_addressed(monkeypatch):
+    _stub_route(monkeypatch)
+    d = ProviderDirector()
+    env = Env(offline=False)
+
+    r = _say(
+        d,
+        env,
+        "e1",
+        "Hey Jack! Good to see you! By the way, looks like @RuleOfRune got their plushie cat @RoonieTheCat talking in chat...he's so cool!",
+        user="viewer_a",
+        mention=False,
+        send=False,
+    )
+
+    assert r.trace["director"]["addressed_to_roonie"] is True
+    assert r.trace["director"]["conversation_continuation"] is False
+    assert r.action == "RESPOND_PUBLIC"
+
+
+# ===========================================================================
+# SCENARIO 23: Third-person Roonie mention should not steal thread handoff
+# ===========================================================================
+
+
+def test_third_person_roonie_reference_does_not_steal_continuation(monkeypatch):
+    _stub_route(monkeypatch)
+    d = ProviderDirector()
+    env = Env(offline=False)
+
+    # viewer_a starts thread
+    _say(d, env, "e1", "yo Roonie!", user="viewer_a", mention=False)
+    r2 = _say(d, env, "e2", "How's your new laptop by the way?", user="viewer_a")
+    assert r2.action == "RESPOND_PUBLIC"
+    assert r2.trace["director"]["conversation_continuation"] is True
+
+    # viewer_b talks ABOUT Roonie in third person (not to Roonie)
+    r3 = _say(
+        d,
+        env,
+        "e3",
+        "it's the perfect laptop for Roonie, I'm so glad he loves it already",
+        user="viewer_b",
+        send=False,
+    )
+    assert r3.trace["director"]["addressed_to_roonie"] is False
+    assert r3.action == "NOOP"
+
+    # viewer_a should still have continuation (no thread steal happened)
+    r4 = _say(d, env, "e4", "Roonie how's typing on it by the way?", user="viewer_a")
+    assert r4.action == "RESPOND_PUBLIC"
+    assert r4.trace["director"]["addressed_to_roonie"] is True
+
+
+# ===========================================================================
+# SCENARIO 24: Possessive mention + @other should not be treated as direct
+# ===========================================================================
+
+
+def test_possessive_roonie_with_other_mention_noops(monkeypatch):
+    _stub_route(monkeypatch)
+    d = ProviderDirector()
+    env = Env(offline=False)
+
+    _say(d, env, "e1", "yo Roonie!", user="viewer_a", mention=False)
+    r2 = _say(
+        d,
+        env,
+        "e2",
+        "@lilhjohny check out Roonie's laptop!",
+        user="viewer_a",
+        send=False,
+    )
+    assert r2.trace["director"]["addressed_to_roonie"] is False
+    assert r2.action == "NOOP"
+
+
+# ===========================================================================
+# SCENARIO 25: Named other-person targeting should block continuation
+# ===========================================================================
+
+
+def test_targeting_art_by_name_blocks_continuation(monkeypatch):
+    _stub_route(monkeypatch)
+    d = ProviderDirector()
+    env = Env(offline=False)
+
+    _say(d, env, "e1", "@RoonieTheCat you good?", user="c0rcyra", mention=True)
+    _say(d, env, "e2", "man work was crazy today", user="c0rcyra")
+    r3 = _say(d, env, "e3", "so what else is good, art? how are things your way?", user="c0rcyra", send=False)
+
+    assert r3.action == "NOOP"
+    assert r3.trace["director"]["addressed_to_roonie"] is False
+    assert r3.trace["director"]["conversation_continuation"] is False
+    assert r3.trace["director"]["continuation_reason"] == "TARGETING_OTHER_NAME"

@@ -44,6 +44,13 @@ _DEICTIC_FOLLOWUP_RE = re.compile(
     re.IGNORECASE,
 )
 _SKIP_RE = re.compile(r"^\[?skip\]?$", re.IGNORECASE)
+_MENTION_RE = re.compile(r"@([A-Za-z0-9_]{2,30})")
+_GREETING_TARGET_RE = re.compile(
+    r"^\s*(?:hey|heya|hi|hello|yo|sup)\b[\s,!-]*(?:@)?([A-Za-z0-9_]{2,30})",
+    re.IGNORECASE,
+)
+_SECOND_PERSON_RE = re.compile(r"\b(you|your|youre|you're|u|ur)\b", re.IGNORECASE)
+_MUSIC_CHAT_CUE_RE = re.compile(r"\b(track|set|mix|drop|bass|beat|beats|transition|id)\b", re.IGNORECASE)
 _ANCHOR_STOPWORDS = {
     "the",
     "a",
@@ -64,6 +71,19 @@ _ANCHOR_STOPWORDS = {
     "tonight",
     "lately",
 }
+_GENERIC_GREETING_TARGETS = {
+    "all",
+    "everyone",
+    "chat",
+    "guys",
+    "fam",
+    "friends",
+    "team",
+    "there",
+    "yall",
+    "ya",
+}
+_DEFAULT_OTHER_NAME_TARGETS = {"art", "jen"}
 
 
 def _repo_root() -> Path:
@@ -392,10 +412,35 @@ class ProviderDirector:
 
     @staticmethod
     def _is_direct_address(event: Event) -> bool:
-        if bool(event.metadata.get("is_direct_mention")):
+        metadata = event.metadata if isinstance(event.metadata, dict) else {}
+        if bool(metadata.get("is_direct_mention")):
             return True
-        msg = (event.message or "").strip().lower()
-        return "roonie" in msg
+        msg = str(event.message or "").strip().lower()
+        if not msg:
+            return False
+
+        aliases = {"roonie", "rooniethecat"}
+        bot_nick = str(metadata.get("bot_nick") or os.getenv("TWITCH_BOT_NICK", "")).strip().lower().lstrip("@")
+        if bot_nick:
+            aliases.add(bot_nick)
+        alt = "|".join(re.escape(a) for a in sorted(aliases) if a)
+        if not alt:
+            return False
+        # Avoid possessive third-person references ("Roonie's laptop") being treated as direct.
+        name_token = rf"(?:{alt})(?!['’]s)\b"
+
+        # Explicit @mention or bare-handle kickoff.
+        if re.search(rf"@{name_token}", msg):
+            return True
+        if re.search(rf"^\s*(?:hey|heya|hi|hello|yo|sup|what'?s up)?[\s,!-]*@?{name_token}", msg):
+            return True
+        # Vocative tail ("..., roonie!").
+        if re.search(rf"(?:,\s*|\s+){name_token}[!?.\s]*$", msg):
+            return True
+        # Named direct question/request ("Roonie how's ...", "Roonie can you ...").
+        if re.search(rf"\b{name_token}[\s,:-]{{0,8}}(?:how|what|why|when|where|can|could|do|did|are|will|wanna|should|please|pls)\b", msg):
+            return True
+        return False
 
     def _is_conversation_continuation(self, event: Event) -> bool:
         """True if Roonie's most recent response was to this same viewer
@@ -420,6 +465,138 @@ class ProviderDirector:
             else:
                 messages_since_roonie += 1
         return False
+
+    @staticmethod
+    def _extract_mentions(message: str) -> List[str]:
+        seen: set[str] = set()
+        ordered: List[str] = []
+        for match in _MENTION_RE.finditer(str(message or "")):
+            handle = str(match.group(1) or "").strip().lower()
+            if not handle or handle in seen:
+                continue
+            seen.add(handle)
+            ordered.append(handle)
+        return ordered
+
+    @staticmethod
+    def _roonie_aliases(metadata: Dict[str, Any]) -> set[str]:
+        aliases = {"roonie", "rooniethecat"}
+        bot_nick = str(metadata.get("bot_nick") or os.getenv("TWITCH_BOT_NICK", "")).strip().lower().lstrip("@")
+        if bot_nick:
+            aliases.add(bot_nick)
+        return aliases
+
+    def _other_name_targets(self, *, metadata: Dict[str, Any]) -> set[str]:
+        names: set[str] = set(_DEFAULT_OTHER_NAME_TARGETS)
+        configured = str(os.getenv("ROONIE_CONTINUATION_OTHER_NAME_TARGETS", "")).strip()
+        if configured:
+            names = {
+                token.strip().lower()
+                for token in configured.split(",")
+                if token.strip()
+            } or set(_DEFAULT_OTHER_NAME_TARGETS)
+        aliases = self._roonie_aliases(metadata)
+        cleaned: set[str] = set()
+        for name in names:
+            token = str(name or "").strip().lower().lstrip("@")
+            if not token or token in aliases:
+                continue
+            cleaned.add(token)
+        return cleaned
+
+    def _mentions_other_user(self, *, message: str, metadata: Dict[str, Any]) -> bool:
+        mentions = self._extract_mentions(message)
+        if not mentions:
+            return False
+        aliases = self._roonie_aliases(metadata)
+        return any(handle not in aliases for handle in mentions)
+
+    def _reply_parent_targets_other(self, *, metadata: Dict[str, Any]) -> bool:
+        reply_parent = str(metadata.get("reply_parent_user_login", "")).strip().lower().lstrip("@")
+        if not reply_parent:
+            return False
+        aliases = self._roonie_aliases(metadata)
+        return reply_parent not in aliases
+
+    def _looks_like_greeting_to_other(self, *, message: str, metadata: Dict[str, Any]) -> bool:
+        match = _GREETING_TARGET_RE.match(str(message or ""))
+        if not match:
+            return False
+        target = str(match.group(1) or "").strip().lower()
+        if not target or target in _GENERIC_GREETING_TARGETS:
+            return False
+        aliases = self._roonie_aliases(metadata)
+        return target not in aliases
+
+    def _looks_like_targeting_named_other(self, *, message: str, metadata: Dict[str, Any]) -> bool:
+        text = str(message or "").strip().lower()
+        if not text:
+            return False
+        names = self._other_name_targets(metadata=metadata)
+        if not names:
+            return False
+        for name in sorted(names):
+            name_re = re.escape(name)
+            # Vocative-style targeting:
+            # - "art, ..."
+            # - "..., art?"
+            # - "art - ..."
+            # - "what do you think art?"
+            if re.search(rf"^\s*(?:hey|hi|hello|yo|sup)?[\s,!-]*{name_re}\b", text):
+                return True
+            if re.search(rf"\b{name_re}\b\s*[-:]", text):
+                return True
+            if re.search(rf"(?:,\s*|\s+){name_re}[!?.,\s]*$", text):
+                return True
+            if re.search(rf",\s*{name_re}\s*[!?]", text):
+                return True
+            if re.search(rf"\b{name_re}\b\s*\?", text):
+                return True
+            if re.search(rf"\bwhat do you think\s+{name_re}\b", text):
+                return True
+            if re.search(rf"\bhow are (?:things|you)\b.*\b{name_re}\b", text):
+                return True
+        return False
+
+    def _has_continuation_signal(self, *, message: str, category: str) -> bool:
+        text = str(message or "").strip()
+        if not text:
+            return False
+        if str(category or "").strip().upper() == CATEGORY_TRACK_ID:
+            return True
+        if "?" in text:
+            return True
+        if starts_with_direct_verb(text):
+            return True
+        if _is_deictic_followup(text):
+            return True
+        if _SECOND_PERSON_RE.search(text):
+            return True
+        if _MUSIC_CHAT_CUE_RE.search(text):
+            return True
+        if self._topic_anchor and _topic_overlap(text, self._topic_anchor):
+            return True
+        return False
+
+    def _continuation_block_reason(self, *, event: Event, category: str) -> str:
+        metadata = event.metadata if isinstance(event.metadata, dict) else {}
+        text = str(event.message or "")
+        if self._reply_parent_targets_other(metadata=metadata):
+            return "REPLY_PARENT_OTHER"
+        if self._mentions_other_user(message=text, metadata=metadata):
+            return "MENTION_OTHER_USER"
+        if self._looks_like_greeting_to_other(message=text, metadata=metadata):
+            return "GREETING_OTHER_USER"
+        if self._looks_like_targeting_named_other(message=text, metadata=metadata):
+            return "TARGETING_OTHER_NAME"
+        # For long, low-signal messages, require at least one continuity cue.
+        # This keeps continuation natural while still allowing short chat banter.
+        if str(category or "").strip().upper() == CATEGORY_OTHER and not self._has_continuation_signal(
+            message=text,
+            category=category,
+        ):
+            return "LOW_AFFINITY_OTHER"
+        return ""
 
     @staticmethod
     def _is_trigger_message(message: str) -> bool:
@@ -889,7 +1066,6 @@ class ProviderDirector:
 
         metadata = event.metadata if isinstance(event.metadata, dict) else {}
         addressed = self._is_direct_address(event)
-        continuation = (not addressed) and self._is_conversation_continuation(event)
         category = classify_behavior_category(message=event.message, metadata=metadata)
         short_ack_preferred = self._should_short_ack_direct_address(
             addressed=addressed,
@@ -899,6 +1075,19 @@ class ProviderDirector:
         if short_ack_preferred:
             category = CATEGORY_BANTER
         trigger = (category != CATEGORY_OTHER) or self._is_trigger_message(event.message)
+        continuation = False
+        continuation_reason = "ADDRESSED"
+        if not addressed:
+            if self._is_conversation_continuation(event):
+                block_reason = self._continuation_block_reason(event=event, category=category)
+                if block_reason:
+                    continuation = False
+                    continuation_reason = block_reason
+                else:
+                    continuation = True
+                    continuation_reason = "ALLOW"
+            else:
+                continuation_reason = "NO_RECENT_THREAD"
         safety_classification, refusal_reason_code = classify_message_safety(event.message)
         approved_emotes = self._approved_emotes(metadata)
         now_playing = self._now_playing_text(metadata)
@@ -985,6 +1174,7 @@ class ProviderDirector:
             if self._continuation_streak.get(viewer_key, 0) >= 4:
                 continuation = False
                 continuation_capped = True
+                continuation_reason = "CAPPED"
 
         should_evaluate = (addressed and trigger) or continuation
 
@@ -1017,6 +1207,7 @@ class ProviderDirector:
                         "addressed_to_roonie": addressed,
                         "trigger": trigger,
                         "conversation_continuation": continuation,
+                        "continuation_reason": continuation_reason,
                         "continuation_capped": continuation_capped,
                         "continuation_streak": self._continuation_streak.get(viewer_key, 0) if viewer_key else 0,
                         "track_command": track_cmd,
@@ -1171,6 +1362,7 @@ class ProviderDirector:
                 "addressed_to_roonie": addressed,
                 "trigger": trigger,
                 "conversation_continuation": continuation,
+                "continuation_reason": continuation_reason,
                 "continuation_capped": continuation_capped,
                 "continuation_skipped": continuation_skipped,
                 "continuation_streak": self._continuation_streak.get(viewer_key, 0) if viewer_key else 0,

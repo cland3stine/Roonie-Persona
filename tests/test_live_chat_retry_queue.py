@@ -111,3 +111,35 @@ def test_process_retry_item_does_not_requeue_after_emit(monkeypatch) -> None:
     )
 
     assert queued == []
+
+
+def test_emit_one_includes_reply_parent_and_mentions_in_metadata(monkeypatch) -> None:
+    bridge = LiveChatBridge(storage=_DummyStorage(), account="bot")
+    captured: Dict[str, Any] = {}
+
+    def _fake_emit(**kwargs):
+        captured.update(kwargs)
+        return {
+            "event_id": "evt-4",
+            "emitted": False,
+            "reason": "NOOP",
+            "can_post": True,
+            "blocked_by": [],
+        }
+
+    monkeypatch.setattr(bridge, "_emit_payload_message", _fake_emit)
+
+    msg = TwitchMsg(
+        nick="cland3stine",
+        channel="ruleofrune",
+        message="Hey @umbrellaflyer and @RoonieTheCat",
+        raw="",
+        tags={"reply-parent-user-login": "jack"},
+    )
+    bridge._emit_one(msg, bot_nick="rooniethecat")
+
+    extra = captured.get("metadata_extra")
+    assert isinstance(extra, dict)
+    assert extra.get("reply_parent_user_login") == "jack"
+    assert extra.get("bot_nick") == "rooniethecat"
+    assert extra.get("mentioned_users") == ["umbrellaflyer", "rooniethecat"]

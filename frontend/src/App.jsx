@@ -3,21 +3,19 @@ import { useState, useEffect, useRef } from "react";
 // NAV
 const PAGES_TOP = [
   { id: "live", label: "LIVE" },
+  { id: "behavior", label: "BEHAVIOR" },
   { id: "announcements", label: "ANNOUNCE & EVENTS" },
-  { id: "snapshot", label: "CULTURAL SNAPSHOT" },
-  { id: "library", label: "LIBRARY INDEX" },
-  { id: "culture", label: "CULTURAL NOTES" },
-  { id: "innercircle", label: "INNER CIRCLE" },
   { id: "trackr", label: "TRACKR" },
+  { id: "library", label: "LIBRARY INDEX" },
   { id: "schedule", label: "SCHEDULE" },
 ];
 
 const PAGES_BOTTOM = [
   { id: "logs", label: "LOGS & REVIEW" },
   { id: "providers", label: "PROVIDERS & COST" },
-  { id: "studio", label: "STUDIO PROFILE" },
-  { id: "auth", label: "AUTH & ACCOUNTS" },
   { id: "senses", label: "SENSES" },
+  { id: "auth", label: "AUTH & ACCOUNTS" },
+  { id: "studio", label: "STUDIO PROFILE" },
   { id: "governance", label: "SETTINGS & GOV" },
 ];
 
@@ -249,6 +247,45 @@ function MessageBlock({ event, showMeta = true }) {
   );
 }
 
+function _decisionLedColor(dtype) {
+  if (dtype === "suppress") return "#ff4136";
+  if (dtype === "noop") return "#ff851b";
+  return "#2ecc40";
+}
+
+function _decisionBorderColor(dtype) {
+  if (dtype === "suppress") return "#ff413633";
+  if (dtype === "noop") return "#ff851b33";
+  return "#2a2a2e";
+}
+
+function MessageRows({ items = [], emptyMessage = "No messages logged" }) {
+  if (!items.length) return <AwaitingBlock style={{ padding: "10px 0" }} message={emptyMessage} />;
+  return items.map((msg, i) => {
+    const dtype = String(msg?.decision_type || "speak").trim().toLowerCase();
+    return (
+      <div
+        key={`${msg?.ts || "na"}-${msg?.user_handle || "viewer"}-${i}`}
+        style={{
+          display: "flex",
+          gap: 12,
+          alignItems: "flex-start",
+          padding: "10px 12px",
+          background: i % 2 === 0 ? "#16161a" : "transparent",
+          borderLeft: `3px solid ${_decisionBorderColor(dtype)}`,
+          borderRadius: "0 2px 2px 0",
+        }}
+      >
+        <LogMetaColumn event={msg} />
+        <Led color={_decisionLedColor(dtype)} size={5} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <MessageBlock event={msg} showMeta={false} />
+        </div>
+      </div>
+    );
+  });
+}
+
 // MICRO COMPONENTS
 
 function Led({ color = "#2ecc40", size = 8, pulse = false, label }) {
@@ -267,8 +304,8 @@ function Led({ color = "#2ecc40", size = 8, pulse = false, label }) {
 function RackLabel({ children, style = {} }) {
   return (
     <div style={{
-      fontSize: 9, letterSpacing: 2.5, color: "#5a5a5a", textTransform: "uppercase",
-      fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, marginBottom: 6, userSelect: "none",
+      fontSize: 10, letterSpacing: 1.8, color: "#6a6a70", textTransform: "uppercase",
+      fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, marginBottom: 7, userSelect: "none",
       ...style,
     }}>{children}</div>
   );
@@ -277,8 +314,8 @@ function RackLabel({ children, style = {} }) {
 function RackPanel({ children, style = {} }) {
   return (
     <div style={{
-      background: "#1a1a1e", border: "1px solid #2a2a2e", borderRadius: 3,
-      padding: 16, position: "relative", ...style,
+      background: "#1a1a1e", border: "1px solid #2a2a2e", borderRadius: 4,
+      padding: 18, position: "relative", ...style,
     }}>
       <div style={{ position: "absolute", top: 6, left: 8, width: 4, height: 4, borderRadius: "50%", background: "#252528", border: "1px solid #333" }} />
       <div style={{ position: "absolute", top: 6, right: 8, width: 4, height: 4, borderRadius: "50%", background: "#252528", border: "1px solid #333" }} />
@@ -423,11 +460,11 @@ function RackButton({
 function NavButton({ page, activePage, setActivePage }) {
   return (
     <button onClick={() => setActivePage(page.id)} style={{
-      display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "10px 16px",
-      background: activePage === page.id ? "#1a1a1e" : "transparent", border: "none",
+      display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "11px 16px",
+      background: activePage === page.id ? "#18181d" : "transparent", border: "none",
       borderLeft: activePage === page.id ? "2px solid #7faacc" : "2px solid transparent",
-      color: activePage === page.id ? "#ccc" : "#555",
-      fontSize: 10, letterSpacing: 1.8, fontFamily: "'JetBrains Mono', monospace",
+      color: activePage === page.id ? "#d0d0d4" : "#666",
+      fontSize: 11, letterSpacing: 1.2, fontFamily: "'JetBrains Mono', monospace",
       fontWeight: activePage === page.id ? 700 : 500, cursor: "pointer", textAlign: "left",
       transition: "all 0.15s",
     }}>{page.label}</button>
@@ -728,7 +765,7 @@ function useDashboardData(activePage) {
         fetches.push(apiFetch(`${API_BASE}/api/routing/status`));
         handlers.push((res) => res.ok && res.json().then(setRoutingStatusData));
       }
-      if (page === "culture") {
+      if (page === "culture" || page === "behavior") {
         fetches.push(apiFetch(`${API_BASE}/api/memory/cultural?limit=100&offset=0&active_only=0`));
         handlers.push(async (res) => { if (res.ok) { const body = await res.json(); setCulturalNotesData(Array.isArray(body?.items) ? body.items : []); } });
         fetches.push(apiFetch(`${API_BASE}/api/memory/viewers?limit=100&offset=0&active_only=0`));
@@ -736,7 +773,7 @@ function useDashboardData(activePage) {
         fetches.push(apiFetch(`${API_BASE}/api/memory/pending?limit=100&offset=0`));
         handlers.push(async (res) => { if (res.ok) { const body = await res.json(); setMemoryPendingData(Array.isArray(body?.items) ? body.items : []); } });
       }
-      if (page === "snapshot") {
+      if (page === "snapshot" || page === "behavior") {
         fetches.push(apiFetch(`${API_BASE}/api/logs/events?limit=100&offset=0`));
         handlers.push(async (res) => { if (res.ok) { const body = await res.json(); setLogsEventsData(Array.isArray(body?.items) ? body.items : []); } });
         fetches.push(apiFetch(`${API_BASE}/api/logs/suppressions?limit=100&offset=0`));
@@ -758,7 +795,7 @@ function useDashboardData(activePage) {
         fetches.push(apiFetch(`${API_BASE}/api/audio/devices`));
         handlers.push(async (res) => { if (res.ok) { const body = await res.json(); setAudioDevicesData(Array.isArray(body?.devices) ? body.devices : []); } });
       }
-      if (page === "innercircle") {
+      if (page === "innercircle" || page === "behavior") {
         fetches.push(apiFetch(`${API_BASE}/api/inner_circle`));
         handlers.push((res) => res.ok && res.json().then(setInnerCircleData));
       }
@@ -1748,61 +1785,46 @@ function LivePage({ statusData, eventsData, suppressionsData, performAction, bus
         )}
       </RackPanel>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        <RackPanel>
-          <RackLabel>Next (Auto-Approved)</RackLabel>
-          {status === "ACTIVE" ? (
-            <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
-              <Led color="#2ecc40" size={6} pulse />
-              <div style={{ fontSize: 13, color: "#ccc", lineHeight: 1.5, fontFamily: "'IBM Plex Sans', sans-serif" }}>{autoNext}</div>
-            </div>
-          ) : (
-            <AwaitingBlock message="System not active" />
-          )}
-          <div style={{ ...TEXT_STYLES.meta, marginTop: 10 }}>
-            READ-ONLY - auto-approved messages fire on timing rules - Context: {contextText}
+      <div style={{ gridColumn: "1 / -1", display: "grid", gridTemplateColumns: "1.35fr 1fr", gap: 12, alignItems: "start" }}>
+        <RackPanel style={{ display: "flex", flexDirection: "column" }}>
+          <RackLabel>Recent Messages</RackLabel>
+          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+            <MessageRows items={eventsData.length ? eventsData : []} emptyMessage="No messages yet" />
           </div>
         </RackPanel>
 
-        <RackPanel>
-          <RackLabel>Why Blocked - Last Suppression</RackLabel>
-          <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 8 }}>
-            <Led color="#ff851b" size={6} />
-            <div>
-              <div style={{ fontSize: 12, color: "#ccc", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.5 }}>
-                {suppression ? `${suppression.suppression_reason || "SUPPRESSED"}${suppression.suppression_detail ? ` (${suppression.suppression_detail})` : ""}` : "No suppressions yet"}
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <RackPanel>
+            <RackLabel>Next (Auto-Approved)</RackLabel>
+            {status === "ACTIVE" ? (
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+                <Led color="#2ecc40" size={6} pulse />
+                <div style={{ fontSize: 13, color: "#ccc", lineHeight: 1.5, fontFamily: "'IBM Plex Sans', sans-serif" }}>{autoNext}</div>
               </div>
-              <div style={{ ...TEXT_STYLES.meta, marginTop: 4 }}>
-                RULE: {suppression ? (suppression.suppression_reason || "UNKNOWN") : "\u2014"} - {suppression ? fmtTime(suppression.ts) : "\u2014"}
+            ) : (
+              <AwaitingBlock message="System not active" />
+            )}
+            <div style={{ ...TEXT_STYLES.meta, marginTop: 10 }}>
+              READ-ONLY - auto-approved messages fire on timing rules - Context: {contextText}
+            </div>
+          </RackPanel>
+
+          <RackPanel>
+            <RackLabel>Why Blocked - Last Suppression</RackLabel>
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 8 }}>
+              <Led color="#ff851b" size={6} />
+              <div>
+                <div style={{ fontSize: 12, color: "#ccc", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.5 }}>
+                  {suppression ? `${suppression.suppression_reason || "SUPPRESSED"}${suppression.suppression_detail ? ` (${suppression.suppression_detail})` : ""}` : "No suppressions yet"}
+                </div>
+                <div style={{ ...TEXT_STYLES.meta, marginTop: 4 }}>
+                  RULE: {suppression ? (suppression.suppression_reason || "UNKNOWN") : "\u2014"} - {suppression ? fmtTime(suppression.ts) : "\u2014"}
+                </div>
               </div>
             </div>
-          </div>
-        </RackPanel>
-
-      </div>
-
-      <RackPanel style={{ display: "flex", flexDirection: "column" }}>
-        <RackLabel>Recent Messages</RackLabel>
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 2 }}>
-          {(eventsData.length ? eventsData : []).map((msg, i) => {
-            const dtype = msg.decision_type || "speak";
-            const borderColor = dtype === "suppress" ? "#ff413630" : dtype === "noop" ? "#ff851b30" : "#2a2a2e";
-            return (
-              <div key={i} style={{
-                padding: "10px 12px",
-                background: i % 2 === 0 ? "#16161a" : "transparent",
-                borderLeft: `3px solid ${borderColor}`,
-                borderRadius: "0 2px 2px 0",
-                display: "flex", gap: 12, alignItems: "flex-start",
-              }}>
-                <Timestamp time={fmtTime(msg.ts)} />
-                <MessageBlock event={msg} />
-              </div>
-            );
-          })}
-          {!eventsData.length && <AwaitingBlock style={{ padding: "10px 0" }} message="No messages yet" />}
+          </RackPanel>
         </div>
-      </RackPanel>
+      </div>
     </div>
   );
 }
@@ -2309,17 +2331,6 @@ function LogsPage({ eventsData, suppressionsData, operatorLogData }) {
 
   const operators = operatorLogData.length ? operatorLogData : [];
 
-  const ledColorForType = (dtype) => {
-    if (dtype === "suppress") return "#ff4136";
-    if (dtype === "noop") return "#ff851b";
-    return "#2ecc40";
-  };
-  const borderColorForType = (dtype) => {
-    if (dtype === "suppress") return "#ff413633";
-    if (dtype === "noop") return "#ff851b33";
-    return "transparent";
-  };
-
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <div style={{ display: "flex", gap: 0, borderBottom: "1px solid #2a2a2e" }}>
@@ -2337,23 +2348,10 @@ function LogsPage({ eventsData, suppressionsData, operatorLogData }) {
       <RackPanel>
         {at === "messages" && (
           <>
-            <RackLabel>Unified Message Log</RackLabel>
-            {unified.map((msg, i) => {
-              const dtype = msg.decision_type || "speak";
-              return (
-                <div key={i} style={{
-                  display: "flex", gap: 12, padding: "10px 0",
-                  borderBottom: "1px solid #1f1f22", alignItems: "flex-start",
-                  borderLeft: dtype !== "speak" ? `3px solid ${borderColorForType(dtype)}` : "3px solid transparent",
-                  paddingLeft: 8,
-                }}>
-                  <LogMetaColumn event={msg} />
-                  <Led color={ledColorForType(dtype)} size={5} />
-                  <MessageBlock event={msg} showMeta={false} />
-                </div>
-              );
-            })}
-            {unified.length === 0 && <div style={{ fontSize: 12, color: "#555", fontFamily: "'IBM Plex Sans', sans-serif" }}>No messages logged</div>}
+            <RackLabel>Recent Messages</RackLabel>
+            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              <MessageRows items={unified} emptyMessage="No messages logged" />
+            </div>
           </>
         )}
         {at === "operator" && (
@@ -3225,6 +3223,7 @@ function CulturePage({
   saveViewerNote,
   deleteViewerNote,
   reviewMemoryPending,
+  section = "all",
 }) {
   const culturalNotes = Array.isArray(culturalNotesData) ? culturalNotesData : [];
   const viewerNotes = Array.isArray(viewerNotesData) ? viewerNotesData : [];
@@ -3351,137 +3350,154 @@ function CulturePage({
     );
   };
 
+  const proposedPanel = (
+    <RackPanel>
+      <RackLabel>Roonie Proposed Notes - Review</RackLabel>
+      <div style={{ fontSize: 11, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif", marginBottom: 12 }}>
+        Review each candidate and approve or deny before it becomes memory.
+      </div>
+      {pendingNotes.map((item) => (
+        <div key={item.id} style={{ padding: "10px 12px", marginBottom: 6, background: "#15151a", border: "1px solid #222", borderRadius: 2 }}>
+          <div style={{ fontSize: 11, color: "#7faacc", fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, marginBottom: 4 }}>
+            @{item.viewer_handle || "unknown"}
+          </div>
+          <div style={{ fontSize: 12, color: "#999", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.4, marginBottom: 8 }}>
+            {item.proposed_note || "No note text"}
+          </div>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button onClick={() => approvePending(item)} style={{ background: "none", border: "1px solid #2ecc4044", borderRadius: 2, color: "#2ecc40", padding: "2px 8px", fontSize: 10, cursor: "pointer", fontFamily: "'JetBrains Mono', monospace" }}>APPROVE</button>
+            <button onClick={() => denyPending(item)} style={{ background: "none", border: "1px solid #ff851b44", borderRadius: 2, color: "#ff851b", padding: "2px 8px", fontSize: 10, cursor: "pointer", fontFamily: "'JetBrains Mono', monospace" }}>DENY</button>
+          </div>
+        </div>
+      ))}
+      {!pendingNotes.length ? <div style={{ padding: "6px 0", fontSize: 11, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif" }}>No pending proposals</div> : null}
+    </RackPanel>
+  );
+
+  const roomPanel = (
+    <RackPanel>
+      <RackLabel>Cultural Notes - Room Level</RackLabel>
+      <div style={{ fontSize: 11, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif", marginBottom: 12 }}>
+        These shape how Roonie reads the room and responds. Apply to all interactions.
+      </div>
+      {editingCultural ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {culturalDraft.length > 0 && (
+            <div style={{ display: "grid", gridTemplateColumns: "130px 1fr 60px 20px", gap: 6, marginBottom: 2 }}>
+              <span style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>TAG</span>
+              <span style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>NOTE</span>
+              <span style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>ACTIVE</span>
+              <span />
+            </div>
+          )}
+          {culturalDraft.map((d, i) => (
+            <div key={d.id || `new-${i}`} style={{ display: "grid", gridTemplateColumns: "130px 1fr 60px 20px", gap: 6, alignItems: "start" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <select value={d._tag || "lore"} onChange={(e) => updateCulturalDraft(i, "_tag", e.target.value)} style={selectStyle}>
+                  {TAG_OPTIONS.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                </select>
+                {(d._tag || "lore") === "temp" && (
+                  <select value={d._ttl || 24} onChange={(e) => updateCulturalDraft(i, "_ttl", Number(e.target.value))} style={{ ...selectStyle, fontSize: 9 }}>
+                    {TTL_OPTIONS.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                  </select>
+                )}
+              </div>
+              <textarea value={d.note || ""} onChange={(e) => updateCulturalDraft(i, "note", e.target.value)} rows={2} placeholder="Cultural note..." style={textareaStyle} />
+              <label style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer", fontSize: 10, color: d.is_active !== false ? "#2ecc40" : "#666", fontFamily: "'JetBrains Mono', monospace" }}>
+                <input type="checkbox" checked={d.is_active !== false} onChange={(e) => updateCulturalDraft(i, "is_active", e.target.checked)} style={{ accentColor: "#2ecc40" }} />
+                {d.is_active !== false ? "ON" : "OFF"}
+              </label>
+              <span onClick={() => { const next = [...culturalDraft]; next.splice(i, 1); setCulturalDraft(next); }} style={{ color: "#ff4136", fontSize: 13, cursor: "pointer", fontFamily: "'JetBrains Mono', monospace", textAlign: "center", marginTop: 4 }}>&times;</span>
+            </div>
+          ))}
+          <div onClick={() => setCulturalDraft([...culturalDraft, { note: "", _tag: "lore", _ttl: 24, is_active: true }])} style={{ fontSize: 10, color: "#555", letterSpacing: 1, fontFamily: "'JetBrains Mono', monospace", cursor: "pointer", marginTop: 4 }}>+ ADD NOTE</div>
+          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            <button onClick={saveCulturalNotes} style={saveBtnStyle}>SAVE</button>
+            <button onClick={cancelEditingCultural} style={cancelBtnStyle}>CANCEL</button>
+          </div>
+        </div>
+      ) : (
+        <div>
+          {culturalNotes.map((item) => (
+            <div key={item.id} style={{ padding: "10px 12px", borderLeft: "2px solid " + (TAG_COLORS[getTag(item)] || "#7faacc") + "44", marginBottom: 6, background: "#15151a", borderRadius: "0 2px 2px 0" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                {tagBadge(getTag(item))}
+                {getTag(item) === "temp" && item.ttl_hours && <span style={{ fontSize: 8, color: "#e8a838", fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1 }}>{item.ttl_hours >= 168 ? "7d" : item.ttl_hours + "h"}</span>}
+                {item.is_active === false && <span style={{ fontSize: 8, color: "#ff4136", fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1 }}>INACTIVE</span>}
+              </div>
+              <div style={{ fontSize: 12, color: item.is_active === false ? "#555" : "#aaa", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.5 }}>{item.note}</div>
+            </div>
+          ))}
+          {!culturalNotes.length ? <div style={{ padding: "6px 0", fontSize: 11, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif" }}>No cultural notes added</div> : null}
+          <button onClick={startEditingCultural} style={{ ...editBtnStyle, marginTop: 8 }}>EDIT CULTURAL NOTES</button>
+        </div>
+      )}
+    </RackPanel>
+  );
+
+  const viewerPanel = (
+    <RackPanel>
+      <RackLabel>Viewer Notes - Individual</RackLabel>
+      <div style={{ fontSize: 11, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif", marginBottom: 12 }}>Observable behavior only. No subjective labels or inferred traits.</div>
+      {editingViewer ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {viewerDraft.length > 0 && (
+            <div style={{ display: "grid", gridTemplateColumns: "110px 1fr 60px 20px", gap: 6, marginBottom: 2 }}>
+              <span style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>HANDLE</span>
+              <span style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>NOTE</span>
+              <span style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>ACTIVE</span>
+              <span />
+            </div>
+          )}
+          {viewerDraft.map((v, i) => (
+            <div key={v.id || `new-${i}`} style={{ display: "grid", gridTemplateColumns: "110px 1fr 60px 20px", gap: 6, alignItems: "start" }}>
+              <div style={{ position: "relative" }}>
+                <span style={{ position: "absolute", left: 8, top: 5, fontSize: 11, color: "#555", fontFamily: "'JetBrains Mono', monospace", pointerEvents: "none" }}>@</span>
+                <input type="text" value={v.viewer_handle || ""} onChange={(e) => updateViewerDraft(i, "viewer_handle", e.target.value.replace(/^@+/, ""))} placeholder="handle" style={{ ...inputStyle, paddingLeft: 18, width: "100%" }} />
+              </div>
+              <textarea value={v.note || ""} onChange={(e) => updateViewerDraft(i, "note", e.target.value)} rows={2} placeholder="Viewer note..." style={textareaStyle} />
+              <label style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer", fontSize: 10, color: v.is_active !== false ? "#2ecc40" : "#666", fontFamily: "'JetBrains Mono', monospace" }}>
+                <input type="checkbox" checked={v.is_active !== false} onChange={(e) => updateViewerDraft(i, "is_active", e.target.checked)} style={{ accentColor: "#2ecc40" }} />
+                {v.is_active !== false ? "ON" : "OFF"}
+              </label>
+              <span onClick={() => { const next = [...viewerDraft]; next.splice(i, 1); setViewerDraft(next); }} style={{ color: "#ff4136", fontSize: 13, cursor: "pointer", fontFamily: "'JetBrains Mono', monospace", textAlign: "center", marginTop: 4 }}>&times;</span>
+            </div>
+          ))}
+          <div onClick={() => setViewerDraft([...viewerDraft, { viewer_handle: "", note: "", is_active: true }])} style={{ fontSize: 10, color: "#555", letterSpacing: 1, fontFamily: "'JetBrains Mono', monospace", cursor: "pointer", marginTop: 4 }}>+ ADD VIEWER NOTE</div>
+          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            <button onClick={saveViewerNotes} style={saveBtnStyle}>SAVE</button>
+            <button onClick={cancelEditingViewer} style={cancelBtnStyle}>CANCEL</button>
+          </div>
+        </div>
+      ) : (
+        <div>
+          {viewerNotes.map((v) => (
+            <div key={v.id} style={{ padding: "10px 12px", marginBottom: 6, background: "#15151a", border: "1px solid #222", borderRadius: 2 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                <span style={{ fontSize: 11, color: "#7faacc", fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>@{v.viewer_handle}</span>
+                {v.is_active === false && <span style={{ fontSize: 8, color: "#ff4136", fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1 }}>INACTIVE</span>}
+              </div>
+              <div style={{ fontSize: 12, color: v.is_active === false ? "#555" : "#999", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.4 }}>{v.note}</div>
+            </div>
+          ))}
+          {!viewerNotes.length ? <div style={{ padding: "6px 0", fontSize: 11, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif" }}>No viewer notes added</div> : null}
+          <button onClick={startEditingViewer} style={{ ...editBtnStyle, marginTop: 8 }}>EDIT VIEWER NOTES</button>
+        </div>
+      )}
+    </RackPanel>
+  );
+
+  if (section === "proposed") return <div>{proposedPanel}</div>;
+  if (section === "room") return <div>{roomPanel}</div>;
+  if (section === "viewer") return <div>{viewerPanel}</div>;
+
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-      <RackPanel>
-        <RackLabel>Roonie Proposed Notes - Review</RackLabel>
-        <div style={{ fontSize: 10, color: "#555", fontFamily: "'IBM Plex Sans', sans-serif", marginBottom: 10 }}>
-          Review each candidate and approve or deny before it becomes memory.
-        </div>
-        {pendingNotes.map((item) => (
-          <div key={item.id} style={{ padding: "10px 12px", marginBottom: 6, background: "#15151a", border: "1px solid #222", borderRadius: 2 }}>
-            <div style={{ fontSize: 11, color: "#7faacc", fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, marginBottom: 4 }}>
-              @{item.viewer_handle || "unknown"}
-            </div>
-            <div style={{ fontSize: 12, color: "#999", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.4, marginBottom: 8 }}>
-              {item.proposed_note || "No note text"}
-            </div>
-            <div style={{ display: "flex", gap: 6 }}>
-              <button onClick={() => approvePending(item)} style={{ background: "none", border: "1px solid #2ecc4044", borderRadius: 2, color: "#2ecc40", padding: "2px 8px", fontSize: 10, cursor: "pointer", fontFamily: "'JetBrains Mono', monospace" }}>APPROVE</button>
-              <button onClick={() => denyPending(item)} style={{ background: "none", border: "1px solid #ff851b44", borderRadius: 2, color: "#ff851b", padding: "2px 8px", fontSize: 10, cursor: "pointer", fontFamily: "'JetBrains Mono', monospace" }}>DENY</button>
-            </div>
-          </div>
-        ))}
-        {!pendingNotes.length ? <div style={{ padding: "6px 0", fontSize: 11, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif" }}>No pending proposals</div> : null}
-
-        <div style={{ borderTop: "1px solid #1f1f22", margin: "10px 0" }} />
-        <RackLabel>Cultural Notes - Room Level</RackLabel>
-        <div style={{ fontSize: 10, color: "#555", fontFamily: "'IBM Plex Sans', sans-serif", marginBottom: 12 }}>These shape how Roonie reads the room and responds. Apply to all interactions.</div>
-
-        {editingCultural ? (
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {culturalDraft.length > 0 && (
-              <div style={{ display: "grid", gridTemplateColumns: "130px 1fr 60px 20px", gap: 6, marginBottom: 2 }}>
-                <span style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>TAG</span>
-                <span style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>NOTE</span>
-                <span style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>ACTIVE</span>
-                <span />
-              </div>
-            )}
-            {culturalDraft.map((d, i) => (
-              <div key={d.id || `new-${i}`} style={{ display: "grid", gridTemplateColumns: "130px 1fr 60px 20px", gap: 6, alignItems: "start" }}>
-                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                  <select value={d._tag || "lore"} onChange={(e) => updateCulturalDraft(i, "_tag", e.target.value)} style={selectStyle}>
-                    {TAG_OPTIONS.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
-                  </select>
-                  {(d._tag || "lore") === "temp" && (
-                    <select value={d._ttl || 24} onChange={(e) => updateCulturalDraft(i, "_ttl", Number(e.target.value))} style={{ ...selectStyle, fontSize: 9 }}>
-                      {TTL_OPTIONS.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
-                    </select>
-                  )}
-                </div>
-                <textarea value={d.note || ""} onChange={(e) => updateCulturalDraft(i, "note", e.target.value)} rows={2} placeholder="Cultural note..." style={textareaStyle} />
-                <label style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer", fontSize: 10, color: d.is_active !== false ? "#2ecc40" : "#666", fontFamily: "'JetBrains Mono', monospace" }}>
-                  <input type="checkbox" checked={d.is_active !== false} onChange={(e) => updateCulturalDraft(i, "is_active", e.target.checked)} style={{ accentColor: "#2ecc40" }} />
-                  {d.is_active !== false ? "ON" : "OFF"}
-                </label>
-                <span onClick={() => { const next = [...culturalDraft]; next.splice(i, 1); setCulturalDraft(next); }} style={{ color: "#ff4136", fontSize: 13, cursor: "pointer", fontFamily: "'JetBrains Mono', monospace", textAlign: "center", marginTop: 4 }}>&times;</span>
-              </div>
-            ))}
-            <div onClick={() => setCulturalDraft([...culturalDraft, { note: "", _tag: "lore", _ttl: 24, is_active: true }])} style={{ fontSize: 10, color: "#555", letterSpacing: 1, fontFamily: "'JetBrains Mono', monospace", cursor: "pointer", marginTop: 4 }}>+ ADD NOTE</div>
-            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-              <button onClick={saveCulturalNotes} style={saveBtnStyle}>SAVE</button>
-              <button onClick={cancelEditingCultural} style={cancelBtnStyle}>CANCEL</button>
-            </div>
-          </div>
-        ) : (
-          <div>
-            {culturalNotes.map((item) => (
-              <div key={item.id} style={{ padding: "10px 12px", borderLeft: "2px solid " + (TAG_COLORS[getTag(item)] || "#7faacc") + "44", marginBottom: 6, background: "#15151a", borderRadius: "0 2px 2px 0" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-                  {tagBadge(getTag(item))}
-                  {getTag(item) === "temp" && item.ttl_hours && <span style={{ fontSize: 8, color: "#e8a838", fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1 }}>{item.ttl_hours >= 168 ? "7d" : item.ttl_hours + "h"}</span>}
-                  {item.is_active === false && <span style={{ fontSize: 8, color: "#ff4136", fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1 }}>INACTIVE</span>}
-                </div>
-                <div style={{ fontSize: 12, color: item.is_active === false ? "#555" : "#aaa", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.5 }}>{item.note}</div>
-              </div>
-            ))}
-            {!culturalNotes.length ? <div style={{ padding: "6px 0", fontSize: 11, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif" }}>No cultural notes added</div> : null}
-            <button onClick={startEditingCultural} style={{ ...editBtnStyle, marginTop: 8 }}>EDIT CULTURAL NOTES</button>
-          </div>
-        )}
-      </RackPanel>
-
-      <RackPanel>
-        <RackLabel>Viewer Notes - Individual</RackLabel>
-        <div style={{ fontSize: 10, color: "#555", fontFamily: "'IBM Plex Sans', sans-serif", marginBottom: 12 }}>Observable behavior only. No subjective labels or inferred traits.</div>
-
-        {editingViewer ? (
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {viewerDraft.length > 0 && (
-              <div style={{ display: "grid", gridTemplateColumns: "110px 1fr 60px 20px", gap: 6, marginBottom: 2 }}>
-                <span style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>HANDLE</span>
-                <span style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>NOTE</span>
-                <span style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>ACTIVE</span>
-                <span />
-              </div>
-            )}
-            {viewerDraft.map((v, i) => (
-              <div key={v.id || `new-${i}`} style={{ display: "grid", gridTemplateColumns: "110px 1fr 60px 20px", gap: 6, alignItems: "start" }}>
-                <div style={{ position: "relative" }}>
-                  <span style={{ position: "absolute", left: 8, top: 5, fontSize: 11, color: "#555", fontFamily: "'JetBrains Mono', monospace", pointerEvents: "none" }}>@</span>
-                  <input type="text" value={v.viewer_handle || ""} onChange={(e) => updateViewerDraft(i, "viewer_handle", e.target.value.replace(/^@+/, ""))} placeholder="handle" style={{ ...inputStyle, paddingLeft: 18, width: "100%" }} />
-                </div>
-                <textarea value={v.note || ""} onChange={(e) => updateViewerDraft(i, "note", e.target.value)} rows={2} placeholder="Viewer note..." style={textareaStyle} />
-                <label style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer", fontSize: 10, color: v.is_active !== false ? "#2ecc40" : "#666", fontFamily: "'JetBrains Mono', monospace" }}>
-                  <input type="checkbox" checked={v.is_active !== false} onChange={(e) => updateViewerDraft(i, "is_active", e.target.checked)} style={{ accentColor: "#2ecc40" }} />
-                  {v.is_active !== false ? "ON" : "OFF"}
-                </label>
-                <span onClick={() => { const next = [...viewerDraft]; next.splice(i, 1); setViewerDraft(next); }} style={{ color: "#ff4136", fontSize: 13, cursor: "pointer", fontFamily: "'JetBrains Mono', monospace", textAlign: "center", marginTop: 4 }}>&times;</span>
-              </div>
-            ))}
-            <div onClick={() => setViewerDraft([...viewerDraft, { viewer_handle: "", note: "", is_active: true }])} style={{ fontSize: 10, color: "#555", letterSpacing: 1, fontFamily: "'JetBrains Mono', monospace", cursor: "pointer", marginTop: 4 }}>+ ADD VIEWER NOTE</div>
-            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-              <button onClick={saveViewerNotes} style={saveBtnStyle}>SAVE</button>
-              <button onClick={cancelEditingViewer} style={cancelBtnStyle}>CANCEL</button>
-            </div>
-          </div>
-        ) : (
-          <div>
-            {viewerNotes.map((v) => (
-              <div key={v.id} style={{ padding: "10px 12px", marginBottom: 6, background: "#15151a", border: "1px solid #222", borderRadius: 2 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-                  <span style={{ fontSize: 11, color: "#7faacc", fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>@{v.viewer_handle}</span>
-                  {v.is_active === false && <span style={{ fontSize: 8, color: "#ff4136", fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1 }}>INACTIVE</span>}
-                </div>
-                <div style={{ fontSize: 12, color: v.is_active === false ? "#555" : "#999", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.4 }}>{v.note}</div>
-              </div>
-            ))}
-            {!viewerNotes.length ? <div style={{ padding: "6px 0", fontSize: 11, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif" }}>No viewer notes added</div> : null}
-            <button onClick={startEditingViewer} style={{ ...editBtnStyle, marginTop: 8 }}>EDIT VIEWER NOTES</button>
-          </div>
-        )}
-      </RackPanel>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {proposedPanel}
+        {roomPanel}
+      </div>
+      {viewerPanel}
     </div>
   );
 }
@@ -3828,6 +3844,107 @@ function CulturalSnapshotPage({ logsEventsData = [], logsSuppressionsData = [], 
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function BehaviorPage({
+  logsEventsData,
+  logsSuppressionsData,
+  statusData,
+  culturalNotesData,
+  viewerNotesData,
+  memoryPendingData,
+  saveCulturalNote,
+  deleteCulturalNote,
+  saveViewerNote,
+  deleteViewerNote,
+  reviewMemoryPending,
+  innerCircleData,
+  saveInnerCircle,
+}) {
+  const [tab, setTab] = useState("snapshot");
+  const tabs = [
+    { id: "snapshot", label: "SNAPSHOT" },
+    { id: "proposed", label: "PROPOSED NOTES" },
+    { id: "room", label: "ROOM NOTES" },
+    { id: "viewer", label: "VIEWER NOTES" },
+    { id: "inner", label: "INNER CIRCLE" },
+  ];
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ display: "flex", gap: 0, borderBottom: "1px solid #2a2a2e", overflowX: "auto" }}>
+        {tabs.map((t) => (
+          <button
+            key={t.id}
+            onClick={() => setTab(t.id)}
+            style={{
+              background: tab === t.id ? "#1a1a1e" : "transparent",
+              color: tab === t.id ? "#ccc" : "#666",
+              border: "none",
+              borderBottom: tab === t.id ? "2px solid #7faacc" : "2px solid transparent",
+              padding: "10px 16px",
+              fontSize: 11,
+              letterSpacing: 1.2,
+              fontFamily: "'JetBrains Mono', monospace",
+              fontWeight: 600,
+              cursor: "pointer",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === "snapshot" && (
+        <CulturalSnapshotPage
+          logsEventsData={logsEventsData}
+          logsSuppressionsData={logsSuppressionsData}
+          statusData={statusData}
+        />
+      )}
+      {tab === "proposed" && (
+        <CulturePage
+          section="proposed"
+          culturalNotesData={culturalNotesData}
+          viewerNotesData={viewerNotesData}
+          memoryPendingData={memoryPendingData}
+          saveCulturalNote={saveCulturalNote}
+          deleteCulturalNote={deleteCulturalNote}
+          saveViewerNote={saveViewerNote}
+          deleteViewerNote={deleteViewerNote}
+          reviewMemoryPending={reviewMemoryPending}
+        />
+      )}
+      {tab === "room" && (
+        <CulturePage
+          section="room"
+          culturalNotesData={culturalNotesData}
+          viewerNotesData={viewerNotesData}
+          memoryPendingData={memoryPendingData}
+          saveCulturalNote={saveCulturalNote}
+          deleteCulturalNote={deleteCulturalNote}
+          saveViewerNote={saveViewerNote}
+          deleteViewerNote={deleteViewerNote}
+          reviewMemoryPending={reviewMemoryPending}
+        />
+      )}
+      {tab === "viewer" && (
+        <CulturePage
+          section="viewer"
+          culturalNotesData={culturalNotesData}
+          viewerNotesData={viewerNotesData}
+          memoryPendingData={memoryPendingData}
+          saveCulturalNote={saveCulturalNote}
+          deleteCulturalNote={deleteCulturalNote}
+          saveViewerNote={saveViewerNote}
+          deleteViewerNote={deleteViewerNote}
+          reviewMemoryPending={reviewMemoryPending}
+        />
+      )}
+      {tab === "inner" && <InnerCirclePage innerCircleData={innerCircleData} saveInnerCircle={saveInnerCircle} />}
     </div>
   );
 }
@@ -4245,12 +4362,30 @@ export default function RoonieControlRoom() {
       case "announcements": return <AnnouncementsPage queueData={queueData} performAction={performAction} />;
       case "trackr": return <TrackrPage trackrConfigData={trackrConfigData} trackrStatusData={trackrStatusData} saveTrackrConfig={saveTrackrConfig} />;
       case "logs": return <LogsPage eventsData={logsEventsData} suppressionsData={logsSuppressionsData} operatorLogData={logsOperatorData} />;
+      case "behavior":
+      case "culture":
+      case "snapshot":
+      case "innercircle":
+        return (
+          <BehaviorPage
+            logsEventsData={logsEventsData}
+            logsSuppressionsData={logsSuppressionsData}
+            statusData={statusData}
+            culturalNotesData={culturalNotesData}
+            viewerNotesData={viewerNotesData}
+            memoryPendingData={memoryPendingData}
+            saveCulturalNote={saveCulturalNote}
+            deleteCulturalNote={deleteCulturalNote}
+            saveViewerNote={saveViewerNote}
+            deleteViewerNote={deleteViewerNote}
+            reviewMemoryPending={reviewMemoryPending}
+            innerCircleData={innerCircleData}
+            saveInnerCircle={saveInnerCircle}
+          />
+        );
       case "providers": return <ProvidersPage statusData={statusData} providersStatusData={providersStatusData} routingStatusData={routingStatusData} systemHealthData={systemHealthData} readinessData={readinessData} setProviderActive={setProviderActive} setProviderCaps={setProviderCaps} patchProviderWeights={patchProviderWeights} setRoutingEnabled={setRoutingEnabled} setActiveDirector={setActiveDirector} setDryRunEnabled={setDryRunEnabled} />;
       case "auth": return <AuthPage twitchStatusData={twitchStatusData} twitchConnectStart={twitchConnectStart} twitchConnectPoll={twitchConnectPoll} twitchDisconnect={twitchDisconnect} twitchNotice={twitchNotice} setTwitchNotice={setTwitchNotice} />;
-      case "culture": return <CulturePage culturalNotesData={culturalNotesData} viewerNotesData={viewerNotesData} memoryPendingData={memoryPendingData} saveCulturalNote={saveCulturalNote} deleteCulturalNote={deleteCulturalNote} saveViewerNote={saveViewerNote} deleteViewerNote={deleteViewerNote} reviewMemoryPending={reviewMemoryPending} />;
-      case "innercircle": return <InnerCirclePage innerCircleData={innerCircleData} saveInnerCircle={saveInnerCircle} />;
       case "schedule": return <SchedulePage scheduleData={scheduleData} saveStreamSchedule={saveStreamSchedule} />;
-      case "snapshot": return <CulturalSnapshotPage logsEventsData={logsEventsData} logsSuppressionsData={logsSuppressionsData} statusData={statusData} />;
       case "senses": return <SensesPage sensesStatusData={sensesStatusData} audioConfigData={audioConfigData} audioStatusData={audioStatusData} setAudioStatusData={setAudioStatusData} audioDevicesData={audioDevicesData} saveAudioConfig={saveAudioConfig} performAction={performAction} />;
       case "governance": return <GovernancePage />;
       default: return <LivePage statusData={statusData} eventsData={eventsData} suppressionsData={suppressionsData} performAction={performAction} busyAction={busyAction} />;
@@ -4284,35 +4419,68 @@ export default function RoonieControlRoom() {
 
       {/* --- TOP BAR --- */}
       <div style={{
-        height: 52, background: "#0d0d10", borderBottom: "1px solid #1f1f22",
+        height: 84, background: "#0d0d10", borderBottom: "1px solid #1f1f22",
         display: "flex", alignItems: "center", justifyContent: "space-between",
-        padding: "0 20px", flexShrink: 0, gap: 16, overflow: "hidden",
+        padding: "0 18px", flexShrink: 0, gap: 14, overflow: "hidden",
       }}>
         {/* Left: brand */}
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
-          <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#2ecc40", boxShadow: "0 0 6px #2ecc40" }} />
-          <span style={{ fontSize: 12, fontWeight: 800, letterSpacing: 4, color: "#888", fontFamily: "'JetBrains Mono', monospace" }}>ROONIE</span>
+          <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#2ecc40", boxShadow: "0 0 8px #2ecc40" }} />
+          <span style={{ fontSize: 13, fontWeight: 800, letterSpacing: 3, color: "#9a9aa0", fontFamily: "'JetBrains Mono', monospace" }}>ROONIE</span>
         </div>
 
-        {/* Center: Now Playing */}
-        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", justifyContent: "center", gap: 1, overflow: "hidden" }}>
-          <div style={{ display: "flex", alignItems: "baseline", gap: 8, whiteSpace: "nowrap" }}>
-            <span style={{ fontSize: 8, color: "#555", letterSpacing: 2, fontFamily: "'JetBrains Mono', monospace", flexShrink: 0 }}>CURRENTLY PLAYING</span>
-            <span style={{ fontSize: 11, color: "#ccc", fontFamily: "'IBM Plex Sans', sans-serif", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis" }}>
-              {trackrStatusData?.current?.raw || "No track loaded"}
-            </span>
-          </div>
-          <div style={{ display: "flex", alignItems: "baseline", gap: 8, whiteSpace: "nowrap" }}>
-            <span style={{ fontSize: 8, color: "#444", letterSpacing: 2, fontFamily: "'JetBrains Mono', monospace", flexShrink: 0 }}>PREVIOUS</span>
-            <span style={{ fontSize: 10, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif", overflow: "hidden", textOverflow: "ellipsis" }}>
-              {trackrStatusData?.previous?.raw || "\u2014"}
-            </span>
+        {/* Center: TRACKR Player */}
+        <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <div style={{
+            width: "100%",
+            maxWidth: 980,
+            background: "linear-gradient(180deg, #141419 0%, #121217 100%)",
+            border: "1px solid #2a2a32",
+            borderRadius: 4,
+            padding: "10px 14px",
+            boxShadow: "inset 0 1px 0 #2a2a32, inset 0 -1px 0 #0f0f14",
+          }}>
+            <div style={{ display: "grid", gridTemplateColumns: "132px 1fr", columnGap: 10, rowGap: 6, alignItems: "center" }}>
+              <span style={{ fontSize: 9, color: "#666", letterSpacing: 1.6, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>
+                CURRENTLY PLAYING
+              </span>
+              <span
+                title={trackrStatusData?.current?.raw || "No track loaded"}
+                style={{
+                  fontSize: 16,
+                  color: "#d2d2d8",
+                  fontFamily: "'IBM Plex Sans', sans-serif",
+                  fontWeight: 600,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {trackrStatusData?.current?.raw || "No track loaded"}
+              </span>
+              <span style={{ fontSize: 9, color: "#555", letterSpacing: 1.6, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>
+                PREVIOUS
+              </span>
+              <span
+                title={trackrStatusData?.previous?.raw || "—"}
+                style={{
+                  fontSize: 13,
+                  color: "#8f8f98",
+                  fontFamily: "'IBM Plex Sans', sans-serif",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {trackrStatusData?.previous?.raw || "\u2014"}
+              </span>
+            </div>
           </div>
         </div>
 
         {/* Right: operator + clock */}
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
-          <span style={{ fontSize: 10, color: "#555", fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1 }}>{headerUserLabel}</span>
+          <span style={{ fontSize: 11, color: "#666", fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1 }}>{headerUserLabel}</span>
           {authData?.authenticated ? (
             <button
               onClick={handleAuthLogout}
@@ -4321,23 +4489,23 @@ export default function RoonieControlRoom() {
                 border: "1px solid #2a2a2e",
                 borderRadius: 2,
                 color: "#666",
-                fontSize: 9,
+                fontSize: 10,
                 letterSpacing: 1.2,
                 fontFamily: "'JetBrains Mono', monospace",
-                padding: "3px 6px",
+                padding: "4px 8px",
                 cursor: "pointer",
               }}
             >
               SIGN OUT
             </button>
           ) : null}
-          <span style={{ fontSize: 12, color: "#666", fontFamily: "'JetBrains Mono', monospace", fontVariantNumeric: "tabular-nums" }}>{clock}</span>
+          <span style={{ fontSize: 13, color: "#777", fontFamily: "'JetBrains Mono', monospace", fontVariantNumeric: "tabular-nums" }}>{clock}</span>
         </div>
       </div>
 
       <div style={{ display: "flex", flex: 1 }}>
         {/* --- SIDEBAR --- */}
-        <nav style={{ width: 180, background: "#0d0d10", borderRight: "1px solid #1f1f22", padding: "12px 0", flexShrink: 0, display: "flex", flexDirection: "column" }}>
+        <nav style={{ width: 196, background: "#0d0d10", borderRight: "1px solid #1f1f22", padding: "12px 0", flexShrink: 0, display: "flex", flexDirection: "column" }}>
           {PAGES_TOP.map((page) => <NavButton key={page.id} page={page} activePage={activePage} setActivePage={setActivePage} />)}
           <div style={{ flex: 1 }} />
           <div style={{ borderTop: "1px solid #1f1f22", margin: "4px 16px" }} />
@@ -4369,7 +4537,7 @@ export default function RoonieControlRoom() {
         </nav>
 
         {/* --- MAIN --- */}
-        <main style={{ flex: 1, padding: 16, overflow: "auto", maxHeight: "calc(100vh - 52px)" }}>
+        <main style={{ flex: 1, padding: 16, overflow: "auto", maxHeight: "calc(100vh - 84px)" }}>
           {renderPage()}
         </main>
       </div>

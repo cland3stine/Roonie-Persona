@@ -4,6 +4,7 @@ import os
 import threading
 import time
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
 
@@ -16,6 +17,9 @@ from twitch.read_path import TwitchMsg, iter_twitch_messages
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+_MENTION_RE = re.compile(r"@([A-Za-z0-9_]{2,30})")
 
 
 class LiveChatBridge:
@@ -98,6 +102,18 @@ class LiveChatBridge:
         if reply_parent and nick and reply_parent == nick:
             return True
         return False
+
+    @staticmethod
+    def _extract_mentions(message: str) -> list[str]:
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for match in _MENTION_RE.finditer(str(message or "")):
+            handle = str(match.group(1) or "").strip().lower()
+            if not handle or handle in seen:
+                continue
+            seen.add(handle)
+            ordered.append(handle)
+        return ordered
 
     def _sync_output_env(self, creds: Dict[str, Any]) -> None:
         channel = str(creds.get("channel", "")).strip().lstrip("#").lower()
@@ -346,6 +362,16 @@ class LiveChatBridge:
         viewer = str(msg.nick or "viewer")
         text = str(msg.message or "")
         is_direct = self._is_direct_mention(msg, bot_nick)
+        tags = msg.tags if isinstance(msg.tags, dict) else {}
+        metadata_extra: Dict[str, Any] = {
+            "bot_nick": str(bot_nick or "").strip().lower(),
+        }
+        reply_parent = str(tags.get("reply-parent-user-login", "")).strip().lower()
+        if reply_parent:
+            metadata_extra["reply_parent_user_login"] = reply_parent
+        mentioned_users = self._extract_mentions(text)
+        if mentioned_users:
+            metadata_extra["mentioned_users"] = mentioned_users
         self._log(f"[CHAT] {viewer}: {text}")
         try:
             result = self._emit_payload_message(
@@ -353,7 +379,7 @@ class LiveChatBridge:
                 message=text,
                 channel=str(msg.channel or ""),
                 is_direct_mention=is_direct,
-                metadata_extra=None,
+                metadata_extra=metadata_extra,
             )
         except Exception as exc:
             self._log(f"[LiveChatBridge] process error user={viewer}: {exc}")
@@ -384,7 +410,7 @@ class LiveChatBridge:
                     message=text,
                     channel=str(msg.channel or ""),
                     is_direct_mention=is_direct,
-                    metadata_extra=None,
+                    metadata_extra=metadata_extra,
                     attempt=1,
                     delay_seconds=self._rate_limit_retry_seconds(),
                 )
