@@ -39,7 +39,17 @@ GREETING_COOLDOWN_SECONDS = 15.0
 _TRACK_CMD_RE = re.compile(r"^!(trackid|id|previous|track)\b", re.IGNORECASE)
 
 _TRACK_ID_RE = re.compile(
-    r"\b(track\s*id|what(?:'s| is)?\s+(?:this|that)\s+track|id\?|what\s+track|track\?)\b",
+    (
+        r"\b("
+        r"track\s*id"
+        r"|what(?:'s| is)?\s+(?:this|that)\s+(?:track|song|tune)"
+        r"|what\s+(?:track|song|tune)"
+        r"|id\?"
+        r"|(?:track|song|tune)\?"
+        r"|does\s+anyone\s+know\s+what(?:'s| is)?\s+(?:this|that)\s+(?:track|song|tune)\s+is"
+        r"|(?:track|song|tune)\b[^?!.]{0,30}\bwhat(?:'s| is)\s+it"
+        r")\b"
+    ),
     re.IGNORECASE,
 )
 _QUESTION_RE = re.compile(r"\?")

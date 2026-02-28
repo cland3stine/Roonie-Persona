@@ -469,6 +469,48 @@ def test_behavior_guidance_enrichment_not_available():
     assert "label, year, style" not in text
 
 
+def test_strip_redundant_addressee_display_name():
+    from roonie.provider_director import ProviderDirector
+
+    text = "@cland3stine yeah Art, I'm here. Just took me a sec."
+    metadata = {
+        "user": "cland3stine",
+        "inner_circle": [
+            {"username": "cland3stine", "display_name": "Art"},
+        ],
+    }
+    out = ProviderDirector._strip_redundant_addressee_name(text=text, metadata=metadata)
+    assert out == "@cland3stine yeah I'm here. Just took me a sec."
+
+
+def test_strip_redundant_addressee_name_keeps_possessive_reference():
+    from roonie.provider_director import ProviderDirector
+
+    text = "@cland3stine Art's transitions are dangerously smooth."
+    metadata = {
+        "user": "cland3stine",
+        "inner_circle": [
+            {"username": "cland3stine", "display_name": "Art"},
+        ],
+    }
+    out = ProviderDirector._strip_redundant_addressee_name(text=text, metadata=metadata)
+    assert out == text
+
+
+def test_strip_redundant_addressee_name_requires_leading_tag():
+    from roonie.provider_director import ProviderDirector
+
+    text = "yeah Art, I'm here."
+    metadata = {
+        "user": "cland3stine",
+        "inner_circle": [
+            {"username": "cland3stine", "display_name": "Art"},
+        ],
+    }
+    out = ProviderDirector._strip_redundant_addressee_name(text=text, metadata=metadata)
+    assert out == text
+
+
 def test_bridge_enrich_track_without_enricher():
     from roonie.control_room.trackr_bridge import TrackrBridge
 
@@ -601,6 +643,20 @@ def test_classify_previous_command_as_track_id():
     assert classify_behavior_category(message="!previous", metadata={}) == CATEGORY_TRACK_ID
 
 
+def test_classify_tune_phrasings_as_track_id():
+    from roonie.behavior_spec import classify_behavior_category, CATEGORY_TRACK_ID
+
+    assert classify_behavior_category(message="what is this tune?", metadata={}) == CATEGORY_TRACK_ID
+    assert classify_behavior_category(message="does anyone know what this tune is?", metadata={}) == CATEGORY_TRACK_ID
+    assert classify_behavior_category(message="awesome track, what is it?", metadata={}) == CATEGORY_TRACK_ID
+
+
+def test_classify_tune_opinion_prompt_as_banter_not_track_id():
+    from roonie.behavior_spec import classify_behavior_category, CATEGORY_BANTER
+
+    assert classify_behavior_category(message="what do you think about this tune?", metadata={}) == CATEGORY_BANTER
+
+
 def test_command_with_skill_enabled_evaluates():
     """!trackid with skill enabled should trigger evaluation (not NOOP)."""
     from roonie.provider_director import ProviderDirector
@@ -664,6 +720,98 @@ def test_conversational_trackid_unaffected_by_skill():
     # Direct mention + trigger should evaluate regardless of skill flag
     assert result.action != "NOOP"
     assert result.trace["director"]["track_command"] is None
+
+
+def test_unaddressed_natural_trackid_with_now_playing_evaluates():
+    """Unaddressed natural-language track question should respond when now_playing exists."""
+    from roonie.provider_director import ProviderDirector
+    from roonie.types import Event, Env
+
+    director = ProviderDirector()
+    event = Event(
+        event_id="conv-2",
+        message="what's this track, guys?",
+        metadata={
+            "user": "viewer1",
+            "is_direct_mention": False,
+            "track_id_skill_enabled": False,
+            "now_playing": "Artist - Title",
+            "session_id": "test-sess-3b",
+        },
+    )
+    result = director.evaluate(event, Env(offline=True))
+    assert result.action != "NOOP"
+    assert result.trace["behavior"]["category"] == "TRACK_ID"
+    assert result.trace["director"]["track_command"] is None
+    assert result.trace["director"]["unaddressed_track_id_gate"] is True
+
+
+def test_unaddressed_natural_trackid_without_now_playing_noops():
+    """Without now_playing context, unaddressed natural track question should remain NOOP."""
+    from roonie.provider_director import ProviderDirector
+    from roonie.types import Event, Env
+
+    director = ProviderDirector()
+    event = Event(
+        event_id="conv-3",
+        message="what's this track, guys?",
+        metadata={
+            "user": "viewer1",
+            "is_direct_mention": False,
+            "track_id_skill_enabled": False,
+            "session_id": "test-sess-3c",
+        },
+    )
+    result = director.evaluate(event, Env(offline=True))
+    assert result.action == "NOOP"
+    assert result.trace["director"]["unaddressed_track_id_gate"] is False
+
+
+def test_unaddressed_trackid_targeting_other_user_noops():
+    """If message clearly targets someone else, keep NOOP to avoid over-responding."""
+    from roonie.provider_director import ProviderDirector
+    from roonie.types import Event, Env
+
+    director = ProviderDirector()
+    event = Event(
+        event_id="conv-4",
+        message="@art what's this track?",
+        metadata={
+            "user": "viewer1",
+            "is_direct_mention": False,
+            "track_id_skill_enabled": False,
+            "now_playing": "Artist - Title",
+            "session_id": "test-sess-3d",
+            "mentioned_users": ["art"],
+            "bot_nick": "rooniethecat",
+        },
+    )
+    result = director.evaluate(event, Env(offline=True))
+    assert result.action == "NOOP"
+    assert result.trace["director"]["unaddressed_track_id_gate"] is False
+
+
+def test_streamerbot_command_list_message_stays_noop():
+    """Streamer.bot ACTION command list should not trigger track-id responses."""
+    from roonie.provider_director import ProviderDirector
+    from roonie.types import Event, Env
+
+    director = ProviderDirector()
+    event = Event(
+        event_id="conv-5",
+        message="\x01ACTION Available Commands: !about !trackid !id !previous !discord\x01",
+        metadata={
+            "user": "ror_ai",
+            "is_direct_mention": False,
+            "track_id_skill_enabled": False,
+            "now_playing": "Artist - Title",
+            "session_id": "test-sess-3e",
+        },
+    )
+    result = director.evaluate(event, Env(offline=True))
+    assert result.action == "NOOP"
+    assert result.trace["behavior"]["category"] == "TRACK_ID"
+    assert result.trace["director"]["unaddressed_track_id_gate"] is False
 
 
 def test_previous_command_with_skill_enabled():

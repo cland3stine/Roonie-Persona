@@ -163,6 +163,7 @@ def test_stream_schedule_override_field(tmp_path, monkeypatch):
 
 def test_stream_schedule_block_formats_correctly():
     metadata = {
+        "current_time_local_iso": "2026-02-27T21:20:00-05:00",
         "stream_schedule": {
             "timezone": "ET",
             "slots": [
@@ -173,9 +174,11 @@ def test_stream_schedule_block_formats_correctly():
         }
     }
     block = ProviderDirector._stream_schedule_block(metadata)
+    assert "Current local time (ET): Friday, Feb 27 2026 9:20 PM" in block
     assert "Stream schedule (all times ET):" in block
     assert "Thursday 7:00 PM (Art solo)" in block
     assert "Saturday 7:00 PM" in block
+    assert "Next scheduled stream: Saturday 7:00 PM ET" in block
     assert "Schedule note:" not in block
 
 
@@ -215,6 +218,7 @@ def test_stream_schedule_block_with_override():
 
 def test_stream_schedule_block_day_order():
     metadata = {
+        "current_time_local_iso": "2026-02-27T21:20:00-05:00",
         "stream_schedule": {
             "timezone": "ET",
             "slots": [
@@ -226,10 +230,43 @@ def test_stream_schedule_block_day_order():
         }
     }
     block = ProviderDirector._stream_schedule_block(metadata)
-    mon_idx = block.index("Monday")
-    thu_idx = block.index("Thursday")
-    sat_idx = block.index("Saturday")
+    schedule_line = next(line for line in block.splitlines() if line.startswith("Stream schedule"))
+    mon_idx = schedule_line.index("Monday")
+    thu_idx = schedule_line.index("Thursday")
+    sat_idx = schedule_line.index("Saturday")
     assert mon_idx < thu_idx < sat_idx
+
+
+def test_stream_schedule_block_next_stream_same_day_before_slot():
+    metadata = {
+        "current_time_local_iso": "2026-02-28T18:30:00-05:00",
+        "stream_schedule": {
+            "timezone": "ET",
+            "slots": [
+                {"day": "thursday", "time": "7:00 PM", "note": "Art solo"},
+                {"day": "saturday", "time": "7:00 PM", "note": ""},
+            ],
+            "next_stream_override": "",
+        },
+    }
+    block = ProviderDirector._stream_schedule_block(metadata)
+    assert "Next scheduled stream: Saturday 7:00 PM ET" in block
+
+
+def test_stream_schedule_block_next_stream_rolls_to_next_week():
+    metadata = {
+        "current_time_local_iso": "2026-02-28T21:30:00-05:00",
+        "stream_schedule": {
+            "timezone": "ET",
+            "slots": [
+                {"day": "thursday", "time": "7:00 PM", "note": "Art solo"},
+                {"day": "saturday", "time": "7:00 PM", "note": ""},
+            ],
+            "next_stream_override": "",
+        },
+    }
+    block = ProviderDirector._stream_schedule_block(metadata)
+    assert "Next scheduled stream: Thursday 7:00 PM ET (Art solo)" in block
 
 
 def test_build_roonie_prompt_includes_schedule():

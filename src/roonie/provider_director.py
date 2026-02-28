@@ -2,11 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 import json
 import os
 import re
 from typing import Any, Dict, List, Optional
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover - ZoneInfo may be unavailable in minimal runtimes.
+    ZoneInfo = None  # type: ignore[assignment]
 
 from memory.injection import SafeInjectionResult, get_safe_injection
 from roonie.behavior_spec import (
@@ -43,6 +48,8 @@ _DEICTIC_FOLLOWUP_RE = re.compile(
     r"\b(it|that|this|the latest one|latest one|that one|which one|which track|remind me|what was it)\b",
     re.IGNORECASE,
 )
+_TRACK_QUESTION_CUE_RE = re.compile(r"\b(what|which|id)\b|[?]", re.IGNORECASE)
+_TRACK_TERM_RE = re.compile(r"\b(track|song|tune|playing)\b", re.IGNORECASE)
 _SKIP_RE = re.compile(r"^\[?skip\]?$", re.IGNORECASE)
 _MENTION_RE = re.compile(r"@([A-Za-z0-9_]{2,30})")
 _GREETING_TARGET_RE = re.compile(
@@ -51,6 +58,10 @@ _GREETING_TARGET_RE = re.compile(
 )
 _SECOND_PERSON_RE = re.compile(r"\b(you|your|youre|you're|u|ur)\b", re.IGNORECASE)
 _MUSIC_CHAT_CUE_RE = re.compile(r"\b(track|set|mix|drop|bass|beat|beats|transition|id)\b", re.IGNORECASE)
+_REDUNDANT_NAME_FILLER_RE = re.compile(
+    r"(?:hey+|heya|hi|hello|yo+|sup|yeah|yep|ok|okay|alright|well|good|thanks|thx|night)",
+    re.IGNORECASE,
+)
 _ANCHOR_STOPWORDS = {
     "the",
     "a",
@@ -440,6 +451,9 @@ class ProviderDirector:
         # Named direct question/request ("Roonie how's ...", "Roonie can you ...").
         if re.search(rf"\b{name_token}[\s,:-]{{0,8}}(?:how|what|why|when|where|can|could|do|did|are|will|wanna|should|please|pls)\b", msg):
             return True
+        # Vocative comma + second-person pronoun ("anyway roonie, you ...", "sorry roonie, your ...").
+        if re.search(rf"\b{name_token}\s*,\s*(?:you|your|u|ur)\b", msg):
+            return True
         return False
 
     def _is_conversation_continuation(self, event: Event) -> bool:
@@ -599,6 +613,50 @@ class ProviderDirector:
         return ""
 
     @staticmethod
+    def _is_natural_track_question(message: str) -> bool:
+        text = str(message or "").strip()
+        if not text:
+            return False
+        lowered = text.lower()
+        if lowered.startswith("!"):
+            return False
+        if lowered.startswith("\x01action"):
+            return False
+        if "available commands:" in lowered:
+            return False
+        if not _TRACK_TERM_RE.search(text):
+            return False
+        return bool(_TRACK_QUESTION_CUE_RE.search(text))
+
+    def _allow_unaddressed_track_id(
+        self,
+        *,
+        message: str,
+        metadata: Dict[str, Any],
+        category: str,
+        now_playing_available: bool,
+        track_command: Optional[str],
+    ) -> bool:
+        if str(category or "").strip().upper() != CATEGORY_TRACK_ID:
+            return False
+        if track_command:
+            # Bang commands remain governed by the dedicated skill toggle.
+            return False
+        if not now_playing_available:
+            return False
+        if not self._is_natural_track_question(message):
+            return False
+        if self._reply_parent_targets_other(metadata=metadata):
+            return False
+        if self._mentions_other_user(message=message, metadata=metadata):
+            return False
+        if self._looks_like_greeting_to_other(message=message, metadata=metadata):
+            return False
+        if self._looks_like_targeting_named_other(message=message, metadata=metadata):
+            return False
+        return True
+
+    @staticmethod
     def _is_trigger_message(message: str) -> bool:
         text = str(message or "").strip().lower()
         if not text:
@@ -684,6 +742,69 @@ class ProviderDirector:
             pattern = rf"(?<![\s@])({re.escape(name)})(?=$|[\s\.,!?:;\)\]\}}])"
             normalized = re.sub(pattern, r" \1", normalized)
         return normalized
+
+    @staticmethod
+    def _viewer_display_aliases(metadata: Dict[str, Any]) -> List[str]:
+        viewer = str(metadata.get("user", "")).strip().lower().lstrip("@")
+        if not viewer:
+            return []
+        aliases: List[str] = []
+        display_name = str(metadata.get("display_name", "")).strip()
+        if display_name and display_name.lower() != viewer:
+            aliases.append(display_name)
+        raw = metadata.get("inner_circle", [])
+        if isinstance(raw, list):
+            for item in raw[:50]:
+                if not isinstance(item, dict):
+                    continue
+                username = str(item.get("username", "")).strip().lower().lstrip("@")
+                if username != viewer:
+                    continue
+                display = str(item.get("display_name", "")).strip()
+                if display and display.lower() != viewer:
+                    aliases.append(display)
+        deduped: List[str] = []
+        seen: set[str] = set()
+        for alias in aliases:
+            key = alias.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(alias)
+        return deduped
+
+    @staticmethod
+    def _strip_redundant_addressee_name(*, text: str, metadata: Dict[str, Any]) -> str:
+        value = str(text or "").strip()
+        if not value:
+            return ""
+        head = re.match(r"^(@[A-Za-z0-9_]{2,30})(\s+)(.+)$", value, re.DOTALL)
+        if not head:
+            return value
+        rest = str(head.group(3) or "")
+        if not rest:
+            return value
+        aliases = ProviderDirector._viewer_display_aliases(metadata)
+        if not aliases:
+            return value
+        updated = rest
+        for alias in sorted(aliases, key=len, reverse=True):
+            alias_re = re.escape(alias)
+            pattern = re.compile(
+                rf"^\s*(?P<filler>{_REDUNDANT_NAME_FILLER_RE.pattern}[,!]?\s+)?"
+                rf"(?P<name>{alias_re})(?!['’]s)\b(?:[,:.!?]\s*|\s+)",
+                re.IGNORECASE,
+            )
+            match = pattern.match(updated)
+            if not match:
+                continue
+            filler = str(match.group("filler") or "")
+            updated = (filler + updated[match.end() :]).strip()
+            updated = re.sub(r"\s{2,}", " ", updated)
+            break
+        if not updated:
+            return str(head.group(1))
+        return f"{str(head.group(1))} {updated}"
 
     @staticmethod
     def _track_enrichment_block(metadata: Dict[str, Any]) -> str:
@@ -781,6 +902,157 @@ class ProviderDirector:
         "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
         "friday": 4, "saturday": 5, "sunday": 6,
     }
+    _SCHEDULE_TZ_ALIASES = {
+        "utc": "UTC",
+        "gmt": "UTC",
+        "et": "America/New_York",
+        "est": "America/New_York",
+        "edt": "America/New_York",
+        "eastern": "America/New_York",
+        "eastern time": "America/New_York",
+        "ct": "America/Chicago",
+        "cst": "America/Chicago",
+        "cdt": "America/Chicago",
+        "central": "America/Chicago",
+        "central time": "America/Chicago",
+        "mt": "America/Denver",
+        "mst": "America/Denver",
+        "mdt": "America/Denver",
+        "mountain": "America/Denver",
+        "mountain time": "America/Denver",
+        "pt": "America/Los_Angeles",
+        "pst": "America/Los_Angeles",
+        "pdt": "America/Los_Angeles",
+        "pacific": "America/Los_Angeles",
+        "pacific time": "America/Los_Angeles",
+    }
+    _SCHEDULE_TZ_FALLBACK_OFFSETS = {
+        "utc": 0,
+        "gmt": 0,
+        "et": -5,
+        "est": -5,
+        "edt": -4,
+        "eastern": -5,
+        "eastern time": -5,
+        "ct": -6,
+        "cst": -6,
+        "cdt": -5,
+        "central": -6,
+        "central time": -6,
+        "mt": -7,
+        "mst": -7,
+        "mdt": -6,
+        "mountain": -7,
+        "mountain time": -7,
+        "pt": -8,
+        "pst": -8,
+        "pdt": -7,
+        "pacific": -8,
+        "pacific time": -8,
+    }
+    _SLOT_TIME_12H_RE = re.compile(r"^\s*(\d{1,2})(?::(\d{2}))?\s*([AaPp])\.?[Mm]\.?\s*$")
+    _SLOT_TIME_24H_RE = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*$")
+    _SLOT_TZ_SUFFIX_RE = re.compile(r"\b(?:UTC|GMT|ET|EST|EDT|CT|CST|CDT|MT|MST|MDT|PT|PST|PDT)\b$", re.IGNORECASE)
+
+    @staticmethod
+    def _parse_iso_datetime(value: Any) -> Optional[datetime]:
+        if not isinstance(value, str):
+            return None
+        text = value.strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            return None
+        return dt
+
+    @staticmethod
+    def _schedule_tzinfo(tz_label: str) -> tzinfo:
+        raw = str(tz_label or "").strip()
+        normalized = raw.lower()
+        target = ProviderDirector._SCHEDULE_TZ_ALIASES.get(normalized, raw)
+        if not target:
+            return timezone.utc
+        if ZoneInfo is not None:
+            try:
+                return ZoneInfo(target)
+            except Exception:
+                pass
+        fallback_hours = ProviderDirector._SCHEDULE_TZ_FALLBACK_OFFSETS.get(normalized)
+        if fallback_hours is not None:
+            return timezone.utc if fallback_hours == 0 else timezone(timedelta(hours=fallback_hours))
+        return timezone.utc
+
+    @staticmethod
+    def _schedule_now_local(metadata: Dict[str, Any], tz_label: str) -> datetime:
+        local_iso = ProviderDirector._parse_iso_datetime(metadata.get("current_time_local_iso"))
+        if local_iso is not None:
+            return local_iso
+        tz = ProviderDirector._schedule_tzinfo(tz_label)
+        utc_iso = ProviderDirector._parse_iso_datetime(metadata.get("current_time_utc_iso"))
+        if utc_iso is not None:
+            return utc_iso.astimezone(tz)
+        return datetime.now(timezone.utc).astimezone(tz)
+
+    @staticmethod
+    def _parse_slot_minutes(value: Any) -> Optional[int]:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        cleaned = ProviderDirector._SLOT_TZ_SUFFIX_RE.sub("", raw).strip()
+        m12 = ProviderDirector._SLOT_TIME_12H_RE.match(cleaned)
+        if m12:
+            hour = int(m12.group(1))
+            minute = int(m12.group(2) or "0")
+            if hour < 1 or hour > 12 or minute < 0 or minute > 59:
+                return None
+            hour_24 = hour % 12
+            if m12.group(3).lower() == "p":
+                hour_24 += 12
+            return hour_24 * 60 + minute
+        m24 = ProviderDirector._SLOT_TIME_24H_RE.match(cleaned)
+        if m24:
+            hour = int(m24.group(1))
+            minute = int(m24.group(2))
+            if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+                return None
+            return hour * 60 + minute
+        return None
+
+    @staticmethod
+    def _next_stream_slot(
+        *,
+        slots: List[Dict[str, Any]],
+        now_local: datetime,
+    ) -> Optional[Dict[str, Any]]:
+        now_day = now_local.weekday()
+        now_minutes = now_local.hour * 60 + now_local.minute
+        best: Optional[Dict[str, Any]] = None
+        for s in slots:
+            day = str(s.get("day", "")).strip().lower()
+            day_idx = ProviderDirector._DAY_ORDER.get(day)
+            if day_idx is None:
+                continue
+            slot_minutes = ProviderDirector._parse_slot_minutes(s.get("time"))
+            if slot_minutes is None:
+                continue
+            days_ahead = (day_idx - now_day) % 7
+            if days_ahead == 0 and slot_minutes <= now_minutes:
+                days_ahead = 7
+            sort_key = (days_ahead, slot_minutes)
+            if best is None or sort_key < best["sort_key"]:
+                best = {
+                    "day": day,
+                    "time": str(s.get("time", "")).strip(),
+                    "note": str(s.get("note", "")).strip(),
+                    "sort_key": sort_key,
+                }
+        return best
 
     @staticmethod
     def _stream_schedule_block(metadata: Dict[str, Any]) -> str:
@@ -812,11 +1084,28 @@ class ProviderDirector:
             if note:
                 entry += f" ({note})"
             parts.append(entry)
-        line = f"Stream schedule (all times {tz}): {', '.join(parts)}"
+        now_local = ProviderDirector._schedule_now_local(metadata, tz)
+        now_day = now_local.strftime("%A")
+        now_date = now_local.strftime("%b %d %Y")
+        hour_12 = now_local.hour % 12 or 12
+        now_time = f"{hour_12}:{now_local.minute:02d} {'PM' if now_local.hour >= 12 else 'AM'}"
+        lines = [
+            f"Current local time ({tz}): {now_day}, {now_date} {now_time}",
+            f"Stream schedule (all times {tz}): {', '.join(parts)}",
+        ]
+        next_slot = ProviderDirector._next_stream_slot(slots=filtered, now_local=now_local)
+        if next_slot is not None:
+            next_day = str(next_slot.get("day", "")).capitalize()
+            next_time = str(next_slot.get("time", "")).strip()
+            next_note = str(next_slot.get("note", "")).strip()
+            next_line = f"Next scheduled stream: {next_day} {next_time} {tz}"
+            if next_note:
+                next_line += f" ({next_note})"
+            lines.append(next_line)
         override = str(raw.get("next_stream_override", "")).strip()
         if override:
-            line += f"\nSchedule note: {override}"
-        return line
+            lines.append(f"Schedule note: {override}")
+        return "\n".join(lines)
 
     @staticmethod
     def _extract_topic_anchor(message: str) -> str:
@@ -1176,10 +1465,21 @@ class ProviderDirector:
                 continuation_capped = True
                 continuation_reason = "CAPPED"
 
-        should_evaluate = (addressed and trigger) or continuation
+        track_cmd = detect_track_command(event.message)
+        allow_unaddressed_track_id = (
+            not addressed
+            and not continuation
+            and self._allow_unaddressed_track_id(
+                message=event.message,
+                metadata=metadata,
+                category=category,
+                now_playing_available=now_playing_available,
+                track_command=track_cmd,
+            )
+        )
+        should_evaluate = (addressed and trigger) or continuation or allow_unaddressed_track_id
 
         # Phase C: bang-command gate (skill toggle)
-        track_cmd = detect_track_command(event.message)
         if track_cmd:
             skill_enabled = metadata.get("track_id_skill_enabled", False)
             if skill_enabled:
@@ -1210,6 +1510,7 @@ class ProviderDirector:
                         "continuation_reason": continuation_reason,
                         "continuation_capped": continuation_capped,
                         "continuation_streak": self._continuation_streak.get(viewer_key, 0) if viewer_key else 0,
+                        "unaddressed_track_id_gate": allow_unaddressed_track_id,
                         "track_command": track_cmd,
                         "track_id_skill_enabled": metadata.get("track_id_skill_enabled"),
                     },
@@ -1320,6 +1621,7 @@ class ProviderDirector:
         action = "NOOP"
         route = "none"
         continuation_skipped = False
+        redundant_name_stripped = False
         if isinstance(out, str) and out.strip():
             raw = out.strip()
             # [SKIP] opt-out: only for continuation messages — LLM decided this isn't for Roonie
@@ -1335,6 +1637,9 @@ class ProviderDirector:
                         category=category,
                         user_message=event.message,
                     )
+                stripped = self._strip_redundant_addressee_name(text=response_text, metadata=metadata)
+                redundant_name_stripped = stripped != response_text
+                response_text = stripped
                 response_text = self._normalize_emote_spacing(response_text, approved_emotes)
                 action = "RESPOND_PUBLIC"
                 route = f"primary:{provider_used}"
@@ -1366,6 +1671,8 @@ class ProviderDirector:
                 "continuation_capped": continuation_capped,
                 "continuation_skipped": continuation_skipped,
                 "continuation_streak": self._continuation_streak.get(viewer_key, 0) if viewer_key else 0,
+                "unaddressed_track_id_gate": allow_unaddressed_track_id,
+                "redundant_name_stripped": redundant_name_stripped,
                 "routing_enabled": bool(routing_status.get("enabled", True)),
                 "track_command": track_cmd,
                 "track_id_skill_enabled": metadata.get("track_id_skill_enabled"),
