@@ -750,7 +750,7 @@ class ProviderDirector:
             return []
         aliases: List[str] = []
         display_name = str(metadata.get("display_name", "")).strip()
-        if display_name and display_name.lower() != viewer:
+        if display_name:
             aliases.append(display_name)
         raw = metadata.get("inner_circle", [])
         if isinstance(raw, list):
