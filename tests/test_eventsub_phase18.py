@@ -195,6 +195,60 @@ def test_eventsub_pipeline_disarmed_suppresses_and_does_not_send(tmp_path: Path,
     assert str(last_armed.get("session_id", "")).strip() == active_session_id
 
 
+
+def test_eventsub_sub_events_from_inner_circle_are_suppressed(tmp_path: Path, monkeypatch) -> None:
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    storage = DashboardStorage(runs_dir=tmp_path / "runs")
+    live_bridge = LiveChatBridge(storage=storage, account="bot")
+    eventsub_bridge = EventSubBridge(storage=storage, live_bridge=live_bridge)
+
+    ingest_calls: List[Dict[str, Any]] = []
+
+    def _ingest_stub(normalized_event: Dict[str, Any], *, text: str) -> Dict[str, Any]:
+        ingest_calls.append({"normalized_event": dict(normalized_event), "text": str(text)})
+        return {"emitted": True, "reason": "SENT", "session_id": "sid-1"}
+
+    monkeypatch.setattr(live_bridge, "ingest_eventsub_event", _ingest_stub)
+
+    blocked_users = ["cland3stine", "c0rcyra", "RuleOfRune"]
+    for idx, user in enumerate(blocked_users, start=1):
+        eventsub_bridge._on_event(
+            {
+                "event_type": "SUB",
+                "raw_type": "channel.subscribe",
+                "twitch_event_id": f"evt-sub-{idx}",
+                "user_login": user,
+                "display_name": user,
+                "tier": "1000",
+                "timestamp": "2026-02-28T00:00:01Z",
+            }
+        )
+
+    assert ingest_calls == []
+
+    eventsub_log_path = tmp_path / "logs" / "eventsub_events.jsonl"
+    rows = [
+        json.loads(line)
+        for line in eventsub_log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(rows) == len(blocked_users)
+    assert all(row["emitted"] is False for row in rows)
+    assert all(row["suppression_reason"] == "IGNORED_SELF_SUB" for row in rows)
+
+    eventsub_bridge._on_event(
+        {
+            "event_type": "FOLLOW",
+            "raw_type": "channel.follow",
+            "twitch_event_id": "evt-follow-1",
+            "user_login": "cland3stine",
+            "display_name": "cland3stine",
+            "timestamp": "2026-02-28T00:00:02Z",
+        }
+    )
+    assert len(ingest_calls) == 1
+
+
 def test_status_exposes_eventsub_runtime_fields(tmp_path: Path, monkeypatch) -> None:
     _set_dashboard_paths(monkeypatch, tmp_path)
     storage = DashboardStorage(runs_dir=tmp_path / "runs")

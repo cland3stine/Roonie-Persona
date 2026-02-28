@@ -12,6 +12,8 @@ def _utc_now_iso() -> str:
 
 
 class EventSubBridge:
+    _IGNORED_SUB_USERNAMES = {"cland3stine", "c0rcyra", "ruleofrune"}
+
     def __init__(
         self,
         *,
@@ -89,15 +91,31 @@ class EventSubBridge:
             return f"@RoonieTheCat heads up: raid from {display} ({count or 0} viewers)."
         return f"@RoonieTheCat heads up: {display} triggered {event_type}."
 
+    @staticmethod
+    def _normalize_username(value: Any) -> str:
+        return str(value or "").strip().lstrip("@").lower()
+
+    def _should_ignore_event(self, normalized: Dict[str, Any]) -> bool:
+        event_type = str(normalized.get("event_type", "UNKNOWN")).strip().upper()
+        if event_type != "SUB":
+            return False
+        user_login = self._normalize_username(normalized.get("user_login"))
+        display_name = self._normalize_username(normalized.get("display_name"))
+        actor = user_login or display_name
+        return bool(actor and actor in self._IGNORED_SUB_USERNAMES)
+
     def _on_event(self, normalized: Dict[str, Any]) -> None:
         event_type = str(normalized.get("event_type", "UNKNOWN")).strip().upper()
         event_id = str(normalized.get("twitch_event_id", "")).strip()
-        result: Dict[str, Any] = {}
-        try:
-            result = self._live_bridge.ingest_eventsub_event(normalized, text=self._eventsub_text(normalized))
-        except Exception as exc:
-            result = {"emitted": False, "reason": f"INGEST_ERROR:{exc}", "session_id": None}
-            self._log(f"[EventSubBridge] ingest failed event_id={event_id} error={exc}")
+        result: Dict[str, Any]
+        if self._should_ignore_event(normalized):
+            result = {"emitted": False, "reason": "IGNORED_SELF_SUB", "session_id": None}
+        else:
+            try:
+                result = self._live_bridge.ingest_eventsub_event(normalized, text=self._eventsub_text(normalized))
+            except Exception as exc:
+                result = {"emitted": False, "reason": f"INGEST_ERROR:{exc}", "session_id": None}
+                self._log(f"[EventSubBridge] ingest failed event_id={event_id} error={exc}")
 
         if hasattr(self._storage, "record_eventsub_notification"):
             result_session_raw = result.get("session_id")

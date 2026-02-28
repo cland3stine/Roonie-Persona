@@ -312,6 +312,55 @@ def test_pascal_case_proper_noun_mid_sentence_does_not_trigger_disallowed_emote(
     assert len(send_calls) == 1
 
 
+def test_time_tokens_with_allowed_emote_do_not_trigger_disallowed_emote(tmp_path, monkeypatch) -> None:
+    import responders.output_gate as output_gate
+
+    _ = _set_runtime_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_OUTPUT_DISABLED", "0")
+    monkeypatch.setenv("ROONIE_OUTPUT_RATE_LIMIT_SECONDS", "0")
+    output_gate._LAST_EMIT_TS = 0.0
+    output_gate._LAST_EMIT_BY_KEY.clear()
+
+    send_calls: List[Dict[str, Any]] = []
+
+    def _spy_handle_output(self, output: Dict[str, Any], metadata: Dict[str, Any]) -> None:
+        send_calls.append({"output": dict(output), "metadata": dict(metadata)})
+
+    monkeypatch.setattr("adapters.twitch_output.TwitchOutputAdapter.handle_output", _spy_handle_output)
+
+    allow_list = ["ruleof6Tune (music note)"]
+    response_text = (
+        "@ruleofrune next one is Thursday 7PM ET, then Saturday 10AM prep talk. "
+        "ruleof6Tune"
+    )
+    monkeypatch.setattr(
+        "roonie.provider_director.ProviderDirector.evaluate",
+        _provider_stub(response_text, allow_list),
+    )
+
+    allowed_path = run_payload(
+        _live_payload("allow-time-token", "evt-allow-time-token", "when's the next stream @RoonieTheCat"),
+        emit_outputs=True,
+    )
+    allowed_doc = json.loads(allowed_path.read_text(encoding="utf-8"))
+    assert allowed_doc["outputs"][0]["emitted"] is True
+    assert allowed_doc["outputs"][0]["reason"] == "EMITTED"
+    assert len(send_calls) == 1
+
+    monkeypatch.setattr(
+        "roonie.provider_director.ProviderDirector.evaluate",
+        _provider_stub("@ruleofrune next one is 7PM ET BibleThump", allow_list),
+    )
+    blocked_path = run_payload(
+        _live_payload("block-real-emote", "evt-block-real-emote", "when's the next stream @RoonieTheCat"),
+        emit_outputs=True,
+    )
+    blocked_doc = json.loads(blocked_path.read_text(encoding="utf-8"))
+    assert blocked_doc["outputs"][0]["emitted"] is False
+    assert blocked_doc["outputs"][0]["reason"] == "DISALLOWED_EMOTE"
+    assert len(send_calls) == 1
+
+
 def test_echoed_disallowed_emote_token_from_viewer_message_is_allowed(tmp_path, monkeypatch) -> None:
     import responders.output_gate as output_gate
 

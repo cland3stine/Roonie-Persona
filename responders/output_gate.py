@@ -10,6 +10,7 @@ from roonie.behavior_spec import cooldown_for_category
 _LAST_EMIT_TS = 0.0
 _LAST_EMIT_BY_KEY: Dict[str, float] = {}
 _TOKEN_RE = re.compile(r"\b[A-Za-z0-9_]{3,32}\b")
+_TIME_TOKEN_RE = re.compile(r"^(?:[1-9]|1[0-2])[AaPp][Mm]$")
 
 
 def _emit_cooldown_seconds() -> float:
@@ -104,6 +105,10 @@ def _looks_like_emote_token(token: str) -> bool:
     return False
 
 
+def _looks_like_time_token(token: str) -> bool:
+    return bool(_TIME_TOKEN_RE.match(str(token or "").strip()))
+
+
 def _disallowed_emote_in_text(text: str, allowed: List[str], *, message_text: str = "") -> str | None:
     allowed_set = {
         normalized
@@ -128,6 +133,9 @@ def _disallowed_emote_in_text(text: str, allowed: List[str], *, message_text: st
         # If the token came from the viewer's message, allow echoing it
         # so Roonie can discuss unknown third-party emotes without suppression.
         if token.lower() in message_tokens:
+            continue
+        # Common schedule tokens like "7PM"/"10AM" are not emotes.
+        if _looks_like_time_token(token):
             continue
         if not _looks_like_emote_token(token):
             continue
