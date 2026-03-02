@@ -596,6 +596,7 @@ function useDashboardData(activePage) {
   const [viewerNotesData, setViewerNotesData] = useState([]);
   const [memoryPendingData, setMemoryPendingData] = useState([]);
   const [innerCircleData, setInnerCircleData] = useState(null);
+  const [ignoreListData, setIgnoreListData] = useState(null);
   const [scheduleData, setScheduleData] = useState(null);
   const [calendarEventsData, setCalendarEventsData] = useState(null);
   const [twitchStatusData, setTwitchStatusData] = useState(null);
@@ -620,7 +621,7 @@ function useDashboardData(activePage) {
     }
     refreshDataInFlightRef.current = true;
     try {
-      const [authRes, statusRes, eventsRes, suppressionsRes, operatorRes, queueRes, studioProfileRes, libraryStatusRes, logsEventsRes, logsSuppressionsRes, logsOperatorRes, providersStatusRes, routingStatusRes, sensesStatusRes, memoryCulturalRes, memoryViewersRes, memoryPendingRes, twitchStatusRes, innerCircleRes, scheduleRes, audioConfigRes, trackrConfigRes] = await Promise.all([
+      const [authRes, statusRes, eventsRes, suppressionsRes, operatorRes, queueRes, studioProfileRes, libraryStatusRes, logsEventsRes, logsSuppressionsRes, logsOperatorRes, providersStatusRes, routingStatusRes, sensesStatusRes, memoryCulturalRes, memoryViewersRes, memoryPendingRes, twitchStatusRes, innerCircleRes, ignoreListRes, scheduleRes, audioConfigRes, trackrConfigRes] = await Promise.all([
         apiFetch(`${API_BASE}/api/auth/me`),
         apiFetch(`${API_BASE}/api/status`),
         apiFetch(`${API_BASE}/api/events?limit=5`),
@@ -640,6 +641,7 @@ function useDashboardData(activePage) {
         apiFetch(`${API_BASE}/api/memory/pending?limit=100&offset=0`),
         apiFetch(`${API_BASE}/api/twitch/status`),
         apiFetch(`${API_BASE}/api/inner_circle`),
+        apiFetch(`${API_BASE}/api/ignore_list`),
         apiFetch(`${API_BASE}/api/stream_schedule`),
         apiFetch(`${API_BASE}/api/audio_config`),
         apiFetch(`${API_BASE}/api/trackr/config`),
@@ -689,6 +691,9 @@ function useDashboardData(activePage) {
       }
       if (innerCircleRes.ok) {
         setInnerCircleData(await innerCircleRes.json());
+      }
+      if (ignoreListRes.ok) {
+        setIgnoreListData(await ignoreListRes.json());
       }
       if (scheduleRes.ok) {
         setScheduleData(await scheduleRes.json());
@@ -937,6 +942,34 @@ function useDashboardData(activePage) {
       }
     } catch (err) {
       console.error("[Dashboard] inner_circle save error", err);
+    } finally {
+      await refreshData();
+    }
+  };
+
+  const saveIgnoreList = async (payload) => {
+    const headers = buildOperatorHeaders({ json: true });
+    try {
+      const response = await apiFetch(`${API_BASE}/api/ignore_list`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify(payload || {}),
+      });
+      if (!response.ok) {
+        let detail = response.statusText;
+        try {
+          const body = await response.json();
+          detail = body.detail || body.error || detail;
+        } catch (_err) {
+          // Keep status text fallback.
+        }
+        console.error(`[Dashboard] ignore_list save failed (${response.status}) ${detail}`);
+      } else {
+        const body = await response.json();
+        if (body && body.ignore_list) setIgnoreListData(body.ignore_list);
+      }
+    } catch (err) {
+      console.error("[Dashboard] ignore_list save error", err);
     } finally {
       await refreshData();
     }
@@ -1723,6 +1756,7 @@ function useDashboardData(activePage) {
     viewerNotesData,
     memoryPendingData,
     innerCircleData,
+    ignoreListData,
     scheduleData,
     calendarEventsData,
     fetchCalendarEvents,
@@ -1737,6 +1771,7 @@ function useDashboardData(activePage) {
     busyAction,
     saveStudioProfile,
     saveInnerCircle,
+    saveIgnoreList,
     saveStreamSchedule,
     searchLibraryIndex,
     uploadLibraryXml,
@@ -2412,6 +2447,7 @@ function TrackrPage({ trackrConfigData, trackrStatusData, saveTrackrConfig }) {
 
 function LogsPage({ eventsData, suppressionsData, operatorLogData }) {
   const [at, setAt] = useState("messages");
+  const [hideNoop, setHideNoop] = useState(true);
   const tabs = [{ id: "messages", label: "MESSAGE LOG" }, { id: "operator", label: "OPERATOR LOG" }];
 
   // Unified event stream: merge events + suppressions, deduplicate by ts+user_handle, sort by time desc
@@ -2421,6 +2457,9 @@ function LogsPage({ eventsData, suppressionsData, operatorLogData }) {
     const key = `${e.ts || ""}|${e.user_handle || ""}|${e.message_text || ""}`;
     if (seen.has(key)) return false;
     seen.add(key);
+    return true;
+  }).filter((e) => {
+    if (hideNoop && String(e.decision_type || "").toLowerCase() === "noop") return false;
     return true;
   }).sort((a, b) => {
     const ta = a.ts ? new Date(a.ts).getTime() : 0;
@@ -2448,6 +2487,16 @@ function LogsPage({ eventsData, suppressionsData, operatorLogData }) {
         {at === "messages" && (
           <>
             <RackLabel>Recent Messages</RackLabel>
+            <div style={{ marginBottom: 8 }}>
+              <button onClick={() => setHideNoop(!hideNoop)} style={{
+                background: "transparent",
+                border: `1px solid ${hideNoop ? "#ff851b44" : "#333"}`,
+                color: hideNoop ? "#ff851b" : "#555",
+                padding: "4px 12px", fontSize: 9, letterSpacing: 1.5,
+                fontFamily: "'JetBrains Mono', monospace", fontWeight: 600,
+                cursor: "pointer", borderRadius: 2,
+              }}>{hideNoop ? "NOOP HIDDEN" : "SHOW ALL"}</button>
+            </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
               <MessageRows items={unified} emptyMessage="No messages logged" />
             </div>
@@ -4286,6 +4335,100 @@ function InnerCirclePage({ innerCircleData, saveInnerCircle }) {
   );
 }
 
+// --- PAGE: IGNORE LIST ---
+
+function IgnoreListPage({ ignoreListData, saveIgnoreList }) {
+  const entries = Array.isArray(ignoreListData?.entries) ? ignoreListData.entries : [];
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState([]);
+
+  const inputStyle = { background: "#111114", border: "1px solid #2a2a2e", borderRadius: 2, padding: "4px 8px", color: "#aaa", fontSize: 11, fontFamily: "'IBM Plex Sans', sans-serif", outline: "none", boxSizing: "border-box" };
+  const editBtnStyle = { background: "transparent", border: "1px dashed #333", color: "#555", padding: "8px 16px", fontSize: 10, letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", cursor: "pointer", borderRadius: 2, width: "100%" };
+  const saveBtnStyle = { ...editBtnStyle, border: "1px solid #2ecc4066", color: "#2ecc40" };
+  const cancelBtnStyle = { ...editBtnStyle };
+
+  const startEditing = () => {
+    setDraft(entries.map((e) => ({ ...e })));
+    setEditing(true);
+  };
+
+  const cancelEditing = () => setEditing(false);
+
+  const cleanUsername = (raw) => String(raw || "").trim().replace(/^@+/, "").toLowerCase();
+
+  const saveEntries = async () => {
+    const cleaned = draft
+      .filter((e) => cleanUsername(e.username))
+      .map((e) => ({
+        username: cleanUsername(e.username),
+        reason: String(e.reason || "").trim(),
+        added_at: e.added_at || new Date().toISOString(),
+      }));
+    const seen = new Set();
+    const deduped = cleaned.filter((e) => {
+      if (seen.has(e.username)) return false;
+      seen.add(e.username);
+      return true;
+    });
+    await saveIgnoreList({ version: 1, entries: deduped });
+    setEditing(false);
+  };
+
+  const updateDraftField = (idx, field, value) => {
+    const next = [...draft];
+    next[idx] = { ...next[idx], [field]: value };
+    setDraft(next);
+  };
+
+  return (
+    <div>
+      <RackPanel>
+        <RackLabel>Ignore List</RackLabel>
+        <div style={{ fontSize: 10, color: "#555", fontFamily: "'IBM Plex Sans', sans-serif", marginBottom: 12 }}>
+          Users on this list are completely ignored. No LLM call, no context buffer entry, no trace file. Messages still count as chat activity for the quiet-nudge timer.
+        </div>
+        {editing ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {draft.length > 0 && (
+              <div style={{ display: "grid", gridTemplateColumns: "160px 1fr 20px", gap: 6, marginBottom: 2 }}>
+                <span style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>USERNAME</span>
+                <span style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>REASON</span>
+                <span />
+              </div>
+            )}
+            {draft.map((e, i) => (
+              <div key={i} style={{ display: "grid", gridTemplateColumns: "160px 1fr 20px", gap: 6, alignItems: "center" }}>
+                <input type="text" value={e.username} onChange={(ev) => updateDraftField(i, "username", ev.target.value)} placeholder="username" style={inputStyle} />
+                <input type="text" value={e.reason || ""} onChange={(ev) => updateDraftField(i, "reason", ev.target.value)} placeholder="reason (optional)" style={inputStyle} />
+                <span onClick={() => { const next = [...draft]; next.splice(i, 1); setDraft(next); }} style={{ color: "#ff4136", fontSize: 13, cursor: "pointer", fontFamily: "'JetBrains Mono', monospace", textAlign: "center", flexShrink: 0 }}>&times;</span>
+              </div>
+            ))}
+            <div onClick={() => setDraft([...draft, { username: "", reason: "", added_at: "" }])} style={{ fontSize: 10, color: "#555", letterSpacing: 1, fontFamily: "'JetBrains Mono', monospace", cursor: "pointer", marginTop: 4 }}>+ ADD USER</div>
+            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+              <button onClick={saveEntries} style={saveBtnStyle}>SAVE</button>
+              <button onClick={cancelEditing} style={cancelBtnStyle}>CANCEL</button>
+            </div>
+          </div>
+        ) : (
+          <div>
+            {entries.map((e, idx) => (
+              <div key={e.username || idx} style={{ padding: "10px 12px", marginBottom: 6, background: "#15151a", border: "1px solid #222", borderRadius: 2 }}>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: e.reason ? 4 : 0 }}>
+                  <span style={{ fontSize: 11, color: "#ff4136", fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>@{e.username}</span>
+                  {e.added_at ? <span style={{ fontSize: 9, color: "#444", fontFamily: "'JetBrains Mono', monospace" }}>{new Date(e.added_at).toLocaleDateString()}</span> : null}
+                </div>
+                {e.reason ? <div style={{ fontSize: 12, color: "#888", fontFamily: "'IBM Plex Sans', sans-serif", lineHeight: 1.4 }}>{e.reason}</div> : null}
+              </div>
+            ))}
+            {!entries.length ? <div style={{ padding: "6px 0", fontSize: 11, color: "#666", fontFamily: "'IBM Plex Sans', sans-serif" }}>No users ignored</div> : null}
+            <button onClick={startEditing} style={{ ...editBtnStyle, marginTop: 8 }}>EDIT IGNORE LIST</button>
+          </div>
+        )}
+      </RackPanel>
+    </div>
+  );
+}
+
 // --- PAGE: CULTURAL SNAPSHOT ---
 
 function CulturalSnapshotPage({ logsEventsData = [], logsSuppressionsData = [], statusData = {} }) {
@@ -4407,6 +4550,8 @@ function BehaviorPage({
   reviewMemoryPending,
   innerCircleData,
   saveInnerCircle,
+  ignoreListData,
+  saveIgnoreList,
 }) {
   const [tab, setTab] = useState("snapshot");
   const tabs = [
@@ -4415,6 +4560,7 @@ function BehaviorPage({
     { id: "room", label: "ROOM NOTES" },
     { id: "viewer", label: "VIEWER NOTES" },
     { id: "inner", label: "INNER CIRCLE" },
+    { id: "ignore", label: "IGNORE LIST" },
   ];
 
   return (
@@ -4490,6 +4636,7 @@ function BehaviorPage({
         />
       )}
       {tab === "inner" && <InnerCirclePage innerCircleData={innerCircleData} saveInnerCircle={saveInnerCircle} />}
+      {tab === "ignore" && <IgnoreListPage ignoreListData={ignoreListData} saveIgnoreList={saveIgnoreList} />}
     </div>
   );
 }
@@ -4844,6 +4991,7 @@ export default function RoonieControlRoom() {
     viewerNotesData,
     memoryPendingData,
     innerCircleData,
+    ignoreListData,
     scheduleData,
     calendarEventsData,
     fetchCalendarEvents,
@@ -4858,6 +5006,7 @@ export default function RoonieControlRoom() {
     busyAction,
     saveStudioProfile,
     saveInnerCircle,
+    saveIgnoreList,
     saveStreamSchedule,
     searchLibraryIndex,
     uploadLibraryXml,
@@ -4932,6 +5081,8 @@ export default function RoonieControlRoom() {
             reviewMemoryPending={reviewMemoryPending}
             innerCircleData={innerCircleData}
             saveInnerCircle={saveInnerCircle}
+            ignoreListData={ignoreListData}
+            saveIgnoreList={saveIgnoreList}
           />
         );
       case "providers": return <ProvidersPage statusData={statusData} providersStatusData={providersStatusData} routingStatusData={routingStatusData} systemHealthData={systemHealthData} readinessData={readinessData} setProviderActive={setProviderActive} setProviderCaps={setProviderCaps} patchProviderWeights={patchProviderWeights} setRoutingEnabled={setRoutingEnabled} setActiveDirector={setActiveDirector} setDryRunEnabled={setDryRunEnabled} />;

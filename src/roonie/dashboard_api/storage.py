@@ -336,6 +336,7 @@ class DashboardStorage:
         self._twitch_config_path = self.data_dir / "twitch_config.json"
         self._studio_profile_path = self.data_dir / "studio_profile.json"
         self._inner_circle_path = self.data_dir / "inner_circle.json"
+        self._ignore_list_path = self.data_dir / "ignore_list.json"
         self._stream_schedule_path = self.data_dir / "stream_schedule.json"
         self._audio_config_path = self.data_dir / "audio_config.json"
         self._trackr_config_path = self.data_dir / "trackr_config.json"
@@ -2710,6 +2711,135 @@ class DashboardStorage:
 
         changed_keys = [
             key for key in ("members",)
+            if old.get(key) != new.get(key)
+        ]
+        old_hash = _json_sha256(old)
+        new_hash = _json_sha256(new)
+        audit_payload = {
+            "changed_keys": changed_keys,
+            "old_snapshot_hash": old_hash,
+            "new_snapshot_hash": new_hash,
+            "mode": "patch" if patch else "put",
+        }
+        return new, audit_payload
+
+    # ── ignore_list ─────────────────────────────────────────────
+
+    @staticmethod
+    def _default_ignore_list() -> Dict[str, Any]:
+        return {
+            "version": 1,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_by": "system",
+            "entries": [],
+        }
+
+    def _coerce_ignore_list_fields(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ValueError("ignore_list payload must be an object.")
+        entries_raw = payload.get("entries", [])
+        if not isinstance(entries_raw, list):
+            raise ValueError("entries must be a list.")
+        if len(entries_raw) > 200:
+            raise ValueError("entries exceeds maximum size (200).")
+        entries: List[Dict[str, str]] = []
+        seen_usernames: set[str] = set()
+        for idx, item in enumerate(entries_raw):
+            if not isinstance(item, dict):
+                raise ValueError(f"entries[{idx}] must be an object.")
+            username = self._bounded_text(
+                item.get("username"),
+                field_name=f"entries[{idx}].username",
+                max_len=40,
+                required=True,
+            ).lower()
+            reason = self._bounded_text(
+                item.get("reason"),
+                field_name=f"entries[{idx}].reason",
+                max_len=200,
+                required=False,
+            )
+            added_at = str(item.get("added_at", "")).strip()
+            if not added_at:
+                added_at = datetime.now(timezone.utc).isoformat()
+            key = username.lower()
+            if key in seen_usernames:
+                raise ValueError(f"Duplicate username: {username}")
+            seen_usernames.add(key)
+            entries.append({
+                "username": username,
+                "reason": reason,
+                "added_at": added_at,
+            })
+        return {"version": 1, "entries": entries}
+
+    def _normalize_ignore_list_for_read(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        fields = self._coerce_ignore_list_fields(payload)
+        updated_at_raw = payload.get("updated_at")
+        updated_at = _format_iso(_parse_iso(str(updated_at_raw))) if updated_at_raw else None
+        return {
+            **fields,
+            "updated_at": updated_at or datetime.now(timezone.utc).isoformat(),
+            "updated_by": self.normalize_actor(payload.get("updated_by")),
+        }
+
+    def _normalize_ignore_list_for_write(self, payload: Dict[str, Any], actor: str) -> Dict[str, Any]:
+        fields = self._coerce_ignore_list_fields(payload)
+        return {
+            **fields,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_by": self.normalize_actor(actor),
+        }
+
+    def _read_or_create_ignore_list_locked(self) -> Dict[str, Any]:
+        raw = _safe_read_json(self._ignore_list_path)
+        if isinstance(raw, dict):
+            try:
+                return self._normalize_ignore_list_for_read(raw)
+            except ValueError:
+                pass
+        default = self._default_ignore_list()
+        self._write_json_atomic(self._ignore_list_path, default)
+        return default
+
+    def get_ignore_list(self) -> Dict[str, Any]:
+        with self._lock:
+            il = self._read_or_create_ignore_list_locked()
+            self._write_json_atomic(self._ignore_list_path, il)
+            return deepcopy(il)
+
+    def get_ignored_usernames(self) -> frozenset:
+        with self._lock:
+            il = self._read_or_create_ignore_list_locked()
+        entries = il.get("entries", [])
+        return frozenset(
+            str(e.get("username", "")).strip().lower()
+            for e in entries
+            if isinstance(e, dict) and str(e.get("username", "")).strip()
+        )
+
+    def update_ignore_list(
+        self,
+        payload: Dict[str, Any],
+        *,
+        actor: Optional[str] = None,
+        patch: bool = False,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid JSON payload.")
+        actor_norm = self.normalize_actor(actor)
+        with self._lock:
+            old = self._read_or_create_ignore_list_locked()
+            merged = (
+                self._merge_dicts(old, payload)
+                if patch
+                else self._merge_dicts(self._default_ignore_list(), payload)
+            )
+            new = self._normalize_ignore_list_for_write(merged, actor_norm)
+            self._write_json_atomic(self._ignore_list_path, new)
+
+        changed_keys = [
+            key for key in ("entries",)
             if old.get(key) != new.get(key)
         ]
         old_hash = _json_sha256(old)

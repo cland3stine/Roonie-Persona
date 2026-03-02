@@ -23,6 +23,8 @@ _MENTION_RE = re.compile(r"@([A-Za-z0-9_]{2,30})")
 
 _NICK_ALIASES = {"roonie", "roony", "runie", "runi", "rooney"}
 
+_IGNORED_BOTS: frozenset[str] = frozenset({"ror_ai"})
+
 
 class LiveChatBridge:
     def __init__(
@@ -391,6 +393,17 @@ class LiveChatBridge:
     def _emit_one(self, msg: TwitchMsg, *, bot_nick: str) -> None:
         self._last_chat_ts = time.time()
         viewer = str(msg.nick or "viewer")
+        viewer_lower = viewer.strip().lower()
+        if viewer_lower in _IGNORED_BOTS:
+            self._log(f"[LiveChatBridge] ignored bot: {viewer}")
+            return
+        if hasattr(self._storage, "get_ignored_usernames"):
+            try:
+                if viewer_lower in self._storage.get_ignored_usernames():
+                    self._log(f"[LiveChatBridge] ignored user: {viewer}")
+                    return
+            except Exception:
+                pass  # fail-open
         text = str(msg.message or "")
         is_direct = self._is_direct_mention(msg, bot_nick)
         tags = msg.tags if isinstance(msg.tags, dict) else {}

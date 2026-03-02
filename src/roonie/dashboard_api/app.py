@@ -29,6 +29,7 @@ _SENSITIVE_GET_REQUIRED_ROLE: Dict[str, str] = {
     "/api/twitch/channel_emotes": "operator",
     "/api/studio_profile": "operator",
     "/api/inner_circle": "operator",
+    "/api/ignore_list": "operator",
     "/api/stream_schedule": "operator",
     "/api/audio_config": "operator",
     "/api/providers/status": "operator",
@@ -712,6 +713,47 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
             )
             _json_response(self, {"ok": True, "inner_circle": circle, "audit": audit.to_dict()})
 
+        def _handle_ignore_list_write(self, *, patch: bool) -> None:
+            ok_body, payload = self._read_json_body()
+            if not ok_body:
+                _json_response(
+                    self,
+                    {"ok": False, "error": "bad_request", "detail": "Invalid JSON body."},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            identity = self._authorize_write(
+                action="IGNORE_LIST_UPDATE",
+                payload=payload,
+                required_role="operator",
+            )
+            if identity is None:
+                return
+            try:
+                ignore_list, diff_payload = storage.update_ignore_list(
+                    payload,
+                    actor=(identity.get("username") or identity.get("actor")),
+                    patch=patch,
+                )
+            except ValueError as exc:
+                _json_response(
+                    self,
+                    {"ok": False, "error": "bad_request", "detail": str(exc)},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            audit = storage.record_operator_action(
+                operator=identity["operator"],
+                action="IGNORE_LIST_UPDATE",
+                payload=diff_payload,
+                result="OK",
+                actor=identity["actor"],
+                username=identity.get("username"),
+                role=identity.get("role"),
+                auth_mode=identity.get("auth_mode"),
+            )
+            _json_response(self, {"ok": True, "ignore_list": ignore_list, "audit": audit.to_dict()})
+
         def _handle_stream_schedule_write(self, *, patch: bool) -> None:
             ok_body, payload = self._read_json_body()
             if not ok_body:
@@ -1076,6 +1118,9 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
                 return
             if path == "/api/inner_circle":
                 _json_response(self, storage.get_inner_circle())
+                return
+            if path == "/api/ignore_list":
+                _json_response(self, storage.get_ignore_list())
                 return
             if path == "/api/stream_schedule":
                 _json_response(self, storage.get_stream_schedule())
@@ -2468,6 +2513,9 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
             if parsed.path == "/api/inner_circle":
                 self._handle_inner_circle_write(patch=False)
                 return
+            if parsed.path == "/api/ignore_list":
+                self._handle_ignore_list_write(patch=False)
+                return
             if parsed.path == "/api/stream_schedule":
                 self._handle_stream_schedule_write(patch=False)
                 return
@@ -2500,6 +2548,9 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
                 return
             if parsed.path == "/api/inner_circle":
                 self._handle_inner_circle_write(patch=True)
+                return
+            if parsed.path == "/api/ignore_list":
+                self._handle_ignore_list_write(patch=True)
                 return
             if parsed.path == "/api/stream_schedule":
                 self._handle_stream_schedule_write(patch=True)
