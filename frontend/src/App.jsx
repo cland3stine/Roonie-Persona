@@ -7,7 +7,7 @@ const PAGES_TOP = [
   { id: "announcements", label: "ANNOUNCE & EVENTS" },
   { id: "trackr", label: "TRACKR" },
   { id: "library", label: "LIBRARY INDEX" },
-  { id: "schedule", label: "SCHEDULE" },
+  { id: "calendar", label: "CALENDAR" },
 ];
 
 const PAGES_BOTTOM = [
@@ -597,6 +597,7 @@ function useDashboardData(activePage) {
   const [memoryPendingData, setMemoryPendingData] = useState([]);
   const [innerCircleData, setInnerCircleData] = useState(null);
   const [scheduleData, setScheduleData] = useState(null);
+  const [calendarEventsData, setCalendarEventsData] = useState(null);
   const [twitchStatusData, setTwitchStatusData] = useState(null);
   const [twitchNotice, setTwitchNotice] = useState("");
   const refreshDataInFlightRef = useRef(false);
@@ -803,6 +804,10 @@ function useDashboardData(activePage) {
         fetches.push(apiFetch(`${API_BASE}/api/stream_schedule`));
         handlers.push((res) => res.ok && res.json().then(setScheduleData));
       }
+      if (page === "calendar") {
+        fetches.push(apiFetch(`${API_BASE}/api/calendar/events`));
+        handlers.push((res) => res.ok && res.json().then(setCalendarEventsData));
+      }
       if (page === "trackr") {
         fetches.push(apiFetch(`${API_BASE}/api/trackr/config`));
         handlers.push((res) => res.ok && res.json().then(setTrackrConfigData));
@@ -963,6 +968,94 @@ function useDashboardData(activePage) {
     } finally {
       await refreshData();
     }
+  };
+
+  const fetchCalendarEvents = async (startDate, endDate) => {
+    try {
+      let url = `${API_BASE}/api/calendar/events`;
+      if (startDate && endDate) url += `?start_date=${startDate}&end_date=${endDate}`;
+      const res = await apiFetch(url);
+      if (res.ok) {
+        const body = await res.json();
+        setCalendarEventsData(body);
+        return body;
+      }
+    } catch (err) {
+      console.error("[Dashboard] calendar fetch error", err);
+    }
+    return null;
+  };
+
+  const createCalendarEvent = async (payload) => {
+    const headers = buildOperatorHeaders({ json: true });
+    try {
+      const res = await apiFetch(`${API_BASE}/api/calendar/events`, {
+        method: "POST", headers, body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        console.error(`[Dashboard] calendar create failed (${res.status})`, body.detail || body.error);
+        return null;
+      }
+      const body = await res.json();
+      return body.event || null;
+    } catch (err) {
+      console.error("[Dashboard] calendar create error", err);
+      return null;
+    }
+  };
+
+  const saveCalendarEvent = async (eventId, payload, { patch = true } = {}) => {
+    const headers = buildOperatorHeaders({ json: true });
+    try {
+      const res = await apiFetch(`${API_BASE}/api/calendar/events/${eventId}`, {
+        method: patch ? "PATCH" : "PUT", headers, body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        console.error(`[Dashboard] calendar update failed (${res.status})`, body.detail || body.error);
+        return null;
+      }
+      const body = await res.json();
+      return body.event || null;
+    } catch (err) {
+      console.error("[Dashboard] calendar update error", err);
+      return null;
+    }
+  };
+
+  const deleteCalendarEvent = async (eventId) => {
+    const headers = buildOperatorHeaders({ json: true });
+    try {
+      const res = await apiFetch(`${API_BASE}/api/calendar/events/${eventId}`, {
+        method: "DELETE", headers,
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        console.error(`[Dashboard] calendar delete failed (${res.status})`, body.detail || body.error);
+        return false;
+      }
+      return true;
+    } catch (err) {
+      console.error("[Dashboard] calendar delete error", err);
+      return false;
+    }
+  };
+
+  const migrateScheduleToCalendar = async () => {
+    const headers = buildOperatorHeaders({ json: true });
+    try {
+      const res = await apiFetch(`${API_BASE}/api/calendar/migrate`, {
+        method: "POST", headers, body: "{}",
+      });
+      if (res.ok) {
+        const body = await res.json();
+        return body.migration || null;
+      }
+    } catch (err) {
+      console.error("[Dashboard] calendar migrate error", err);
+    }
+    return null;
   };
 
   const saveAudioConfig = async (patch) => {
@@ -1631,6 +1724,12 @@ function useDashboardData(activePage) {
     memoryPendingData,
     innerCircleData,
     scheduleData,
+    calendarEventsData,
+    fetchCalendarEvents,
+    createCalendarEvent,
+    saveCalendarEvent,
+    deleteCalendarEvent,
+    migrateScheduleToCalendar,
     twitchStatusData,
     twitchNotice,
     setTwitchNotice,
@@ -3641,6 +3740,452 @@ function SchedulePage({ scheduleData, saveStreamSchedule }) {
   );
 }
 
+// --- PAGE: CALENDAR ---
+
+const CATEGORY_COLORS = { stream: "#2ecc40", content: "#3498db", community: "#f1c40f", personal: "#9b59b6" };
+const CATEGORY_LABELS = { stream: "Stream", content: "Content", community: "Community", personal: "Personal" };
+const WEEKDAY_HEADERS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+function getMonthGrid(year, month) {
+  const first = new Date(year, month, 1);
+  const last = new Date(year, month + 1, 0);
+  const startDay = first.getDay();
+  const totalDays = last.getDate();
+  const cells = [];
+  // Previous month padding
+  const prevLast = new Date(year, month, 0).getDate();
+  for (let i = startDay - 1; i >= 0; i--) cells.push({ day: prevLast - i, month: month - 1, year: month === 0 ? year - 1 : year, outside: true });
+  // Current month
+  for (let d = 1; d <= totalDays; d++) cells.push({ day: d, month, year, outside: false });
+  // Next month padding
+  const remaining = 42 - cells.length;
+  for (let d = 1; d <= remaining; d++) cells.push({ day: d, month: month + 1, year: month === 11 ? year + 1 : year, outside: true });
+  return cells;
+}
+
+function formatDateKey(year, month, day) {
+  return `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function expandRecurringEvents(events, rangeStart, rangeEnd) {
+  if (!events || typeof events !== "object") return [];
+  const start = new Date(rangeStart + "T00:00:00");
+  const end = new Date(rangeEnd + "T23:59:59");
+  const result = [];
+  const entries = Array.isArray(events) ? events : Object.values(events);
+  for (const ev of entries) {
+    if (!ev || typeof ev !== "object") continue;
+    const rrule = ev.rrule;
+    if (!rrule) {
+      const d = new Date(ev.date + "T00:00:00");
+      if (d >= start && d <= end) result.push({ ...ev });
+      continue;
+    }
+    const freq = (rrule.freq || "").toUpperCase();
+    const interval = Math.max(1, rrule.interval || 1);
+    const byday = rrule.byday;
+    const until = rrule.until ? new Date(rrule.until + "T23:59:59") : null;
+    const count = rrule.count || null;
+    const evDate = new Date(ev.date + "T00:00:00");
+    const BYDAY_MAP = { SU: 0, MO: 1, TU: 2, WE: 3, TH: 4, FR: 5, SA: 6 };
+    const bydaySet = Array.isArray(byday) ? new Set(byday.map((b) => BYDAY_MAP[b]).filter((v) => v !== undefined)) : null;
+    let generated = 0;
+    if (freq === "WEEKLY") {
+      let cursor = new Date(evDate);
+      if (bydaySet) cursor = new Date(cursor.getTime() - cursor.getDay() * 86400000); // go to Sunday of that week
+      for (let iter = 0; iter < 730; iter++) {
+        if (until && cursor > until) break;
+        if (cursor > end) break;
+        if (count !== null && generated >= count) break;
+        if (bydaySet) {
+          const weekStart = new Date(cursor);
+          for (let off = 0; off < 7; off++) {
+            const d = new Date(weekStart.getTime() + off * 86400000);
+            if (!bydaySet.has(d.getDay())) continue;
+            if (d < evDate) continue;
+            if (until && d > until) break;
+            if (count !== null && generated >= count) break;
+            if (d >= start && d <= end) {
+              const dateStr = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+              result.push({ ...ev, date: dateStr, _occurrence: true });
+            }
+            generated++;
+          }
+          cursor = new Date(cursor.getTime() + interval * 7 * 86400000);
+        } else {
+          if (cursor >= evDate && cursor >= start && cursor <= end) {
+            const dateStr = cursor.getFullYear() + "-" + String(cursor.getMonth() + 1).padStart(2, "0") + "-" + String(cursor.getDate()).padStart(2, "0");
+            result.push({ ...ev, date: dateStr, _occurrence: true });
+          }
+          if (cursor >= evDate) generated++;
+          cursor = new Date(cursor.getTime() + interval * 7 * 86400000);
+        }
+      }
+    } else if (freq === "DAILY") {
+      let cursor = new Date(evDate);
+      for (let iter = 0; iter < 730; iter++) {
+        if (until && cursor > until) break;
+        if (cursor > end) break;
+        if (count !== null && generated >= count) break;
+        if (cursor >= start && cursor <= end) {
+          const dateStr = cursor.getFullYear() + "-" + String(cursor.getMonth() + 1).padStart(2, "0") + "-" + String(cursor.getDate()).padStart(2, "0");
+          result.push({ ...ev, date: dateStr, _occurrence: true });
+        }
+        generated++;
+        cursor = new Date(cursor.getTime() + interval * 86400000);
+      }
+    }
+  }
+  return result;
+}
+
+function CalendarPage({ calendarEventsData, fetchCalendarEvents, createCalendarEvent, saveCalendarEvent, deleteCalendarEvent, migrateScheduleToCalendar }) {
+  const now = new Date();
+  const [viewYear, setViewYear] = useState(now.getFullYear());
+  const [viewMonth, setViewMonth] = useState(now.getMonth());
+  const [modalOpen, setModalOpen] = useState(false);
+  const [modalMode, setModalMode] = useState("create"); // "create" | "edit"
+  const [editEvent, setEditEvent] = useState(null);
+  const [draft, setDraft] = useState({});
+  const [categoryFilters, setCategoryFilters] = useState({ stream: true, content: true, community: true, personal: true });
+  const [saving, setSaving] = useState(false);
+
+  const inputStyle = { background: "#111114", border: "1px solid #2a2a2e", borderRadius: 2, padding: "4px 8px", color: "#aaa", fontSize: 11, fontFamily: "'IBM Plex Sans', sans-serif", outline: "none", boxSizing: "border-box", width: "100%" };
+  const selectStyle = { ...inputStyle, cursor: "pointer" };
+  const btnStyle = { background: "transparent", border: "1px dashed #333", color: "#555", padding: "6px 14px", fontSize: 10, letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", cursor: "pointer", borderRadius: 2 };
+  const saveBtnStyle = { ...btnStyle, border: "1px solid #2ecc4066", color: "#2ecc40" };
+  const dangerBtnStyle = { ...btnStyle, border: "1px solid #ff413644", color: "#ff4136" };
+
+  // Fetch events when month changes
+  useEffect(() => {
+    const start = formatDateKey(viewYear, viewMonth, 1);
+    const lastDay = new Date(viewYear, viewMonth + 1, 0).getDate();
+    const end = formatDateKey(viewYear, viewMonth, lastDay);
+    fetchCalendarEvents(start, end);
+  }, [viewYear, viewMonth]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const goToday = () => { setViewYear(now.getFullYear()); setViewMonth(now.getMonth()); };
+  const goPrev = () => { if (viewMonth === 0) { setViewMonth(11); setViewYear(viewYear - 1); } else setViewMonth(viewMonth - 1); };
+  const goNext = () => { if (viewMonth === 11) { setViewMonth(0); setViewYear(viewYear + 1); } else setViewMonth(viewMonth + 1); };
+
+  const monthName = new Date(viewYear, viewMonth).toLocaleString("en-US", { month: "long" });
+  const grid = getMonthGrid(viewYear, viewMonth);
+  const todayKey = formatDateKey(now.getFullYear(), now.getMonth(), now.getDate());
+
+  // Expand recurring events for the visible range
+  const rangeStart = formatDateKey(grid[0].year, grid[0].month, grid[0].day);
+  const lastCell = grid[grid.length - 1];
+  const rangeEnd = formatDateKey(lastCell.year, lastCell.month, lastCell.day);
+  const rawEvents = calendarEventsData?.events || {};
+  const expandedEvents = expandRecurringEvents(rawEvents, rangeStart, rangeEnd);
+
+  // Group events by date
+  const eventsByDate = {};
+  for (const ev of expandedEvents) {
+    if (!categoryFilters[ev.category]) continue;
+    if (!eventsByDate[ev.date]) eventsByDate[ev.date] = [];
+    eventsByDate[ev.date].push(ev);
+  }
+
+  const openCreateModal = (dateKey) => {
+    setModalMode("create");
+    setEditEvent(null);
+    setDraft({ title: "", date: dateKey, start_time: "", end_time: "", category: "stream", description: "", assigned_to: "both", enabled: true, theme: "", genre_focus: "", guests: "", pre_stream_notes: "", post_stream_notes: "", rrule: null });
+    setModalOpen(true);
+  };
+
+  const openEditModal = (ev) => {
+    setModalMode("edit");
+    setEditEvent(ev);
+    setDraft({
+      title: ev.title || "", date: ev.date || "", start_time: ev.start_time || "", end_time: ev.end_time || "",
+      category: ev.category || "stream", description: ev.description || "", assigned_to: ev.assigned_to || "both",
+      enabled: ev.enabled !== false, theme: ev.theme || "", genre_focus: ev.genre_focus || "",
+      guests: Array.isArray(ev.guests) ? ev.guests.join(", ") : (ev.guests || ""),
+      pre_stream_notes: ev.pre_stream_notes || "", post_stream_notes: ev.post_stream_notes || "",
+      rrule: ev.rrule || null,
+    });
+    setModalOpen(true);
+  };
+
+  const closeModal = () => { setModalOpen(false); setEditEvent(null); setDraft({}); };
+
+  const handleSave = async () => {
+    if (!draft.title || !draft.date) return;
+    setSaving(true);
+    const payload = {
+      ...draft,
+      guests: typeof draft.guests === "string" ? draft.guests.split(",").map((g) => g.trim()).filter(Boolean) : draft.guests,
+    };
+    if (modalMode === "create") {
+      await createCalendarEvent(payload);
+    } else if (editEvent?.id) {
+      await saveCalendarEvent(editEvent.id, payload, { patch: false });
+    }
+    const start = formatDateKey(viewYear, viewMonth, 1);
+    const lastDay = new Date(viewYear, viewMonth + 1, 0).getDate();
+    const end = formatDateKey(viewYear, viewMonth, lastDay);
+    await fetchCalendarEvents(start, end);
+    setSaving(false);
+    closeModal();
+  };
+
+  const handleDelete = async () => {
+    if (!editEvent?.id) return;
+    setSaving(true);
+    await deleteCalendarEvent(editEvent.id);
+    const start = formatDateKey(viewYear, viewMonth, 1);
+    const lastDay = new Date(viewYear, viewMonth + 1, 0).getDate();
+    const end = formatDateKey(viewYear, viewMonth, lastDay);
+    await fetchCalendarEvents(start, end);
+    setSaving(false);
+    closeModal();
+  };
+
+  const setField = (k, v) => setDraft((d) => ({ ...d, [k]: v }));
+  const setRruleField = (k, v) => setDraft((d) => {
+    const rr = d.rrule ? { ...d.rrule } : { freq: "WEEKLY", interval: 1 };
+    rr[k] = v;
+    return { ...d, rrule: rr };
+  });
+
+  return (
+    <div>
+      <RackPanel>
+        <RackLabel>Calendar</RackLabel>
+        <div style={{ fontSize: 10, color: "#555", fontFamily: "'IBM Plex Sans', sans-serif", marginBottom: 12 }}>
+          Stream schedule, content plan, and community events. Click a day to create an event.
+        </div>
+
+        {/* Header: month nav */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span onClick={goPrev} style={{ cursor: "pointer", color: "#666", fontSize: 16, fontFamily: "'JetBrains Mono', monospace", userSelect: "none", padding: "0 4px" }}>&lsaquo;</span>
+            <span style={{ fontSize: 14, color: "#ccc", fontFamily: "'IBM Plex Sans', sans-serif", fontWeight: 600, minWidth: 160, textAlign: "center" }}>{monthName} {viewYear}</span>
+            <span onClick={goNext} style={{ cursor: "pointer", color: "#666", fontSize: 16, fontFamily: "'JetBrains Mono', monospace", userSelect: "none", padding: "0 4px" }}>&rsaquo;</span>
+          </div>
+          <button onClick={goToday} style={btnStyle}>TODAY</button>
+        </div>
+
+        {/* Category legend / filter */}
+        <div style={{ display: "flex", gap: 12, marginBottom: 10, flexWrap: "wrap" }}>
+          {Object.entries(CATEGORY_LABELS).map(([cat, label]) => (
+            <span key={cat} onClick={() => setCategoryFilters((f) => ({ ...f, [cat]: !f[cat] }))} style={{ display: "inline-flex", alignItems: "center", gap: 4, cursor: "pointer", opacity: categoryFilters[cat] ? 1 : 0.3, fontSize: 10, fontFamily: "'JetBrains Mono', monospace", color: "#888", letterSpacing: 1, userSelect: "none" }}>
+              <span style={{ width: 8, height: 8, borderRadius: 2, background: CATEGORY_COLORS[cat], display: "inline-block" }} />
+              {label.toUpperCase()}
+            </span>
+          ))}
+        </div>
+
+        {/* Weekday headers */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 1, marginBottom: 1 }}>
+          {WEEKDAY_HEADERS.map((d) => (
+            <div key={d} style={{ textAlign: "center", fontSize: 9, color: "#5a5a5a", fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1.5, fontWeight: 600, padding: "4px 0" }}>{d.toUpperCase()}</div>
+          ))}
+        </div>
+
+        {/* Calendar grid */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 1 }}>
+          {grid.map((cell, idx) => {
+            const dateKey = formatDateKey(cell.year, cell.month, cell.day);
+            const isToday = dateKey === todayKey;
+            const dayEvents = eventsByDate[dateKey] || [];
+            const showMax = 3;
+            return (
+              <div
+                key={idx}
+                onClick={() => openCreateModal(dateKey)}
+                style={{
+                  background: isToday ? "#1a2a1a" : cell.outside ? "#111114" : "#15151a",
+                  border: isToday ? "1px solid #2ecc4044" : "1px solid #1e1e22",
+                  borderRadius: 2,
+                  minHeight: 80,
+                  padding: "3px 4px",
+                  cursor: "pointer",
+                  position: "relative",
+                }}
+              >
+                <div style={{ fontSize: 10, color: cell.outside ? "#333" : isToday ? "#2ecc40" : "#777", fontFamily: "'JetBrains Mono', monospace", fontWeight: isToday ? 700 : 400, marginBottom: 2 }}>
+                  {cell.day}
+                </div>
+                {dayEvents.slice(0, showMax).map((ev, ei) => (
+                  <div
+                    key={ei}
+                    onClick={(e) => { e.stopPropagation(); openEditModal(ev); }}
+                    style={{
+                      background: "#111114",
+                      borderLeft: `3px solid ${CATEGORY_COLORS[ev.category] || "#555"}`,
+                      borderRadius: 2,
+                      padding: "2px 4px",
+                      marginBottom: 2,
+                      cursor: "pointer",
+                      overflow: "hidden",
+                    }}
+                  >
+                    <div style={{ fontSize: 9, color: "#aaa", fontFamily: "'IBM Plex Sans', sans-serif", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {ev.start_time ? <span style={{ color: "#666", marginRight: 3 }}>{ev.start_time}</span> : null}
+                      {ev.title}
+                    </div>
+                  </div>
+                ))}
+                {dayEvents.length > showMax && (
+                  <div style={{ fontSize: 8, color: "#555", fontFamily: "'JetBrains Mono', monospace", textAlign: "center" }}>+{dayEvents.length - showMax} more</div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Migrate button */}
+        <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
+          <button onClick={async () => { const r = await migrateScheduleToCalendar(); if (r && !r.skipped) { const start = formatDateKey(viewYear, viewMonth, 1); const lastDay = new Date(viewYear, viewMonth + 1, 0).getDate(); const end = formatDateKey(viewYear, viewMonth, lastDay); await fetchCalendarEvents(start, end); } }} style={btnStyle}>IMPORT WEEKLY SCHEDULE</button>
+        </div>
+      </RackPanel>
+
+      {/* Event modal */}
+      {modalOpen && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(10,10,12,0.86)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999, backdropFilter: "blur(2px)" }} onClick={closeModal}>
+          <div onClick={(e) => e.stopPropagation()} style={{ width: 460, maxHeight: "90vh", overflowY: "auto", background: "#15151a", border: "1px solid #2a2a2e", borderRadius: 4, padding: 18 }}>
+            <RackLabel>{modalMode === "create" ? "New Event" : "Edit Event"}</RackLabel>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+              {/* Title */}
+              <div>
+                <div style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, marginBottom: 2 }}>TITLE</div>
+                <input type="text" value={draft.title || ""} onChange={(e) => setField("title", e.target.value)} placeholder="Event title..." style={inputStyle} />
+              </div>
+
+              {/* Date + Times row */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+                <div>
+                  <div style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, marginBottom: 2 }}>DATE</div>
+                  <input type="date" value={draft.date || ""} onChange={(e) => setField("date", e.target.value)} style={inputStyle} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, marginBottom: 2 }}>START</div>
+                  <input type="text" value={draft.start_time || ""} onChange={(e) => setField("start_time", e.target.value)} placeholder="7:00 PM" style={inputStyle} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, marginBottom: 2 }}>END</div>
+                  <input type="text" value={draft.end_time || ""} onChange={(e) => setField("end_time", e.target.value)} placeholder="11:00 PM" style={inputStyle} />
+                </div>
+              </div>
+
+              {/* Category + Assigned To + Enabled row */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 8, alignItems: "end" }}>
+                <div>
+                  <div style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, marginBottom: 2 }}>CATEGORY</div>
+                  <select value={draft.category || "stream"} onChange={(e) => setField("category", e.target.value)} style={selectStyle}>
+                    {Object.entries(CATEGORY_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <div style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, marginBottom: 2 }}>ASSIGNED TO</div>
+                  <select value={draft.assigned_to || "both"} onChange={(e) => setField("assigned_to", e.target.value)} style={selectStyle}>
+                    <option value="both">Both</option>
+                    <option value="art">Art</option>
+                    <option value="jen">Jen</option>
+                  </select>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 4, paddingBottom: 4 }}>
+                  <input type="checkbox" checked={draft.enabled !== false} onChange={(e) => setField("enabled", e.target.checked)} style={{ cursor: "pointer" }} />
+                  <span style={{ fontSize: 9, color: "#5a5a5a", fontFamily: "'JetBrains Mono', monospace" }}>ON</span>
+                </div>
+              </div>
+
+              {/* Description */}
+              <div>
+                <div style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, marginBottom: 2 }}>DESCRIPTION</div>
+                <textarea value={draft.description || ""} onChange={(e) => setField("description", e.target.value)} placeholder="Optional description..." rows={2} style={{ ...inputStyle, resize: "vertical" }} />
+              </div>
+
+              {/* Recurrence */}
+              <div>
+                <div style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, marginBottom: 2 }}>RECURRENCE</div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <select value={draft.rrule ? draft.rrule.freq : ""} onChange={(e) => { if (!e.target.value) { setField("rrule", null); } else { setField("rrule", { freq: e.target.value, interval: 1 }); } }} style={{ ...selectStyle, width: 120 }}>
+                    <option value="">None</option>
+                    <option value="WEEKLY">Weekly</option>
+                    <option value="DAILY">Daily</option>
+                  </select>
+                  {draft.rrule && (
+                    <>
+                      <span style={{ fontSize: 9, color: "#555", fontFamily: "'JetBrains Mono', monospace" }}>every</span>
+                      <input type="number" min={1} max={52} value={draft.rrule.interval || 1} onChange={(e) => setRruleField("interval", parseInt(e.target.value) || 1)} style={{ ...inputStyle, width: 50, textAlign: "center" }} />
+                      <span style={{ fontSize: 9, color: "#555", fontFamily: "'JetBrains Mono', monospace" }}>{draft.rrule.freq === "WEEKLY" ? "week(s)" : "day(s)"}</span>
+                    </>
+                  )}
+                </div>
+                {draft.rrule && draft.rrule.freq === "WEEKLY" && (
+                  <div style={{ display: "flex", gap: 4, marginTop: 6 }}>
+                    {[["SU","S"],["MO","M"],["TU","T"],["WE","W"],["TH","T"],["FR","F"],["SA","S"]].map(([code, label]) => {
+                      const active = Array.isArray(draft.rrule.byday) && draft.rrule.byday.includes(code);
+                      return (
+                        <span key={code} onClick={() => {
+                          const cur = Array.isArray(draft.rrule.byday) ? [...draft.rrule.byday] : [];
+                          if (active) setRruleField("byday", cur.filter((c) => c !== code));
+                          else setRruleField("byday", [...cur, code]);
+                        }} style={{
+                          width: 24, height: 24, display: "inline-flex", alignItems: "center", justifyContent: "center",
+                          borderRadius: 2, fontSize: 10, fontFamily: "'JetBrains Mono', monospace", cursor: "pointer", userSelect: "none",
+                          background: active ? "#2ecc4022" : "#111114", border: active ? "1px solid #2ecc40" : "1px solid #2a2a2e",
+                          color: active ? "#2ecc40" : "#555",
+                        }}>{label}</span>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Stream-specific fields */}
+              {draft.category === "stream" && (
+                <>
+                  <div style={{ borderTop: "1px solid #2a2a2e", paddingTop: 8, marginTop: 4 }}>
+                    <div style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, marginBottom: 6 }}>STREAM DETAILS</div>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                    <div>
+                      <div style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, marginBottom: 2 }}>THEME / VIBE</div>
+                      <input type="text" value={draft.theme || ""} onChange={(e) => setField("theme", e.target.value)} placeholder="Deep Progressive..." style={inputStyle} />
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, marginBottom: 2 }}>GENRE FOCUS</div>
+                      <input type="text" value={draft.genre_focus || ""} onChange={(e) => setField("genre_focus", e.target.value)} placeholder="Progressive House..." style={inputStyle} />
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, marginBottom: 2 }}>GUESTS</div>
+                    <input type="text" value={draft.guests || ""} onChange={(e) => setField("guests", e.target.value)} placeholder="Comma-separated guest names..." style={inputStyle} />
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, marginBottom: 2 }}>PRE-STREAM NOTES (injected into Roonie's prompt)</div>
+                    <textarea value={draft.pre_stream_notes || ""} onChange={(e) => setField("pre_stream_notes", e.target.value)} placeholder="Notes for Roonie before stream starts..." rows={2} style={{ ...inputStyle, resize: "vertical" }} />
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 9, color: "#5a5a5a", letterSpacing: 1.5, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, marginBottom: 2 }}>POST-STREAM NOTES</div>
+                    <textarea value={draft.post_stream_notes || ""} onChange={(e) => setField("post_stream_notes", e.target.value)} placeholder="Notes after stream..." rows={2} style={{ ...inputStyle, resize: "vertical" }} />
+                  </div>
+                </>
+              )}
+
+              {/* Action buttons */}
+              <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                <button onClick={handleSave} disabled={saving || !draft.title} style={{ ...saveBtnStyle, opacity: saving || !draft.title ? 0.4 : 1, flex: 1 }}>
+                  {saving ? "SAVING..." : modalMode === "create" ? "CREATE" : "SAVE"}
+                </button>
+                {modalMode === "edit" && editEvent?.id && !editEvent._occurrence && (
+                  <button onClick={handleDelete} disabled={saving} style={{ ...dangerBtnStyle, opacity: saving ? 0.4 : 1 }}>DELETE</button>
+                )}
+                <button onClick={closeModal} style={btnStyle}>CANCEL</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // --- PAGE: INNER CIRCLE ---
 
 function InnerCirclePage({ innerCircleData, saveInnerCircle }) {
@@ -4300,6 +4845,12 @@ export default function RoonieControlRoom() {
     memoryPendingData,
     innerCircleData,
     scheduleData,
+    calendarEventsData,
+    fetchCalendarEvents,
+    createCalendarEvent,
+    saveCalendarEvent,
+    deleteCalendarEvent,
+    migrateScheduleToCalendar,
     twitchStatusData,
     twitchNotice,
     setTwitchNotice,
@@ -4385,7 +4936,7 @@ export default function RoonieControlRoom() {
         );
       case "providers": return <ProvidersPage statusData={statusData} providersStatusData={providersStatusData} routingStatusData={routingStatusData} systemHealthData={systemHealthData} readinessData={readinessData} setProviderActive={setProviderActive} setProviderCaps={setProviderCaps} patchProviderWeights={patchProviderWeights} setRoutingEnabled={setRoutingEnabled} setActiveDirector={setActiveDirector} setDryRunEnabled={setDryRunEnabled} />;
       case "auth": return <AuthPage twitchStatusData={twitchStatusData} twitchConnectStart={twitchConnectStart} twitchConnectPoll={twitchConnectPoll} twitchDisconnect={twitchDisconnect} twitchNotice={twitchNotice} setTwitchNotice={setTwitchNotice} />;
-      case "schedule": return <SchedulePage scheduleData={scheduleData} saveStreamSchedule={saveStreamSchedule} />;
+      case "calendar": return <CalendarPage calendarEventsData={calendarEventsData} fetchCalendarEvents={fetchCalendarEvents} createCalendarEvent={createCalendarEvent} saveCalendarEvent={saveCalendarEvent} deleteCalendarEvent={deleteCalendarEvent} migrateScheduleToCalendar={migrateScheduleToCalendar} />;
       case "senses": return <SensesPage sensesStatusData={sensesStatusData} audioConfigData={audioConfigData} audioStatusData={audioStatusData} setAudioStatusData={setAudioStatusData} audioDevicesData={audioDevicesData} saveAudioConfig={saveAudioConfig} performAction={performAction} />;
       case "governance": return <GovernancePage />;
       default: return <LivePage statusData={statusData} eventsData={eventsData} suppressionsData={suppressionsData} performAction={performAction} busyAction={busyAction} />;

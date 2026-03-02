@@ -1147,6 +1147,61 @@ class ProviderDirector:
         return "\n".join(lines)
 
     @staticmethod
+    def _calendar_schedule_block(metadata: Dict[str, Any]) -> str:
+        """Format calendar prompt data for the LLM. Falls back to legacy schedule block."""
+        cal = metadata.get("calendar_prompt_data")
+        if not isinstance(cal, dict) or not cal:
+            return ""
+        lines: List[str] = []
+        # Current time (reuse logic from _stream_schedule_block)
+        raw_schedule = metadata.get("stream_schedule")
+        tz = "ET"
+        if isinstance(raw_schedule, dict):
+            tz = str(raw_schedule.get("timezone", "ET")).strip() or "ET"
+        now_local = ProviderDirector._schedule_now_local(metadata, tz)
+        now_day = now_local.strftime("%A")
+        now_date = now_local.strftime("%b %d %Y")
+        hour_12 = now_local.hour % 12 or 12
+        now_time = f"{hour_12}:{now_local.minute:02d} {'PM' if now_local.hour >= 12 else 'AM'}"
+        lines.append(f"Current local time ({tz}): {now_day}, {now_date} {now_time}")
+
+        upcoming = cal.get("upcoming_streams", [])
+        if upcoming:
+            stream_parts = []
+            for s in upcoming[:7]:
+                title = str(s.get("title", "")).strip()
+                stime = str(s.get("start_time", "")).strip()
+                sdate = str(s.get("date", "")).strip()
+                theme = str(s.get("theme", "")).strip()
+                entry = f"{sdate} {stime}" if stime else sdate
+                if title and title != entry:
+                    entry += f" — {title}"
+                if theme:
+                    entry += f" ({theme})"
+                stream_parts.append(entry)
+            lines.append(f"Upcoming streams: {'; '.join(stream_parts)}")
+
+        today_theme = cal.get("today_theme", "")
+        if today_theme:
+            lines.append(f"Tonight's theme: {today_theme}")
+
+        today_notes = cal.get("today_pre_stream_notes", "")
+        if today_notes:
+            lines.append(f"Stream notes: {today_notes}")
+
+        community = cal.get("today_community", [])
+        if community:
+            lines.append(f"Today's community events: {', '.join(str(c) for c in community[:5])}")
+
+        # Preserve legacy schedule override if present
+        if isinstance(raw_schedule, dict):
+            override = str(raw_schedule.get("next_stream_override", "")).strip()
+            if override:
+                lines.append(f"Schedule note: {override}")
+
+        return "\n".join(lines)
+
+    @staticmethod
     def _extract_topic_anchor(message: str) -> str:
         text = str(message or "").strip()
         if not text:
@@ -1608,7 +1663,7 @@ class ProviderDirector:
             )
 
         inner_circle_text = self._inner_circle_block(metadata)
-        schedule_text = self._stream_schedule_block(metadata)
+        schedule_text = self._calendar_schedule_block(metadata) or self._stream_schedule_block(metadata)
         enrichment_text = self._track_enrichment_block(metadata)
         previous_track_text = self._previous_track_block(metadata)
 

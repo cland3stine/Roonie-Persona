@@ -41,6 +41,7 @@ _SENSITIVE_GET_REQUIRED_ROLE: Dict[str, str] = {
     "/api/audio/devices": "operator",
     "/api/trackr/config": "operator",
     "/api/trackr/status": "operator",
+    "/api/calendar/events": "operator",
     "/api/memory/cultural": "operator",
     "/api/memory/viewers": "operator",
     "/api/memory/pending": "operator",
@@ -834,6 +835,155 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
             )
             _json_response(self, {"ok": True, "trackr_config": config, "audit": audit.to_dict()})
 
+        # ── calendar event handlers ────────────────────────────
+
+        def _handle_calendar_event_create(self) -> None:
+            ok_body, payload = self._read_json_body()
+            if not ok_body:
+                _json_response(
+                    self,
+                    {"ok": False, "error": "bad_request", "detail": "Invalid JSON body."},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            identity = self._authorize_write(
+                action="CALENDAR_EVENT_CREATE",
+                payload=payload,
+                required_role="operator",
+            )
+            if identity is None:
+                return
+            try:
+                event, diff_payload = storage.create_calendar_event(
+                    payload,
+                    actor=(identity.get("username") or identity.get("actor")),
+                )
+            except ValueError as exc:
+                _json_response(
+                    self,
+                    {"ok": False, "error": "bad_request", "detail": str(exc)},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            audit = storage.record_operator_action(
+                operator=identity["operator"],
+                action="CALENDAR_EVENT_CREATE",
+                payload=diff_payload,
+                result="OK",
+                actor=identity["actor"],
+                username=identity.get("username"),
+                role=identity.get("role"),
+                auth_mode=identity.get("auth_mode"),
+            )
+            _json_response(self, {"ok": True, "event": event, "audit": audit.to_dict()}, status=HTTPStatus.CREATED)
+
+        def _handle_calendar_event_update(self, event_id: str, *, patch: bool) -> None:
+            ok_body, payload = self._read_json_body()
+            if not ok_body:
+                _json_response(
+                    self,
+                    {"ok": False, "error": "bad_request", "detail": "Invalid JSON body."},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            identity = self._authorize_write(
+                action="CALENDAR_EVENT_UPDATE",
+                payload={**payload, "id": event_id},
+                required_role="operator",
+            )
+            if identity is None:
+                return
+            try:
+                event, diff_payload = storage.update_calendar_event(
+                    event_id,
+                    payload,
+                    actor=(identity.get("username") or identity.get("actor")),
+                    patch=patch,
+                )
+            except ValueError as exc:
+                detail = str(exc)
+                status = HTTPStatus.NOT_FOUND if "not found" in detail.lower() else HTTPStatus.BAD_REQUEST
+                _json_response(
+                    self,
+                    {"ok": False, "error": "bad_request", "detail": detail},
+                    status=status,
+                )
+                return
+            audit = storage.record_operator_action(
+                operator=identity["operator"],
+                action="CALENDAR_EVENT_UPDATE",
+                payload=diff_payload,
+                result="OK",
+                actor=identity["actor"],
+                username=identity.get("username"),
+                role=identity.get("role"),
+                auth_mode=identity.get("auth_mode"),
+            )
+            _json_response(self, {"ok": True, "event": event, "audit": audit.to_dict()})
+
+        def _handle_calendar_event_delete(self, event_id: str) -> None:
+            identity = self._authorize_write(
+                action="CALENDAR_EVENT_DELETE",
+                payload={"id": event_id},
+                required_role="operator",
+            )
+            if identity is None:
+                return
+            try:
+                deleted = storage.delete_calendar_event(
+                    event_id,
+                    actor=(identity.get("username") or identity.get("actor")),
+                )
+            except ValueError as exc:
+                _json_response(
+                    self,
+                    {"ok": False, "error": "not_found", "detail": str(exc)},
+                    status=HTTPStatus.NOT_FOUND,
+                )
+                return
+            audit = storage.record_operator_action(
+                operator=identity["operator"],
+                action="CALENDAR_EVENT_DELETE",
+                payload=deleted,
+                result="OK",
+                actor=identity["actor"],
+                username=identity.get("username"),
+                role=identity.get("role"),
+                auth_mode=identity.get("auth_mode"),
+            )
+            _json_response(self, {"ok": True, "deleted": deleted, "audit": audit.to_dict()})
+
+        def _handle_calendar_migrate(self) -> None:
+            identity = self._authorize_write(
+                action="CALENDAR_MIGRATE",
+                payload={},
+                required_role="operator",
+            )
+            if identity is None:
+                return
+            try:
+                result = storage.migrate_weekly_schedule_to_calendar(
+                    actor=(identity.get("username") or identity.get("actor")),
+                )
+            except ValueError as exc:
+                _json_response(
+                    self,
+                    {"ok": False, "error": "bad_request", "detail": str(exc)},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            audit = storage.record_operator_action(
+                operator=identity["operator"],
+                action="CALENDAR_MIGRATE",
+                payload=result,
+                result="OK",
+                actor=identity["actor"],
+                username=identity.get("username"),
+                role=identity.get("role"),
+                auth_mode=identity.get("auth_mode"),
+            )
+            _json_response(self, {"ok": True, "migration": result, "audit": audit.to_dict()})
+
         def do_GET(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
             query = parse_qs(parsed.query)
@@ -945,6 +1095,27 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
             if path == "/api/trackr/status":
                 _json_response(self, storage.get_trackr_state())
                 return
+            # ── calendar events ─────────────────────────────────
+            if path == "/api/calendar/events":
+                start_date = _query_opt(query, "start_date")
+                end_date = _query_opt(query, "end_date")
+                _json_response(self, storage.get_calendar_events(
+                    start_date=start_date, end_date=end_date,
+                ))
+                return
+            if path.startswith("/api/calendar/events/"):
+                event_id = path[len("/api/calendar/events/"):]
+                if event_id:
+                    ev = storage.get_calendar_event(event_id)
+                    if ev is None:
+                        _json_response(
+                            self,
+                            {"ok": False, "error": "not_found", "detail": f"Event {event_id} not found."},
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                    else:
+                        _json_response(self, ev)
+                    return
             if path == "/api/providers/status":
                 _json_response(self, storage.get_providers_status())
                 return
@@ -2270,6 +2441,14 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
                 )
                 return
 
+            # ── calendar events ─────────────────────────────────
+            if path == "/api/calendar/events":
+                self._handle_calendar_event_create()
+                return
+            if path == "/api/calendar/migrate":
+                self._handle_calendar_migrate()
+                return
+
             _json_response(
                 self,
                 {"ok": False, "error": "not_found", "path": path},
@@ -2298,6 +2477,11 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
             if parsed.path == "/api/trackr/config":
                 self._handle_trackr_config_write(patch=False)
                 return
+            if parsed.path.startswith("/api/calendar/events/"):
+                event_id = parsed.path[len("/api/calendar/events/"):].strip()
+                if event_id:
+                    self._handle_calendar_event_update(event_id, patch=False)
+                    return
             _json_response(
                 self,
                 {"ok": False, "error": "not_found", "path": parsed.path},
@@ -2326,6 +2510,11 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
             if parsed.path == "/api/trackr/config":
                 self._handle_trackr_config_write(patch=True)
                 return
+            if parsed.path.startswith("/api/calendar/events/"):
+                event_id = parsed.path[len("/api/calendar/events/"):].strip()
+                if event_id:
+                    self._handle_calendar_event_update(event_id, patch=True)
+                    return
             if parsed.path.startswith("/api/memory/cultural/"):
                 ok_body, payload = self._read_json_body()
                 if not ok_body:
@@ -2595,6 +2784,11 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
 
         def do_DELETE(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
+            if parsed.path.startswith("/api/calendar/events/"):
+                event_id = parsed.path[len("/api/calendar/events/"):].strip()
+                if event_id:
+                    self._handle_calendar_event_delete(event_id)
+                    return
             if parsed.path.startswith("/api/memory/cultural/"):
                 note_id = parsed.path[len("/api/memory/cultural/") :].strip()
                 if not note_id:

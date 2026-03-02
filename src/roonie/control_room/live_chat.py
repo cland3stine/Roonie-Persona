@@ -324,6 +324,13 @@ class LiveChatBridge:
                     }
             except Exception:
                 pass
+        if hasattr(self._storage, "get_calendar_events_for_prompt"):
+            try:
+                cal_data = self._storage.get_calendar_events_for_prompt()
+                if isinstance(cal_data, dict) and cal_data:
+                    metadata["calendar_prompt_data"] = cal_data
+            except Exception:
+                pass
         if isinstance(metadata_extra, dict):
             metadata.update(dict(metadata_extra))
 

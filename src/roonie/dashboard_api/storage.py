@@ -339,6 +339,7 @@ class DashboardStorage:
         self._stream_schedule_path = self.data_dir / "stream_schedule.json"
         self._audio_config_path = self.data_dir / "audio_config.json"
         self._trackr_config_path = self.data_dir / "trackr_config.json"
+        self._calendar_events_path = self.data_dir / "calendar_events.json"
         self._library_dir = self.data_dir / "library"
         self._library_xml_path = self._library_dir / "rekordbox.xml"
         self._library_index_path = self._library_dir / "library_index.json"
@@ -4210,6 +4211,575 @@ class DashboardStorage:
     def get_trackr_state(self) -> Dict[str, Any]:
         with self._lock:
             return dict(self._trackr_runtime_state)
+
+    # ── calendar events ───────────────────────────────────────
+
+    _CALENDAR_CATEGORIES = ("stream", "content", "community", "personal")
+    _CALENDAR_ASSIGNED_TO = ("art", "jen", "both")
+    _RRULE_FREQS = ("WEEKLY", "DAILY")
+    _RRULE_BYDAYS = ("MO", "TU", "WE", "TH", "FR", "SA", "SU")
+    _RRULE_BYDAY_TO_ISO = {"MO": 1, "TU": 2, "WE": 3, "TH": 4, "FR": 5, "SA": 6, "SU": 7}
+
+    @staticmethod
+    def _default_calendar_events() -> Dict[str, Any]:
+        return {
+            "version": 1,
+            "events": {},
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_by": "system",
+        }
+
+    @staticmethod
+    def _validate_date_string(value: str, field_name: str) -> str:
+        """Validate YYYY-MM-DD format and return the cleaned string."""
+        text = str(value).strip()
+        if not text:
+            raise ValueError(f"{field_name} is required.")
+        try:
+            datetime.strptime(text, "%Y-%m-%d")
+        except ValueError:
+            raise ValueError(f"{field_name} must be YYYY-MM-DD format, got '{text}'.")
+        return text
+
+    @staticmethod
+    def _validate_time_string(value: str, field_name: str) -> str:
+        """Validate time like '7:00 PM' or '19:00' — lenient, just bounded."""
+        text = str(value).strip()
+        if len(text) > 20:
+            raise ValueError(f"{field_name} too long (max 20 chars).")
+        return text
+
+    def _coerce_rrule(self, raw: Any) -> Optional[Dict[str, Any]]:
+        """Validate and normalize an iCal-compatible RRULE dict."""
+        if raw is None or raw == "":
+            return None
+        if not isinstance(raw, dict):
+            raise ValueError("rrule must be an object or null.")
+        freq = str(raw.get("freq", "")).strip().upper()
+        if freq not in self._RRULE_FREQS:
+            raise ValueError(f"rrule.freq must be one of {self._RRULE_FREQS}, got '{freq}'.")
+        interval = raw.get("interval", 1)
+        if not isinstance(interval, int) or interval < 1 or interval > 52:
+            interval = 1
+        byday_raw = raw.get("byday")
+        byday: Optional[List[str]] = None
+        if byday_raw is not None:
+            if isinstance(byday_raw, str):
+                byday_raw = [b.strip() for b in byday_raw.split(",") if b.strip()]
+            if isinstance(byday_raw, list):
+                byday = []
+                for b in byday_raw:
+                    b_upper = str(b).strip().upper()
+                    if b_upper in self._RRULE_BYDAYS:
+                        byday.append(b_upper)
+                if not byday:
+                    byday = None
+        until = None
+        until_raw = raw.get("until")
+        if until_raw:
+            until = self._validate_date_string(str(until_raw), "rrule.until")
+        count = raw.get("count")
+        if count is not None:
+            if not isinstance(count, int) or count < 1 or count > 365:
+                count = None
+        result: Dict[str, Any] = {"freq": freq, "interval": interval}
+        if byday is not None:
+            result["byday"] = byday
+        if until is not None:
+            result["until"] = until
+        if count is not None:
+            result["count"] = count
+        return result
+
+    def _coerce_calendar_event_fields(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate and normalize a single calendar event dict."""
+        if not isinstance(payload, dict):
+            raise ValueError("Calendar event must be an object.")
+        title = self._bounded_text(
+            payload.get("title"), field_name="title", max_len=200, required=True,
+        )
+        date = self._validate_date_string(payload.get("date", ""), "date")
+        start_time = self._validate_time_string(
+            payload.get("start_time", ""), "start_time",
+        )
+        end_time = self._validate_time_string(
+            payload.get("end_time", ""), "end_time",
+        )
+        category = str(payload.get("category", "stream")).strip().lower()
+        if category not in self._CALENDAR_CATEGORIES:
+            raise ValueError(f"category must be one of {self._CALENDAR_CATEGORIES}, got '{category}'.")
+        description = self._bounded_text(
+            payload.get("description"), field_name="description", max_len=1000, required=False,
+        )
+        assigned_to = str(payload.get("assigned_to", "both")).strip().lower()
+        if assigned_to not in self._CALENDAR_ASSIGNED_TO:
+            assigned_to = "both"
+        enabled = payload.get("enabled", True)
+        if not isinstance(enabled, bool):
+            enabled = bool(enabled)
+        # Stream-specific fields
+        theme = self._bounded_text(
+            payload.get("theme"), field_name="theme", max_len=200, required=False,
+        )
+        genre_focus = self._bounded_text(
+            payload.get("genre_focus"), field_name="genre_focus", max_len=200, required=False,
+        )
+        guests_raw = payload.get("guests")
+        guests: List[str] = []
+        if isinstance(guests_raw, list):
+            for g in guests_raw[:10]:
+                g_text = str(g).strip()[:80]
+                if g_text:
+                    guests.append(g_text)
+        elif isinstance(guests_raw, str) and guests_raw.strip():
+            guests = [g.strip()[:80] for g in guests_raw.split(",") if g.strip()][:10]
+        pre_stream_notes = self._bounded_text(
+            payload.get("pre_stream_notes"), field_name="pre_stream_notes", max_len=1000, required=False,
+        )
+        post_stream_notes = self._bounded_text(
+            payload.get("post_stream_notes"), field_name="post_stream_notes", max_len=1000, required=False,
+        )
+        rrule = self._coerce_rrule(payload.get("rrule"))
+        event: Dict[str, Any] = {
+            "title": title,
+            "date": date,
+            "start_time": start_time,
+            "end_time": end_time,
+            "category": category,
+            "description": description,
+            "assigned_to": assigned_to,
+            "enabled": enabled,
+            "theme": theme,
+            "genre_focus": genre_focus,
+            "guests": guests,
+            "pre_stream_notes": pre_stream_notes,
+            "post_stream_notes": post_stream_notes,
+            "rrule": rrule,
+        }
+        return event
+
+    @staticmethod
+    def expand_rrule_occurrences(
+        event: Dict[str, Any],
+        range_start: str,
+        range_end: str,
+    ) -> List[Dict[str, Any]]:
+        """Expand a recurring event into concrete occurrences within a date range.
+
+        Returns a list of event dicts with ``date`` set to each occurrence date.
+        Non-recurring events are returned as-is if they fall within range.
+        """
+        rrule = event.get("rrule")
+        event_date_str = str(event.get("date", ""))
+        try:
+            event_date = datetime.strptime(event_date_str, "%Y-%m-%d").date()
+            r_start = datetime.strptime(str(range_start), "%Y-%m-%d").date()
+            r_end = datetime.strptime(str(range_end), "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            return []
+
+        if rrule is None or not isinstance(rrule, dict):
+            if r_start <= event_date <= r_end:
+                return [event]
+            return []
+
+        freq = str(rrule.get("freq", "")).upper()
+        interval = max(1, int(rrule.get("interval", 1)))
+        until_str = rrule.get("until")
+        until_date = None
+        if until_str:
+            try:
+                until_date = datetime.strptime(str(until_str), "%Y-%m-%d").date()
+            except ValueError:
+                pass
+        count = rrule.get("count")
+        byday = rrule.get("byday")
+
+        byday_iso = None
+        if isinstance(byday, list) and byday:
+            mapping = {"MO": 1, "TU": 2, "WE": 3, "TH": 4, "FR": 5, "SA": 6, "SU": 7}
+            byday_iso = {mapping[b] for b in byday if b in mapping}
+
+        occurrences: List[Dict[str, Any]] = []
+        generated = 0
+        max_iterations = 730  # safety cap: ~2 years of daily
+
+        if freq == "WEEKLY":
+            if byday_iso:
+                # Start from Monday of event_date's week
+                cursor = event_date - timedelta(days=event_date.isoweekday() - 1)
+            else:
+                cursor = event_date
+            week_num = 0
+            iterations = 0
+            while iterations < max_iterations:
+                iterations += 1
+                if until_date and cursor > until_date:
+                    break
+                if cursor > r_end:
+                    break
+                if count is not None and generated >= count:
+                    break
+                if byday_iso:
+                    # Iterate each day of the current week
+                    week_start = cursor
+                    for day_offset in range(7):
+                        d = week_start + timedelta(days=day_offset)
+                        if d.isoweekday() not in byday_iso:
+                            continue
+                        if d < event_date:
+                            continue
+                        if until_date and d > until_date:
+                            break
+                        if count is not None and generated >= count:
+                            break
+                        if r_start <= d <= r_end:
+                            occ = dict(event)
+                            occ["date"] = d.strftime("%Y-%m-%d")
+                            occ["_occurrence"] = True
+                            occurrences.append(occ)
+                        generated += 1
+                    cursor = week_start + timedelta(weeks=interval)
+                else:
+                    if cursor >= event_date and r_start <= cursor <= r_end:
+                        occ = dict(event)
+                        occ["date"] = cursor.strftime("%Y-%m-%d")
+                        occ["_occurrence"] = True
+                        occurrences.append(occ)
+                    if cursor >= event_date:
+                        generated += 1
+                    cursor += timedelta(weeks=interval)
+        elif freq == "DAILY":
+            cursor = event_date
+            iterations = 0
+            while iterations < max_iterations:
+                iterations += 1
+                if until_date and cursor > until_date:
+                    break
+                if cursor > r_end:
+                    break
+                if count is not None and generated >= count:
+                    break
+                if r_start <= cursor <= r_end:
+                    occ = dict(event)
+                    occ["date"] = cursor.strftime("%Y-%m-%d")
+                    occ["_occurrence"] = True
+                    occurrences.append(occ)
+                generated += 1
+                cursor += timedelta(days=interval)
+
+        return occurrences
+
+    def _read_calendar_events_locked(self) -> Dict[str, Any]:
+        raw = _safe_read_json(self._calendar_events_path)
+        if isinstance(raw, dict) and isinstance(raw.get("events"), dict):
+            return raw
+        default = self._default_calendar_events()
+        self._write_json_atomic(self._calendar_events_path, default)
+        return default
+
+    def get_calendar_events(
+        self,
+        *,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Return calendar events, optionally filtered by date range.
+
+        If start_date/end_date are given, recurring events are expanded.
+        """
+        with self._lock:
+            store = self._read_calendar_events_locked()
+        events = store.get("events", {})
+        if not isinstance(events, dict):
+            events = {}
+
+        if start_date and end_date:
+            expanded: List[Dict[str, Any]] = []
+            for eid, ev in events.items():
+                if not isinstance(ev, dict):
+                    continue
+                ev_copy = dict(ev)
+                ev_copy["id"] = eid
+                occs = self.expand_rrule_occurrences(ev_copy, start_date, end_date)
+                expanded.extend(occs)
+            return {
+                "version": store.get("version", 1),
+                "events": expanded,
+                "updated_at": store.get("updated_at"),
+                "updated_by": store.get("updated_by"),
+            }
+
+        # No range filter — return raw dict
+        events_with_ids = {}
+        for eid, ev in events.items():
+            if isinstance(ev, dict):
+                ev_copy = dict(ev)
+                ev_copy["id"] = eid
+                events_with_ids[eid] = ev_copy
+        return {
+            "version": store.get("version", 1),
+            "events": events_with_ids,
+            "updated_at": store.get("updated_at"),
+            "updated_by": store.get("updated_by"),
+        }
+
+    def get_calendar_event(self, event_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            store = self._read_calendar_events_locked()
+        events = store.get("events", {})
+        ev = events.get(event_id)
+        if not isinstance(ev, dict):
+            return None
+        result = dict(ev)
+        result["id"] = event_id
+        return result
+
+    def create_calendar_event(
+        self,
+        payload: Dict[str, Any],
+        *,
+        actor: Optional[str] = None,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid JSON payload.")
+        actor_norm = self.normalize_actor(actor)
+        fields = self._coerce_calendar_event_fields(payload)
+        event_id = str(uuid4())
+        fields["id"] = event_id
+        fields["created_at"] = datetime.now(timezone.utc).isoformat()
+        fields["updated_at"] = datetime.now(timezone.utc).isoformat()
+        fields["created_by"] = actor_norm
+        fields["updated_by"] = actor_norm
+        with self._lock:
+            store = self._read_calendar_events_locked()
+            events = store.get("events", {})
+            if not isinstance(events, dict):
+                events = {}
+            if len(events) >= 500:
+                raise ValueError("Calendar events limit reached (500).")
+            events[event_id] = fields
+            store["events"] = events
+            store["updated_at"] = datetime.now(timezone.utc).isoformat()
+            store["updated_by"] = actor_norm
+            self._write_json_atomic(self._calendar_events_path, store)
+        audit_payload = {
+            "event_id": event_id,
+            "title": fields.get("title", ""),
+            "category": fields.get("category", ""),
+            "date": fields.get("date", ""),
+            "action": "create",
+        }
+        return fields, audit_payload
+
+    def update_calendar_event(
+        self,
+        event_id: str,
+        payload: Dict[str, Any],
+        *,
+        actor: Optional[str] = None,
+        patch: bool = False,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid JSON payload.")
+        actor_norm = self.normalize_actor(actor)
+        with self._lock:
+            store = self._read_calendar_events_locked()
+            events = store.get("events", {})
+            if not isinstance(events, dict):
+                events = {}
+            old = events.get(event_id)
+            if not isinstance(old, dict):
+                raise ValueError(f"Event not found: {event_id}")
+            if patch:
+                merged = self._merge_dicts(old, payload)
+            else:
+                merged = self._merge_dicts(old, payload)
+            fields = self._coerce_calendar_event_fields(merged)
+            fields["id"] = event_id
+            fields["created_at"] = old.get("created_at", datetime.now(timezone.utc).isoformat())
+            fields["created_by"] = old.get("created_by", "system")
+            fields["updated_at"] = datetime.now(timezone.utc).isoformat()
+            fields["updated_by"] = actor_norm
+            events[event_id] = fields
+            store["events"] = events
+            store["updated_at"] = datetime.now(timezone.utc).isoformat()
+            store["updated_by"] = actor_norm
+            self._write_json_atomic(self._calendar_events_path, store)
+        changed_keys = [
+            k for k in ("title", "date", "start_time", "end_time", "category",
+                         "description", "assigned_to", "enabled", "theme",
+                         "genre_focus", "guests", "pre_stream_notes",
+                         "post_stream_notes", "rrule")
+            if old.get(k) != fields.get(k)
+        ]
+        audit_payload = {
+            "event_id": event_id,
+            "changed_keys": changed_keys,
+            "mode": "patch" if patch else "put",
+        }
+        return fields, audit_payload
+
+    def delete_calendar_event(
+        self,
+        event_id: str,
+        *,
+        actor: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        actor_norm = self.normalize_actor(actor)
+        with self._lock:
+            store = self._read_calendar_events_locked()
+            events = store.get("events", {})
+            if not isinstance(events, dict):
+                events = {}
+            old = events.pop(event_id, None)
+            if old is None:
+                raise ValueError(f"Event not found: {event_id}")
+            store["events"] = events
+            store["updated_at"] = datetime.now(timezone.utc).isoformat()
+            store["updated_by"] = actor_norm
+            self._write_json_atomic(self._calendar_events_path, store)
+        return {
+            "event_id": event_id,
+            "title": old.get("title", ""),
+            "action": "delete",
+        }
+
+    def migrate_weekly_schedule_to_calendar(
+        self,
+        *,
+        actor: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """One-time migration: convert stream_schedule.json weekly slots to recurring calendar events."""
+        day_to_byday = {
+            "monday": "MO", "tuesday": "TU", "wednesday": "WE",
+            "thursday": "TH", "friday": "FR", "saturday": "SA", "sunday": "SU",
+        }
+        actor_norm = self.normalize_actor(actor)
+        with self._lock:
+            store = self._read_calendar_events_locked()
+            events = store.get("events", {})
+            if not isinstance(events, dict):
+                events = {}
+            # Check if already migrated
+            existing_recurring_streams = [
+                ev for ev in events.values()
+                if isinstance(ev, dict) and ev.get("category") == "stream"
+                and isinstance(ev.get("rrule"), dict)
+            ]
+            if existing_recurring_streams:
+                return {"migrated": 0, "skipped": True, "reason": "recurring_stream_events_exist"}
+
+            schedule = self._read_or_create_stream_schedule_locked()
+            slots = schedule.get("slots", [])
+            if not isinstance(slots, list):
+                slots = []
+            tz = str(schedule.get("timezone", "ET")).strip() or "ET"
+            now = datetime.now(timezone.utc)
+            today_str = now.strftime("%Y-%m-%d")
+            created = []
+            for s in slots:
+                if not isinstance(s, dict):
+                    continue
+                day = str(s.get("day", "")).strip().lower()
+                time_val = str(s.get("time", "")).strip()
+                note = str(s.get("note", "")).strip()
+                enabled = s.get("enabled", True)
+                if not day or day not in day_to_byday:
+                    continue
+                event_id = str(uuid4())
+                fields = {
+                    "id": event_id,
+                    "title": f"Stream — {day.capitalize()} {time_val} {tz}",
+                    "date": today_str,
+                    "start_time": time_val,
+                    "end_time": "",
+                    "category": "stream",
+                    "description": note,
+                    "assigned_to": "both",
+                    "enabled": bool(enabled),
+                    "theme": "",
+                    "genre_focus": "",
+                    "guests": [],
+                    "pre_stream_notes": "",
+                    "post_stream_notes": "",
+                    "rrule": {
+                        "freq": "WEEKLY",
+                        "interval": 1,
+                        "byday": [day_to_byday[day]],
+                    },
+                    "created_at": now.isoformat(),
+                    "updated_at": now.isoformat(),
+                    "created_by": actor_norm,
+                    "updated_by": actor_norm,
+                }
+                events[event_id] = fields
+                created.append({"event_id": event_id, "day": day, "time": time_val})
+            store["events"] = events
+            store["updated_at"] = now.isoformat()
+            store["updated_by"] = actor_norm
+            self._write_json_atomic(self._calendar_events_path, store)
+        return {"migrated": len(created), "skipped": False, "events": created}
+
+    def get_calendar_events_for_prompt(self) -> Dict[str, Any]:
+        """Compute prompt-ready calendar data: upcoming streams, today's notes, community events."""
+        with self._lock:
+            store = self._read_calendar_events_locked()
+        events = store.get("events", {})
+        if not isinstance(events, dict) or not events:
+            return {}
+
+        now = datetime.now(timezone.utc)
+        today_str = now.strftime("%Y-%m-%d")
+        week_end = (now + timedelta(days=7)).strftime("%Y-%m-%d")
+
+        upcoming_streams: List[Dict[str, str]] = []
+        today_notes = ""
+        today_theme = ""
+        today_community: List[str] = []
+
+        for eid, ev in events.items():
+            if not isinstance(ev, dict) or not ev.get("enabled", True):
+                continue
+            ev_copy = dict(ev)
+            ev_copy["id"] = eid
+            occs = self.expand_rrule_occurrences(ev_copy, today_str, week_end)
+            for occ in occs:
+                occ_date = str(occ.get("date", ""))
+                cat = str(occ.get("category", "")).lower()
+                if cat == "stream":
+                    upcoming_streams.append({
+                        "date": occ_date,
+                        "title": str(occ.get("title", "")),
+                        "start_time": str(occ.get("start_time", "")),
+                        "theme": str(occ.get("theme", "")),
+                        "genre_focus": str(occ.get("genre_focus", "")),
+                        "guests": occ.get("guests", []),
+                    })
+                    if occ_date == today_str:
+                        notes = str(occ.get("pre_stream_notes", "")).strip()
+                        if notes:
+                            today_notes = notes
+                        theme = str(occ.get("theme", "")).strip()
+                        if theme:
+                            today_theme = theme
+                elif cat == "community" and occ_date == today_str:
+                    today_community.append(str(occ.get("title", "")))
+
+        if not upcoming_streams and not today_community:
+            return {}
+
+        upcoming_streams.sort(key=lambda s: s.get("date", ""))
+        result: Dict[str, Any] = {}
+        if upcoming_streams:
+            result["upcoming_streams"] = upcoming_streams[:14]
+        if today_notes:
+            result["today_pre_stream_notes"] = today_notes
+        if today_theme:
+            result["today_theme"] = today_theme
+        if today_community:
+            result["today_community"] = today_community
+        return result
 
     @staticmethod
     def list_audio_devices() -> list:
