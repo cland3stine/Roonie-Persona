@@ -393,3 +393,62 @@ def test_continuation_cap_resets_on_direct_address(monkeypatch):
     )
     assert r_after.action == "RESPOND_PUBLIC"
     assert r_after.trace["director"]["conversation_continuation"] is True
+
+
+# ---------------------------------------------------------------------------
+# LOW_CONTENT continuation block (DEC-051)
+# ---------------------------------------------------------------------------
+
+
+def test_continuation_blocked_on_single_emote(monkeypatch):
+    """Single Twitch emote should not trigger continuation response."""
+    _stub_route(monkeypatch)
+    director = ProviderDirector()
+    env = Env(offline=False)
+
+    # Prime context: direct address + response
+    director.evaluate(
+        _event("e1", "@RoonieTheCat this mix is sick", user="viewer_a", is_direct_mention=True), env,
+    )
+    director.apply_output_feedback(event_id="e1", emitted=True, send_result={"sent": True})
+
+    # Emote-only followup
+    r = director.evaluate(
+        _event("e2", "ruleof6Cheshire", user="viewer_a"), env,
+    )
+    assert r.action == "NOOP"
+
+
+def test_continuation_blocked_on_smiley(monkeypatch):
+    """A bare smiley ':)' should not trigger continuation."""
+    _stub_route(monkeypatch)
+    director = ProviderDirector()
+    env = Env(offline=False)
+
+    director.evaluate(
+        _event("e1", "@RoonieTheCat hey!", user="viewer_a", is_direct_mention=True), env,
+    )
+    director.apply_output_feedback(event_id="e1", emitted=True, send_result={"sent": True})
+
+    r = director.evaluate(
+        _event("e2", ":)", user="viewer_a"), env,
+    )
+    assert r.action == "NOOP"
+
+
+def test_continuation_allowed_on_real_text(monkeypatch):
+    """Real text after a Roonie reply should still trigger continuation."""
+    _stub_route(monkeypatch)
+    director = ProviderDirector()
+    env = Env(offline=False)
+
+    director.evaluate(
+        _event("e1", "@RoonieTheCat what's this track?", user="viewer_a", is_direct_mention=True), env,
+    )
+    director.apply_output_feedback(event_id="e1", emitted=True, send_result={"sent": True})
+
+    r = director.evaluate(
+        _event("e2", "yeah that bassline is heavy", user="viewer_a"), env,
+    )
+    assert r.action == "RESPOND_PUBLIC"
+    assert r.trace["director"]["conversation_continuation"] is True

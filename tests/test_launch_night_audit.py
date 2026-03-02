@@ -123,9 +123,9 @@ class TestPromptGuardrails:
     def test_silence_is_success(self):
         assert "Silence is success" in DEFAULT_STYLE
 
-    def test_max_sentence_length_rule(self):
-        assert "1-2 sentences" in DEFAULT_STYLE
-        assert "maybe 3" in DEFAULT_STYLE or "3 if" in DEFAULT_STYLE
+    def test_response_length_rule(self):
+        assert "match the moment" in DEFAULT_STYLE.lower()
+        assert "vary your length" in DEFAULT_STYLE.lower()
 
     def test_at_tag_rule(self):
         assert "Always tag the person" in DEFAULT_STYLE or "tag the person you're replying to" in DEFAULT_STYLE
@@ -187,7 +187,7 @@ class TestPromptGuardrails:
         assert "plushie in every message" in DEFAULT_STYLE.lower() or "not a bit you're performing" in DEFAULT_STYLE.lower()
 
     def test_question_frequency_rule(self):
-        assert "Do NOT end every message with a question" in DEFAULT_STYLE
+        assert "seasoning, not the main course" in DEFAULT_STYLE or "never ask a question just to fill space" in DEFAULT_STYLE.lower()
 
 
 # ===========================================================================
@@ -1072,3 +1072,41 @@ class TestLaunchNightEdgeCases:
         # Same viewer says "hey everyone" — should not trigger GREETING_OTHER_USER
         r2 = _say(d, env, "e2", "hey everyone!", user="viewer_a")
         assert r2.trace["director"]["continuation_reason"] != "GREETING_OTHER_USER"
+
+
+# ---------------------------------------------------------------------------
+# DEC-051: Post-launch prompt content verification
+# ---------------------------------------------------------------------------
+
+class TestPostLaunchPromptGuardrails:
+    """Verify DEC-051 additions to DEFAULT_STYLE."""
+
+    def test_response_length_modulation(self):
+        assert "match the moment" in DEFAULT_STYLE.lower()
+        assert "vary your length" in DEFAULT_STYLE.lower()
+
+    def test_consolidation_multiple_messages(self):
+        assert "respond to the overall idea" in DEFAULT_STYLE.lower()
+
+    def test_no_repeat_thanks(self):
+        assert "same thing twice" in DEFAULT_STYLE.lower()
+
+    def test_conversation_ending_recognition(self):
+        assert "conversation ending" in DEFAULT_STYLE.lower()
+        assert "closing beat" in DEFAULT_STYLE.lower()
+
+    def test_context_bleed_prevention(self):
+        assert "sidebar" in DEFAULT_STYLE.lower()
+        assert "weren't part of" in DEFAULT_STYLE.lower() or "wasn\\'t part of" in DEFAULT_STYLE.lower()
+
+    def test_viewer_count_fabrication_guard(self):
+        assert "viewers" in DEFAULT_STYLE.lower() and "lurkers" in DEFAULT_STYLE.lower()
+        assert "dashboard stats" in DEFAULT_STYLE.lower()
+
+    def test_general_fabrication_deflection(self):
+        assert "don't have data" in DEFAULT_STYLE.lower() or "don\\'t have data" in DEFAULT_STYLE.lower()
+        assert "deflect in character" in DEFAULT_STYLE.lower()
+
+    def test_question_seasoning_guidance(self):
+        assert "seasoning" in DEFAULT_STYLE.lower()
+        assert "fill space" in DEFAULT_STYLE.lower()

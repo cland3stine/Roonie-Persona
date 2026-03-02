@@ -14,6 +14,7 @@ CATEGORY_EVENT_SUB = "EVENT_SUB"
 CATEGORY_EVENT_CHEER = "EVENT_CHEER"
 CATEGORY_EVENT_RAID = "EVENT_RAID"
 CATEGORY_PROACTIVE_FAVORITE = "PROACTIVE_FAVORITE"
+CATEGORY_QUIET_NUDGE = "QUIET_NUDGE"
 CATEGORY_OTHER = "OTHER"
 
 
@@ -23,6 +24,7 @@ EVENT_TYPE_TO_CATEGORY = {
     "CHEER": CATEGORY_EVENT_CHEER,
     "RAID": CATEGORY_EVENT_RAID,
     "PROACTIVE_FAVORITE": CATEGORY_PROACTIVE_FAVORITE,
+    "QUIET_NUDGE": CATEGORY_QUIET_NUDGE,
 }
 
 
@@ -32,6 +34,7 @@ EVENT_COOLDOWN_SECONDS = {
     CATEGORY_EVENT_CHEER: 20.0,
     CATEGORY_EVENT_RAID: 30.0,
     CATEGORY_PROACTIVE_FAVORITE: 120.0,
+    CATEGORY_QUIET_NUDGE: 600.0,
 }
 GREETING_COOLDOWN_SECONDS = 15.0
 
@@ -111,6 +114,10 @@ def behavior_guidance(
         lines.append("This track is getting heavy rotation today. Give a brief, natural shoutout — mention the artist/track and that it's been coming up a lot. One sentence, max two. Vary your phrasing each time.")
         if enrichment_available:
             lines.append("You have track info — label, year, style. Weave it in naturally if it fits.")
+    elif category == CATEGORY_QUIET_NUDGE:
+        lines.append("Chat has been quiet. If you have a natural observation about the music, the set energy, or something conversational, share it. Keep it organic. Don't announce that it's quiet or ask generic questions like 'how's everyone doing?' — just be yourself and say something you'd actually say.")
+        if now_playing_available:
+            lines.append("You can see what's playing — a comment about the track is a natural fit.")
     elif category in EVENT_COOLDOWN_SECONDS:
         lines.append("Quick thank-you for the event. Be warm and hyped, make them feel like it matters. Keep it brief.")
     elif category == CATEGORY_GREETING:

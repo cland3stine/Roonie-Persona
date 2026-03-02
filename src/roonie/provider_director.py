@@ -48,6 +48,9 @@ _DEICTIC_FOLLOWUP_RE = re.compile(
     r"\b(it|that|this|the latest one|latest one|that one|which one|which track|remind me|what was it)\b",
     re.IGNORECASE,
 )
+
+# Matches camelCase Twitch emote tokens (e.g. ruleof6Cheshire, cland3Heart)
+_TWITCH_EMOTE_TOKEN_RE = re.compile(r'\b[a-zA-Z0-9_]{2,32}[A-Z][a-z]+\b')
 _TRACK_QUESTION_CUE_RE = re.compile(r"\b(what|which|id)\b|[?]", re.IGNORECASE)
 _TRACK_TERM_RE = re.compile(r"\b(track|song|tune|playing)\b", re.IGNORECASE)
 _SKIP_RE = re.compile(r"^\[?skip\]?$", re.IGNORECASE)
@@ -456,6 +459,37 @@ class ProviderDirector:
             return True
         return False
 
+    def _find_unanswered_track_id_asker(self, current_viewer: str) -> Optional[str]:
+        """Scan context buffer for a recent TRACK_ID question from a different viewer
+        that Roonie hasn't answered yet.  Returns the viewer name or None."""
+        current = str(current_viewer or "").strip().lower()
+        turns = self.context_buffer.get_context(max_turns=8)
+        # Walk backwards: find user turns with track_id category that have no
+        # subsequent roonie turn (i.e. unanswered).
+        answered_viewers: set[str] = set()
+        for i in range(len(turns) - 1, -1, -1):
+            t = turns[i]
+            if t.speaker == "roonie":
+                # Any user turn before this roonie turn is considered answered.
+                for j in range(i - 1, -1, -1):
+                    if turns[j].speaker == "user":
+                        u = str(turns[j].tags.get("user", "")).strip().lower()
+                        if u:
+                            answered_viewers.add(u)
+                        break
+                continue
+            if t.speaker == "user":
+                asker = str(t.tags.get("user", "")).strip().lower()
+                cat = str(t.tags.get("category", "")).strip().lower()
+                if (
+                    cat == CATEGORY_TRACK_ID.lower()
+                    and asker
+                    and asker != current
+                    and asker not in answered_viewers
+                ):
+                    return asker
+        return None
+
     def _is_conversation_continuation(self, event: Event) -> bool:
         """True if Roonie's most recent response was to this same viewer
         AND the conversation hasn't moved on (recency gate: ≤3 user messages since)."""
@@ -595,6 +629,11 @@ class ProviderDirector:
     def _continuation_block_reason(self, *, event: Event, category: str) -> str:
         metadata = event.metadata if isinstance(event.metadata, dict) else {}
         text = str(event.message or "")
+        # Block continuation on trivial content (single emote, emoji, punctuation-only)
+        text_stripped = _TWITCH_EMOTE_TOKEN_RE.sub('', text)
+        text_stripped = re.sub(r'[^\w\s]', '', text_stripped).strip()
+        if not text_stripped or len(text_stripped) < 2:
+            return "LOW_CONTENT"
         if self._reply_parent_targets_other(metadata=metadata):
             return "REPLY_PARENT_OTHER"
         if self._mentions_other_user(message=text, metadata=metadata):
@@ -1329,6 +1368,7 @@ class ProviderDirector:
                 "- Is this a natural follow-up to what you were just discussing?\n"
                 "- Is the viewer talking to or about someone else? (Look for @mentions, names, greetings)\n"
                 "- Would jumping in here feel natural, or would you be inserting yourself?\n"
+                "- Did someone ELSE in recent chat ask a question you can answer? If so, respond to THEM with their @tag, not the person whose message triggered this.\n"
                 "If this isn't for you, or you have nothing worth adding, respond with exactly: [SKIP]\n"
                 "Silence is always an option and often the right one."
             )
@@ -1454,6 +1494,21 @@ class ProviderDirector:
             items_used=0,
             dropped_count=0,
         )
+        # Track ID redirect: if continuation fires but someone else asked a track ID
+        # question that went unanswered, redirect the response to that viewer.
+        track_id_redirected_from: Optional[str] = None
+        if continuation:
+            track_asker = self._find_unanswered_track_id_asker(
+                str((event.metadata or {}).get("user", "")).strip().lower()
+            )
+            if track_asker:
+                track_id_redirected_from = str((event.metadata or {}).get("user", "")).strip().lower()
+                metadata = dict(metadata)
+                metadata["user"] = track_asker
+                category = CATEGORY_TRACK_ID
+                continuation = False
+                continuation_reason = "TRACK_ID_REDIRECT"
+
         # Safety cap: reset streak on direct address, block after 4 consecutive continuation replies
         viewer_key = str((event.metadata or {}).get("user", "")).strip().lower()
         continuation_capped = False
@@ -1511,6 +1566,7 @@ class ProviderDirector:
                         "continuation_capped": continuation_capped,
                         "continuation_streak": self._continuation_streak.get(viewer_key, 0) if viewer_key else 0,
                         "unaddressed_track_id_gate": allow_unaddressed_track_id,
+                        "track_id_redirected_from": track_id_redirected_from,
                         "track_command": track_cmd,
                         "track_id_skill_enabled": metadata.get("track_id_skill_enabled"),
                     },

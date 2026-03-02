@@ -21,6 +21,8 @@ def _utc_now_iso() -> str:
 
 _MENTION_RE = re.compile(r"@([A-Za-z0-9_]{2,30})")
 
+_NICK_ALIASES = {"roonie", "roony", "runie", "runi", "rooney"}
+
 
 class LiveChatBridge:
     def __init__(
@@ -45,6 +47,10 @@ class LiveChatBridge:
         self._runtime_director_name: str = ""
         self._runtime_director: Any = None
         self._runtime_env = Env(offline=False)
+        # Quiet-chat nudge state
+        self._last_chat_ts: float = time.time()
+        self._nudge_count: int = 0
+        self._nudge_thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -52,6 +58,8 @@ class LiveChatBridge:
         self._stop.clear()
         self._retry_thread = threading.Thread(target=self._retry_loop, name="roonie-live-chat-retry", daemon=True)
         self._retry_thread.start()
+        self._nudge_thread = threading.Thread(target=self._nudge_loop, name="roonie-quiet-nudge", daemon=True)
+        self._nudge_thread.start()
         self._thread = threading.Thread(target=self._run, name="roonie-live-chat-bridge", daemon=True)
         self._thread.start()
         self._log(f"[LiveChatBridge] started (account={self._account})")
@@ -65,10 +73,14 @@ class LiveChatBridge:
         if self._thread is None:
             if self._retry_thread is not None:
                 self._retry_thread.join(timeout=timeout)
+            if self._nudge_thread is not None:
+                self._nudge_thread.join(timeout=timeout)
             return
         self._thread.join(timeout=timeout)
         if self._retry_thread is not None:
             self._retry_thread.join(timeout=timeout)
+        if self._nudge_thread is not None:
+            self._nudge_thread.join(timeout=timeout)
 
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
@@ -92,7 +104,11 @@ class LiveChatBridge:
         nick = str(bot_nick or "").strip().lower()
         if not text:
             return False
-        if "@roonie" in text:
+        if any(alias in text for alias in ("@roonie", "@roony", "@runie", "@runi", "@rooney")):
+            return True
+        # First-word name match (without @-prefix)
+        first_word = text.split()[0].rstrip(",.!?:") if text else ""
+        if first_word in _NICK_ALIASES:
             return True
         if nick and (f"@{nick}" in text or text.startswith(nick)):
             return True
@@ -101,6 +117,13 @@ class LiveChatBridge:
         reply_parent = str(tags.get("reply-parent-user-login", "")).strip().lower()
         if reply_parent and nick and reply_parent == nick:
             return True
+        # Mid-sentence name reference (not first word, not @-prefixed)
+        # Catches: "Um... Rooney just sent me an email", "I think roonie is cool"
+        # Excludes: possessive forms ("roonie's laptop")
+        for alias in _NICK_ALIASES:
+            pattern = rf"\b{re.escape(alias)}\b(?!'s\b)"
+            if re.search(pattern, text):
+                return True
         return False
 
     @staticmethod
@@ -359,6 +382,7 @@ class LiveChatBridge:
         }
 
     def _emit_one(self, msg: TwitchMsg, *, bot_nick: str) -> None:
+        self._last_chat_ts = time.time()
         viewer = str(msg.nick or "viewer")
         text = str(msg.message or "")
         is_direct = self._is_direct_mention(msg, bot_nick)
@@ -534,6 +558,69 @@ class LiveChatBridge:
                 self._pending_ready.clear()
                 continue
             self._process_retry_item(item)
+
+    def _get_quiet_nudge_config(self) -> Dict[str, Any]:
+        defaults = {
+            "quiet_nudge_enabled": True,
+            "quiet_nudge_threshold_seconds": 300,
+            "quiet_nudge_max_per_session": 5,
+        }
+        if hasattr(self._storage, "get_quiet_nudge_config"):
+            try:
+                cfg = self._storage.get_quiet_nudge_config()
+                if isinstance(cfg, dict):
+                    defaults.update(cfg)
+            except Exception:
+                pass
+        return defaults
+
+    def _nudge_loop(self) -> None:
+        while not self._stop.is_set():
+            self._stop.wait(30.0)
+            if self._stop.is_set():
+                break
+            cfg = self._get_quiet_nudge_config()
+            if not cfg.get("quiet_nudge_enabled", True):
+                continue
+            threshold = max(60, int(cfg.get("quiet_nudge_threshold_seconds", 300)))
+            max_nudges = int(cfg.get("quiet_nudge_max_per_session", 5))
+            if self._nudge_count >= max_nudges:
+                continue
+            elapsed = time.time() - self._last_chat_ts
+            if elapsed < threshold:
+                continue
+            self._emit_quiet_nudge(quiet_minutes=round(elapsed / 60.0, 1))
+
+    def _emit_quiet_nudge(self, *, quiet_minutes: float) -> None:
+        message = (
+            f"[Quiet nudge: chat has been quiet for {quiet_minutes} minutes. "
+            "You're watching a live DJ set. If you have a natural comment about the current track, "
+            "a playful observation, or something that might spark conversation, share it. "
+            "Don't say 'it's quiet in here' or ask forced questions. "
+            "If nothing comes to mind, respond with [SKIP].]"
+        )
+        metadata_extra: Dict[str, Any] = {
+            "source": "quiet_nudge",
+            "event_type": "QUIET_NUDGE",
+            "quiet_minutes": quiet_minutes,
+        }
+        try:
+            result = self._emit_payload_message(
+                actor="roonie-internal",
+                message=message,
+                channel="",
+                is_direct_mention=True,
+                metadata_extra=metadata_extra,
+            )
+            if result.get("emitted"):
+                self._nudge_count += 1
+                self._log(f"[LiveChatBridge] quiet nudge emitted (count={self._nudge_count}, quiet={quiet_minutes}min)")
+            else:
+                self._log(f"[LiveChatBridge] quiet nudge suppressed reason={result.get('reason')}")
+        except Exception as exc:
+            self._log(f"[LiveChatBridge] quiet nudge error: {exc}")
+        # Update last_chat_ts to prevent rapid re-nudging
+        self._last_chat_ts = time.time()
 
     def ingest_proactive_favorite(self, *, track_raw: str, play_count: int) -> Dict[str, Any]:
         message = (
