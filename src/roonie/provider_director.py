@@ -1698,6 +1698,8 @@ class ProviderDirector:
                 redundant_name_stripped = stripped != response_text
                 response_text = stripped
                 response_text = self._normalize_emote_spacing(response_text, approved_emotes)
+                # Collapse newlines — IRC PRIVMSG drops everything after \n
+                response_text = " ".join(response_text.split())
                 action = "RESPOND_PUBLIC"
                 route = f"primary:{provider_used}"
 

@@ -1110,3 +1110,25 @@ class TestPostLaunchPromptGuardrails:
     def test_question_seasoning_guidance(self):
         assert "seasoning" in DEFAULT_STYLE.lower()
         assert "fill space" in DEFAULT_STYLE.lower()
+
+
+class TestNewlineCollapse:
+    """LLM responses with newlines must be collapsed before IRC send."""
+
+    def test_newlines_collapsed_in_response(self, monkeypatch):
+        multiline = "@viewer first line.\n\nsecond line."
+
+        def _stub(**kwargs):
+            kwargs["context"]["provider_selected"] = "openai"
+            kwargs["context"]["moderation_result"] = "allow"
+            return multiline
+        monkeypatch.setattr("roonie.provider_director.route_generate", _stub)
+
+        d = ProviderDirector()
+        env = Env(offline=False)
+        e = _event("nl-1", "@RoonieTheCat hey", is_direct_mention=True)
+        r = d.evaluate(e, env)
+        assert r.action == "RESPOND_PUBLIC"
+        assert "\n" not in r.response_text
+        assert "first line." in r.response_text
+        assert "second line." in r.response_text
