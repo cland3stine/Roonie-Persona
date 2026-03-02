@@ -72,6 +72,7 @@ const EMPTY_STATUS = {
   send_fail_count: 0,
   send_fail_reason: null,
   send_fail_at: null,
+  provider_error_active: false,
 };
 
 const AWAITING = "\u2014";
@@ -1894,6 +1895,12 @@ function LivePage({ statusData, eventsData, suppressionsData, performAction, bus
               <Led color="#ff4136" size={8} pulse />
               <span style={{ color: "#ff4136", fontWeight: 600 }}>SEND FAIL</span>
               <span style={{ color: "#ff4136", fontSize: 9 }}>({statusData.send_fail_count}x)</span>
+            </div>
+          )}
+          {statusData.provider_error_active && (
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <Led color="#ff4136" size={8} pulse />
+              <span style={{ color: "#ff4136", fontWeight: 600 }}>PROVIDER ERROR</span>
             </div>
           )}
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>

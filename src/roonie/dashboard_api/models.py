@@ -38,6 +38,7 @@ class StatusResponse:
     send_fail_count: int = 0
     send_fail_reason: Optional[str] = None
     send_fail_at: Optional[str] = None
+    provider_error_active: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

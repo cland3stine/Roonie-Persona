@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import re
 import threading
 import time
@@ -76,6 +77,22 @@ _LLM_KEY_NAMES = (
     "XAI_API_KEY",
     "ANTHROPIC_API_KEY",
 )
+
+# ---- Circuit Breaker (DEC-047 / BL-REL-001) ----
+_CB_FAILURE_THRESHOLD = 3
+_CB_RECOVERY_SECONDS = 60
+_CIRCUIT_STATE: Dict[str, Dict[str, Any]] = {}
+_CIRCUIT_LOCK = threading.Lock()
+
+# ---- Stub Responses (all-provider-down fallback) ----
+_STUB_RESPONSES = [
+    "hmm, my brain's a little foggy right now... give me a sec",
+    "hold that thought — something's off on my end",
+    "I heard you, just... processing. try me again in a minute",
+    "my wires are crossed right now, sorry about that",
+]
+_STUB_LAST_SENT: float = 0.0
+_STUB_COOLDOWN_SECONDS = 120
 _LLM_KEY_STORE_LOCK = threading.Lock()
 _LLM_KEY_STORE_CACHE: Optional[Dict[str, Any]] = None
 _LLM_KEY_STORE_CACHE_MTIME_NS: Optional[int] = None
@@ -1282,6 +1299,122 @@ def _real_provider_transport():
         return _REAL_PROVIDER_TRANSPORT
 
 
+# ---- Circuit Breaker helpers (DEC-047 / BL-REL-001) ----
+
+
+def _record_circuit_failure(provider_name: str) -> None:
+    with _CIRCUIT_LOCK:
+        state = _CIRCUIT_STATE.setdefault(provider_name, {"failures": 0, "opened_at": None})
+        state["failures"] = state.get("failures", 0) + 1
+        if state["failures"] >= _CB_FAILURE_THRESHOLD and state.get("opened_at") is None:
+            state["opened_at"] = time.monotonic()
+            logger.warning("Circuit breaker OPEN for %s after %d failures", provider_name, state["failures"])
+
+
+def _record_circuit_success(provider_name: str) -> None:
+    with _CIRCUIT_LOCK:
+        _CIRCUIT_STATE[provider_name] = {"failures": 0, "opened_at": None}
+
+
+def _is_circuit_open(provider_name: str) -> bool:
+    with _CIRCUIT_LOCK:
+        state = _CIRCUIT_STATE.get(provider_name)
+        if not state or state.get("opened_at") is None:
+            return False
+        elapsed = time.monotonic() - state["opened_at"]
+        if elapsed >= _CB_RECOVERY_SECONDS:
+            # Half-open: allow one attempt, reset
+            state["failures"] = 0
+            state["opened_at"] = None
+            return False
+        return True
+
+
+def get_circuit_breaker_status() -> Dict[str, Any]:
+    """Return snapshot of circuit breaker state for dashboard."""
+    with _CIRCUIT_LOCK:
+        result: Dict[str, Any] = {}
+        now = time.monotonic()
+        for name, state in _CIRCUIT_STATE.items():
+            opened_at = state.get("opened_at")
+            is_open = False
+            if opened_at is not None:
+                elapsed = now - opened_at
+                is_open = elapsed < _CB_RECOVERY_SECONDS
+            result[name] = {
+                "failures": state.get("failures", 0),
+                "is_open": is_open,
+            }
+        return result
+
+
+# ---- Cross-Provider Failover Chain (DEC-047 / BL-REL-001) ----
+
+
+def _failover_chain(
+    *,
+    failed_provider: str,
+    approved_providers: set,
+    routing_runtime_cfg: Dict[str, Any],
+    prompt: str,
+    context: Dict[str, Any],
+    primary_provider: "Provider",
+) -> Tuple[Optional[str], Optional[str]]:
+    """Try remaining providers in weight-descending order. Returns (output, provider_name) or (None, None)."""
+    weights = routing_runtime_cfg.get("provider_weights", {})
+    if not isinstance(weights, dict):
+        weights = dict(_DEFAULT_PROVIDER_WEIGHTS)
+    candidates = sorted(
+        [p for p in approved_providers if p != failed_provider and p in _SUPPORTED_PROVIDERS],
+        key=lambda p: int(weights.get(p, 0)),
+        reverse=True,
+    )
+    tried: list[str] = [failed_provider]
+    for candidate_name in candidates:
+        tried.append(candidate_name)
+        if _is_circuit_open(candidate_name):
+            logger.info("Failover: skipping %s (circuit open)", candidate_name)
+            continue
+        try:
+            fallback = _provider_for_name(candidate_name, primary_provider, context=context)
+            start = time.monotonic()
+            result = fallback.generate(prompt=prompt, context=context)
+            latency_ms = int((time.monotonic() - start) * 1000)
+            if result is not None:
+                _record_provider_result(candidate_name, latency_ms=latency_ms, success=True)
+                _record_circuit_success(candidate_name)
+                logger.info("Failover: %s -> %s succeeded", failed_provider, candidate_name)
+                context["failover_providers_tried"] = tried
+                return result, candidate_name
+            # None return = failure
+            _record_provider_result(candidate_name, latency_ms=latency_ms, success=False, error="empty_response")
+            _record_circuit_failure(candidate_name)
+        except Exception as exc:
+            logger.warning("Failover: %s failed with %s", candidate_name, exc)
+            _record_circuit_failure(candidate_name)
+
+    context["failover_providers_tried"] = tried
+    return None, None
+
+
+# ---- Stub Responses (DEC-047 / BL-REL-001) ----
+
+
+def _maybe_stub_response(context: Dict[str, Any]) -> Optional[str]:
+    """Return a stub response for direct-address messages when all providers are down."""
+    global _STUB_LAST_SENT
+    is_direct = bool(context.get("is_direct_mention") or context.get("direct_address"))
+    if not is_direct:
+        return None
+    now = time.monotonic()
+    if (now - _STUB_LAST_SENT) < _STUB_COOLDOWN_SECONDS:
+        return None
+    _STUB_LAST_SENT = now
+    context["stub_response"] = True
+    context["suppression_reason"] = None
+    return random.choice(_STUB_RESPONSES)
+
+
 def _provider_for_name(
     name: str,
     registry_default: Provider,
@@ -1568,12 +1701,14 @@ def route_generate(
     routing_class = "general"
     override_mode = "default"
     use_provider_config = bool((context or {}).get("use_provider_config", False))
+    approved_providers: set = set()
     if use_provider_config:
         model_cfg = get_resolved_model_config()
         context["provider_models"] = dict(model_cfg.get("provider_models", {}))
         provider_runtime_status = get_provider_runtime_status()
         routing_runtime_cfg = get_routing_runtime_status()
         approved = set(str(item).strip().lower() for item in provider_runtime_status.get("approved_providers", []))
+        approved_providers = approved
         active_from_provider_cfg = str(provider_runtime_status.get("active_provider", "")).strip().lower()
         default_provider = active_from_provider_cfg or str(
             routing_runtime_cfg.get("default_provider", active_provider_name)
@@ -1628,47 +1763,75 @@ def route_generate(
         _record_provider_request_start(provider_name)
         _record_provider_model(provider_name, str(context.get("model", "")).strip() or None)
 
-    retry_enabled = provider_call_tracked and _truthy_env("ROONIE_PROVIDER_RETRY_ON_ERROR", True)
-    if test_overrides and test_overrides.get("primary_behavior") == "throw":
-        # Keep test-override behavior deterministic.
-        retry_enabled = False
-    max_attempts = 2 if retry_enabled else 1
+    # ---- Primary call ----
     out = None
     last_exc: Optional[Exception] = None
-    attempts_made = 0
-    for attempt in range(1, max_attempts + 1):
-        attempts_made = attempt
-        try:
-            if test_overrides and test_overrides.get("primary_behavior") == "throw":
-                raise RuntimeError("primary forced throw (test override)")
-            out = primary.generate(prompt=prompt, context=context)
-            last_exc = None
-            break
-        except Exception as exc:
-            last_exc = exc
-            if attempt < max_attempts and _is_retryable_provider_exception(exc):
-                continue
-            break
+    primary_failed = False
+    try:
+        if test_overrides and test_overrides.get("primary_behavior") == "throw":
+            raise RuntimeError("primary forced throw (test override)")
+        out = primary.generate(prompt=prompt, context=context)
+        last_exc = None
+    except Exception as exc:
+        last_exc = exc
+        out = None
 
-    if out is None and last_exc is not None:
-        error_detail = _provider_error_detail(last_exc)
-        context["suppression_reason"] = "PROVIDER_ERROR"
-        context["provider_block_reason"] = "PROVIDER_ERROR"
-        context["provider_error_detail"] = error_detail
-        context["provider_error_attempts"] = attempts_made
+    # Detect None-without-exception as provider failure (the core bug fix — DEC-047)
+    if out is None and not ((primary.name == "none") or (not primary.enabled)):
+        primary_failed = True
+        error_detail = _provider_error_detail(last_exc) if last_exc else "empty_response"
         if provider_call_tracked and start_monotonic is not None:
             latency_ms = int((time.monotonic() - start_monotonic) * 1000)
-            _record_provider_result(
-                provider_name,
-                latency_ms=latency_ms,
-                success=False,
-                error=error_detail,
-            )
+            _record_provider_result(provider_name, latency_ms=latency_ms, success=False, error=error_detail)
             result_recorded = True
+        _record_circuit_failure(provider_name)
+        context["provider_error_detail"] = error_detail
+        context["provider_error_attempts"] = 1
+
+        # ---- Cross-provider failover chain (BL-REL-001) ----
+        if use_provider_config and routing_runtime_cfg is not None and approved_providers:
+            logger.info("Primary %s failed (%s), entering failover chain", provider_name, error_detail)
+            context["failover_from"] = provider_name
+            failover_out, failover_name = _failover_chain(
+                failed_provider=provider_name,
+                approved_providers=approved_providers,
+                routing_runtime_cfg=routing_runtime_cfg,
+                prompt=prompt,
+                context=context,
+                primary_provider=primary,
+            )
+            if failover_out is not None and failover_name is not None:
+                out = failover_out
+                provider_name = failover_name
+                primary_failed = False
+                context["failover_used"] = True
+                context["failover_to"] = failover_name
+                context["active_provider"] = failover_name
+                os.environ["ROONIE_ACTIVE_PROVIDER"] = failover_name
+                context.pop("suppression_reason", None)
+                context.pop("provider_block_reason", None)
+                context.pop("provider_error_detail", None)
+                context.pop("provider_error_attempts", None)
+                logger.info("Failover succeeded: %s -> %s", context.get("failover_from"), failover_name)
+            else:
+                context["failover_used"] = True
+                context["failover_to"] = None
+
+        # If still failed after failover, try stub
+        if out is None and primary_failed:
+            stub = _maybe_stub_response(context)
+            if stub is not None:
+                out = stub
+                context["active_provider"] = "stub"
+                os.environ["ROONIE_ACTIVE_PROVIDER"] = "stub"
+                logger.info("All providers failed, using stub response")
+            else:
+                context["suppression_reason"] = "PROVIDER_ERROR"
+                context["provider_block_reason"] = "PROVIDER_ERROR"
     elif out is not None:
-        # Clear stale detail from earlier retry attempts when eventually successful.
         context.pop("provider_error_detail", None)
         context.pop("provider_error_attempts", None)
+        _record_circuit_success(provider_name)
 
     if provider_call_tracked and start_monotonic is not None and not result_recorded:
         latency_ms = int((time.monotonic() - start_monotonic) * 1000)
@@ -1683,10 +1846,13 @@ def route_generate(
     # If primary is "none" or disabled, treat as silent regardless of generate().
     if (primary.name == "none") or (not primary.enabled):
         out = None
-    context["active_provider"] = primary.name
-    os.environ["ROONIE_ACTIVE_PROVIDER"] = primary.name
+    if not context.get("failover_used"):
+        context["active_provider"] = primary.name
+        os.environ["ROONIE_ACTIVE_PROVIDER"] = primary.name
 
-    if use_provider_config and primary.name in {"grok", "anthropic"}:
+    # ---- Moderation (for non-OpenAI providers) ----
+    active_for_moderation = str(context.get("active_provider", provider_name))
+    if use_provider_config and active_for_moderation in {"grok", "anthropic"}:
         context["moderation_provider_used"] = "openai"
         if out is None:
             context["moderation_result"] = "allow"
@@ -1701,10 +1867,10 @@ def route_generate(
                 context["suppression_reason"] = "MODERATION_BLOCK"
                 context["provider_block_reason"] = "MODERATION_BLOCK"
                 context["moderation_blocked_text"] = str(out)
-                _record_moderation_block(primary.name)
+                _record_moderation_block(active_for_moderation)
                 logger.info(
                     "Moderation blocked output from %s: categories=%s",
-                    primary.name,
+                    active_for_moderation,
                     context.get("moderation_flagged_categories", {}),
                 )
                 return None

@@ -471,11 +471,12 @@ def test_provider_failure_no_post_and_no_auto_fallback(tmp_path, monkeypatch) ->
     decision = run_doc["decisions"][0]
     output = run_doc["outputs"][0]
     assert run_doc["active_director"] == "ProviderDirector"
-    assert decision["action"] == "NOOP"
-    assert decision["trace"]["provider_block_reason"] == "PROVIDER_ERROR"
-    assert output["emitted"] is False
-    assert output["reason"] == "PROVIDER_ERROR"
-    assert calls == []
+    # With cross-provider failover (DEC-047), primary failure triggers fallback
+    # to the next approved provider. Stub providers succeed in test mode.
+    assert decision["action"] == "RESPOND_PUBLIC"
+    assert decision["response_text"] is not None
+    routing = decision["trace"].get("routing", {})
+    assert routing.get("failover_used") is True
 
 
 def test_status_endpoint_reflects_toggle_state_and_audit_correlation(tmp_path: Path, monkeypatch) -> None:

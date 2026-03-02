@@ -5,6 +5,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
 from _pytest.tmpdir import TempPathFactory
 
 ROOT = str(Path(__file__).resolve().parents[1])
@@ -74,3 +75,16 @@ def pytest_configure(config) -> None:
 
 def pytest_sessionfinish(session, exitstatus) -> None:
     _cleanup_sensitive_tmp_files(_TMP_ROOT)
+
+
+@pytest.fixture(autouse=True)
+def _reset_provider_failover_state():
+    """Reset circuit breaker and stub cooldown state between tests to prevent bleed."""
+    from providers import router
+    with router._CIRCUIT_LOCK:
+        router._CIRCUIT_STATE.clear()
+    router._STUB_LAST_SENT = 0.0
+    yield
+    with router._CIRCUIT_LOCK:
+        router._CIRCUIT_STATE.clear()
+    router._STUB_LAST_SENT = 0.0

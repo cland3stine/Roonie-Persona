@@ -29,6 +29,7 @@ from providers.router import (
     get_runtime_config_paths,
     get_provider_runtime_status,
     get_routing_runtime_status,
+    get_circuit_breaker_status,
     set_provider_active,
     update_routing_runtime_controls,
     update_provider_caps,
@@ -3815,6 +3816,7 @@ class DashboardStorage:
         step_ms["eventsub"] = (time.perf_counter() - t4) * 1000.0
 
         send_fail = self.get_send_failure_state()
+        cb_status = get_circuit_breaker_status()
 
         active_provider = str(provider_status.get("active_provider", "none") or "none")
         if active_provider == "none":
@@ -3888,6 +3890,7 @@ class DashboardStorage:
             send_fail_count=int(send_fail.get("fail_count", 0) or 0),
             send_fail_reason=send_fail.get("last_fail_reason"),
             send_fail_at=send_fail.get("last_fail_at"),
+            provider_error_active=any(v.get("is_open", False) for v in cb_status.values()),
         )
         step_ms["compose"] = (time.perf_counter() - t5) * 1000.0
 

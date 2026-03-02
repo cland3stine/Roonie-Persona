@@ -528,10 +528,12 @@ def test_provider_failure_no_auto_fallback_and_not_postable(tmp_path, monkeypatc
     decision = run_doc["decisions"][0]
     output = run_doc["outputs"][0]
     assert decision["trace"]["director"]["type"] == "ProviderDirector"
-    assert decision["action"] == "NOOP"
-    assert decision["response_text"] is None
-    assert output["emitted"] is False
-    assert output["reason"] == "PROVIDER_ERROR"
+    # With cross-provider failover (DEC-047), primary failure triggers fallback
+    # to the next approved provider. Stub providers succeed in test mode.
+    assert decision["action"] == "RESPOND_PUBLIC"
+    assert decision["response_text"] is not None
+    routing = decision["trace"].get("routing", {})
+    assert routing.get("failover_used") is True
 
 
 def test_disarmed_session_output_gate_suppresses_provider_proposal(tmp_path, monkeypatch) -> None:

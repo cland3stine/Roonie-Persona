@@ -1822,6 +1822,11 @@ class ProviderDirector:
                 "moderation_flagged_categories": context.get("moderation_flagged_categories"),
                 "override_mode": str(context.get("override_mode", "default")),
                 "provider_error_attempts": context.get("provider_error_attempts"),
+                "failover_used": context.get("failover_used"),
+                "failover_from": context.get("failover_from"),
+                "failover_to": context.get("failover_to"),
+                "failover_providers_tried": context.get("failover_providers_tried"),
+                "stub_response": context.get("stub_response"),
             },
             "proposal": {
                 "text": response_text,
