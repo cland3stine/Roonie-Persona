@@ -143,6 +143,70 @@ class TestNudgeEmission:
 # Session cap
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# [SKIP] parsing for nudge events
+# ---------------------------------------------------------------------------
+
+class TestNudgeSkipParsing:
+    """[SKIP] response from LLM should be suppressed, not sent to chat."""
+
+    def test_skip_response_produces_noop(self, monkeypatch):
+        from roonie.provider_director import ProviderDirector
+        from roonie.types import Env, Event
+
+        def _stub(**kwargs):
+            kwargs["context"]["provider_selected"] = "grok"
+            kwargs["context"]["moderation_result"] = "allow"
+            return "[SKIP]"
+        monkeypatch.setattr("roonie.provider_director.route_generate", _stub)
+
+        director = ProviderDirector()
+        env = Env(offline=False)
+        event = Event(
+            event_id="nudge-skip-1",
+            message="[Quiet nudge: chat has been quiet]",
+            metadata={
+                "user": "roonie-internal",
+                "is_direct_mention": True,
+                "event_type": "QUIET_NUDGE",
+                "source": "quiet_nudge",
+                "mode": "live",
+                "platform": "twitch",
+                "session_id": "test-session",
+            },
+        )
+        result = director.evaluate(event, env)
+        assert result.action == "NOOP", f"[SKIP] should produce NOOP, got {result.action}"
+
+    def test_real_response_still_emits(self, monkeypatch):
+        from roonie.provider_director import ProviderDirector
+        from roonie.types import Env, Event
+
+        def _stub(**kwargs):
+            kwargs["context"]["provider_selected"] = "grok"
+            kwargs["context"]["moderation_result"] = "allow"
+            return "this track has such a smooth groove"
+        monkeypatch.setattr("roonie.provider_director.route_generate", _stub)
+
+        director = ProviderDirector()
+        env = Env(offline=False)
+        event = Event(
+            event_id="nudge-emit-1",
+            message="[Quiet nudge: chat has been quiet]",
+            metadata={
+                "user": "roonie-internal",
+                "is_direct_mention": True,
+                "event_type": "QUIET_NUDGE",
+                "source": "quiet_nudge",
+                "mode": "live",
+                "platform": "twitch",
+                "session_id": "test-session",
+            },
+        )
+        result = director.evaluate(event, env)
+        assert result.action == "RESPOND_PUBLIC"
+
+
 class TestNudgeSessionCap:
     """Nudge loop respects max_per_session."""
 

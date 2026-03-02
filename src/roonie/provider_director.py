@@ -1680,8 +1680,9 @@ class ProviderDirector:
         redundant_name_stripped = False
         if isinstance(out, str) and out.strip():
             raw = out.strip()
-            # [SKIP] opt-out: only for continuation messages — LLM decided this isn't for Roonie
-            if continuation and _SKIP_RE.match(raw):
+            # [SKIP] opt-out: continuation, quiet nudge, or proactive — LLM decided to stay silent
+            skip_eligible = continuation or category in ("QUIET_NUDGE", "PROACTIVE_FAVORITE")
+            if skip_eligible and _SKIP_RE.match(raw):
                 response_text = None
                 action = "NOOP"
                 continuation_skipped = True
