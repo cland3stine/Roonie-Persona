@@ -7,18 +7,21 @@ import pytest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from src.roonie.dashboard_api.storage import DashboardStorage
+from roonie.dashboard_api.storage import DashboardStorage
 
 
 @pytest.fixture
-def storage(tmp_path: Path) -> DashboardStorage:
+def storage(tmp_path: Path, monkeypatch) -> DashboardStorage:
     runs = tmp_path / "runs"
     runs.mkdir()
+    data = tmp_path / "data"
+    data.mkdir(exist_ok=True)
+    logs = tmp_path / "logs"
+    logs.mkdir(exist_ok=True)
+    # Isolate DashboardStorage from real data dir to prevent env var leaks.
+    monkeypatch.setenv("ROONIE_DASHBOARD_DATA_DIR", str(data))
+    monkeypatch.setenv("ROONIE_DASHBOARD_LOGS_DIR", str(logs))
     s = DashboardStorage(runs_dir=runs)
-    s.data_dir = tmp_path / "data"
-    s.data_dir.mkdir(exist_ok=True)
-    s._calendar_events_path = s.data_dir / "calendar_events.json"
-    s._stream_schedule_path = s.data_dir / "stream_schedule.json"
     return s
 
 
@@ -564,7 +567,7 @@ def test_preserve_created_at_on_update(storage: DashboardStorage):
 
 # ── Provider Director prompt block tests ────────────────────────
 
-from src.roonie.provider_director import ProviderDirector
+from roonie.provider_director import ProviderDirector
 
 
 def test_calendar_schedule_block_empty():

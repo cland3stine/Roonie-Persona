@@ -88,3 +88,28 @@ def _reset_provider_failover_state():
     with router._CIRCUIT_LOCK:
         router._CIRCUIT_STATE.clear()
     router._STUB_LAST_SENT = 0.0
+
+
+_ENV_VARS_TO_ISOLATE = [
+    "ROONIE_ENFORCE_SETUP_GATE",
+    "ROONIE_ARMED",
+    "ROONIE_ARM",
+    "ROONIE_OUTPUT_DISABLED",
+]
+
+
+@pytest.fixture(autouse=True)
+def _clean_leaked_env_vars():
+    """Prevent env var leaks between tests.
+
+    DashboardStorage.__init__ and _pin_setup_gate_launch_default() set env
+    vars via os.environ directly (bypassing monkeypatch tracking). This
+    fixture captures and restores them regardless of test outcome.
+    """
+    saved = {k: os.environ.get(k) for k in _ENV_VARS_TO_ISOLATE}
+    yield
+    for k, v in saved.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v

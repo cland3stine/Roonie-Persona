@@ -245,14 +245,16 @@ def test_runtime_entry_root_uses_executable_parent_when_frozen(tmp_path: Path, m
 
 
 def test_pin_setup_gate_launch_default_sets_enforced_when_unset(monkeypatch) -> None:
-    monkeypatch.delenv("ROONIE_ENFORCE_SETUP_GATE", raising=False)
+    # Use setenv+delenv dance so monkeypatch tracks the var for cleanup even
+    # when _pin_setup_gate_launch_default() sets it via os.environ directly.
+    monkeypatch.setenv("ROONIE_ENFORCE_SETUP_GATE", "__placeholder__")
+    monkeypatch.delenv("ROONIE_ENFORCE_SETUP_GATE")
     monkeypatch.delenv("ROONIE_REQUIRE_SETUP_WIZARD", raising=False)
 
     result = _pin_setup_gate_launch_default()
 
     assert os.getenv("ROONIE_ENFORCE_SETUP_GATE") == "1"
     assert result == {"value": "1", "source": "launch_default"}
-    os.environ.pop("ROONIE_ENFORCE_SETUP_GATE", None)
 
 
 def test_pin_setup_gate_launch_default_respects_explicit_env(monkeypatch) -> None:
@@ -263,18 +265,18 @@ def test_pin_setup_gate_launch_default_respects_explicit_env(monkeypatch) -> Non
 
     assert os.getenv("ROONIE_ENFORCE_SETUP_GATE") == "0"
     assert result == {"value": "0", "source": "explicit"}
-    os.environ.pop("ROONIE_ENFORCE_SETUP_GATE", None)
 
 
 def test_pin_setup_gate_launch_default_promotes_legacy_alias(monkeypatch) -> None:
-    monkeypatch.delenv("ROONIE_ENFORCE_SETUP_GATE", raising=False)
+    # Same setenv+delenv dance to ensure monkeypatch tracks cleanup.
+    monkeypatch.setenv("ROONIE_ENFORCE_SETUP_GATE", "__placeholder__")
+    monkeypatch.delenv("ROONIE_ENFORCE_SETUP_GATE")
     monkeypatch.setenv("ROONIE_REQUIRE_SETUP_WIZARD", "0")
 
     result = _pin_setup_gate_launch_default()
 
     assert os.getenv("ROONIE_ENFORCE_SETUP_GATE") == "0"
     assert result == {"value": "0", "source": "legacy_alias"}
-    os.environ.pop("ROONIE_ENFORCE_SETUP_GATE", None)
 
 
 def test_safe_start_defaults_force_disarmed_output_disabled(tmp_path: Path, monkeypatch) -> None:
