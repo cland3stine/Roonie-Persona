@@ -41,6 +41,11 @@ def test_eventsub_normalization_maps_supported_types() -> None:
             {"from_broadcaster_user_login": "djx", "from_broadcaster_user_name": "DJX", "viewers": 42},
             "RAID",
         ),
+        (
+            "stream.online",
+            {"broadcaster_user_login": "ruleofrune", "broadcaster_user_name": "RuleOfRune"},
+            "STREAM_ONLINE",
+        ),
     ]
     for idx, (raw_type, event_payload, expected_type) in enumerate(samples, start=1):
         message = {
@@ -59,6 +64,25 @@ def test_eventsub_normalization_maps_supported_types() -> None:
         assert normalized["event_type"] == expected_type
         assert normalized["raw_type"] == raw_type
         assert normalized["twitch_event_id"] == f"evt-{idx}"
+
+
+def test_eventsub_subscriptions_include_stream_online(monkeypatch) -> None:
+    posted_types: List[str] = []
+    client = EventSubWSClient(
+        oauth_token="oauth:testtoken",
+        client_id="cid",
+        broadcaster_user_id="1234",
+        on_event=lambda _event: None,
+        ws_factory=lambda _url: None,
+    )
+
+    def _post_subscription(*, session_id: str, sub_type: str, version: str, condition: Dict[str, Any]) -> None:
+        _ = (session_id, version, condition)
+        posted_types.append(sub_type)
+
+    monkeypatch.setattr(client, "_post_subscription", _post_subscription)
+    client._ensure_subscriptions("session-1")
+    assert "stream.online" in posted_types
 
 
 def test_eventsub_dedupe_by_twitch_event_id() -> None:
@@ -264,3 +288,46 @@ def test_status_exposes_eventsub_runtime_fields(tmp_path: Path, monkeypatch) -> 
     assert status["eventsub_session_id"] == "es-session-1"
     assert status["eventsub_last_message_ts"] == "2026-02-15T12:00:00+00:00"
     assert status["eventsub_reconnect_count"] == 3
+
+
+def test_eventsub_stream_online_routes_to_social_announcer(tmp_path: Path, monkeypatch) -> None:
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    storage = DashboardStorage(runs_dir=tmp_path / "runs")
+    live_bridge = LiveChatBridge(storage=storage, account="bot")
+    eventsub_bridge = EventSubBridge(storage=storage, live_bridge=live_bridge)
+
+    ingest_calls: List[Dict[str, Any]] = []
+    social_calls: List[Dict[str, Any]] = []
+
+    def _ingest_stub(normalized_event: Dict[str, Any], *, text: str) -> Dict[str, Any]:
+        ingest_calls.append({"normalized_event": dict(normalized_event), "text": str(text)})
+        return {"emitted": True, "reason": "SENT", "session_id": "sid-ingest"}
+
+    class _SocialStub:
+        def announce_stream_online(self, normalized_event: Dict[str, Any]) -> Dict[str, Any]:
+            social_calls.append(dict(normalized_event))
+            return {"ok": True, "sent": True, "reason": "SENT"}
+
+    monkeypatch.setattr(live_bridge, "ingest_eventsub_event", _ingest_stub)
+    eventsub_bridge._social_announcer = _SocialStub()
+
+    eventsub_bridge._on_event(
+        {
+            "event_type": "STREAM_ONLINE",
+            "raw_type": "stream.online",
+            "twitch_event_id": "evt-stream-online-1",
+            "user_login": "ruleofrune",
+            "display_name": "RuleOfRune",
+            "channel": "ruleofrune",
+            "timestamp": "2026-03-03T00:00:01Z",
+        }
+    )
+
+    assert ingest_calls == []
+    assert len(social_calls) == 1
+    eventsub_log = (tmp_path / "logs" / "eventsub_events.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    assert eventsub_log
+    last = json.loads(eventsub_log[-1])
+    assert last["twitch_event_id"] == "evt-stream-online-1"
+    assert last["event_type"] == "STREAM_ONLINE"
+    assert last["emitted"] is True

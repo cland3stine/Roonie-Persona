@@ -46,6 +46,7 @@ def normalize_eventsub_notification(message: Dict[str, Any]) -> Optional[Dict[st
         "twitch_event_id": message_id,
         "user_login": str(event.get("user_login", "")).strip() or None,
         "display_name": str(event.get("user_name", "")).strip() or None,
+        "channel": str(event.get("broadcaster_user_login", "")).strip().lstrip("#").lower() or None,
         "amount": None,
         "tier": None,
         "months": None,
@@ -81,6 +82,16 @@ def normalize_eventsub_notification(message: Dict[str, Any]) -> Optional[Dict[st
             base["raid_viewer_count"] = int(event.get("viewers", 0) or 0)
         except (TypeError, ValueError):
             base["raid_viewer_count"] = 0
+    elif raw_type == "stream.online":
+        base["event_type"] = "STREAM_ONLINE"
+        base["user_login"] = str(event.get("broadcaster_user_login", "")).strip() or base["user_login"]
+        base["display_name"] = str(event.get("broadcaster_user_name", "")).strip() or base["display_name"]
+        base["channel"] = str(event.get("broadcaster_user_login", "")).strip().lstrip("#").lower() or base["channel"]
+    elif raw_type == "stream.offline":
+        base["event_type"] = "STREAM_OFFLINE"
+        base["user_login"] = str(event.get("broadcaster_user_login", "")).strip() or base["user_login"]
+        base["display_name"] = str(event.get("broadcaster_user_name", "")).strip() or base["display_name"]
+        base["channel"] = str(event.get("broadcaster_user_login", "")).strip().lstrip("#").lower() or base["channel"]
     else:
         return None
     return base
@@ -229,6 +240,7 @@ class EventSubWSClient:
             ("channel.subscribe", "1", {"broadcaster_user_id": self._broadcaster_user_id}),
             ("channel.cheer", "1", {"broadcaster_user_id": self._broadcaster_user_id}),
             ("channel.raid", "1", {"to_broadcaster_user_id": self._broadcaster_user_id}),
+            ("stream.online", "1", {"broadcaster_user_id": self._broadcaster_user_id}),
         ]
         for sub_type, version, condition in specs:
             try:

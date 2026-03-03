@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
+from roonie.control_room.social_announcer import SocialAnnouncer
+
 from .models import serialize_many
 from .storage import DashboardStorage, LoginRateLimiter
 
@@ -42,6 +44,7 @@ _SENSITIVE_GET_REQUIRED_ROLE: Dict[str, str] = {
     "/api/audio/devices": "operator",
     "/api/trackr/config": "operator",
     "/api/trackr/status": "operator",
+    "/api/socials/status": "operator",
     "/api/calendar/events": "operator",
     "/api/memory/cultural": "operator",
     "/api/memory/viewers": "operator",
@@ -877,6 +880,86 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
             )
             _json_response(self, {"ok": True, "trackr_config": config, "audit": audit.to_dict()})
 
+        def _handle_socials_config_write(self, *, patch: bool) -> None:
+            ok_body, payload = self._read_json_body()
+            if not ok_body:
+                _json_response(
+                    self,
+                    {"ok": False, "error": "bad_request", "detail": "Invalid JSON body."},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            identity = self._authorize_write(
+                action="SOCIALS_CONFIG_UPDATE",
+                payload=payload,
+                required_role="operator",
+            )
+            if identity is None:
+                return
+            try:
+                config, diff_payload = storage.update_socials_config(
+                    payload,
+                    actor=(identity.get("username") or identity.get("actor")),
+                    patch=patch,
+                )
+            except ValueError as exc:
+                _json_response(
+                    self,
+                    {"ok": False, "error": "bad_request", "detail": str(exc)},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            audit = storage.record_operator_action(
+                operator=identity["operator"],
+                action="SOCIALS_CONFIG_UPDATE",
+                payload=diff_payload,
+                result="OK",
+                actor=identity["actor"],
+                username=identity.get("username"),
+                role=identity.get("role"),
+                auth_mode=identity.get("auth_mode"),
+            )
+            _json_response(self, {"ok": True, "socials_config": config, "audit": audit.to_dict()})
+
+        def _handle_socials_test_send(self) -> None:
+            ok_body, payload = self._read_json_body()
+            if not ok_body:
+                _json_response(
+                    self,
+                    {"ok": False, "error": "bad_request", "detail": "Invalid JSON body."},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            identity = self._authorize_write(
+                action="SOCIALS_TEST_SEND",
+                payload=payload,
+                required_role="operator",
+            )
+            if identity is None:
+                return
+            network = str((payload or {}).get("network", "discord")).strip().lower() or "discord"
+            announcer = SocialAnnouncer(
+                storage=storage,
+                logger=lambda line: logger.info(line),
+            )
+            result = announcer.send_test(network=network)
+            sent = bool(result.get("sent", False))
+            audit = storage.record_operator_action(
+                operator=identity["operator"],
+                action="SOCIALS_TEST_SEND",
+                payload={"network": network},
+                result=("OK" if sent else f"NO_SEND:{str(result.get('reason', 'UNKNOWN'))}"),
+                actor=identity["actor"],
+                username=identity.get("username"),
+                role=identity.get("role"),
+                auth_mode=identity.get("auth_mode"),
+            )
+            _json_response(
+                self,
+                {"ok": bool(result.get("ok", False)), "result": result, "audit": audit.to_dict()},
+                status=(HTTPStatus.OK if sent else HTTPStatus.BAD_REQUEST),
+            )
+
         # ── calendar event handlers ────────────────────────────
 
         def _handle_calendar_event_create(self) -> None:
@@ -1139,6 +1222,9 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
                 return
             if path == "/api/trackr/status":
                 _json_response(self, storage.get_trackr_state())
+                return
+            if path == "/api/socials/status":
+                _json_response(self, storage.get_socials_status())
                 return
             # ── calendar events ─────────────────────────────────
             if path == "/api/calendar/events":
@@ -2490,6 +2576,9 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
             if path == "/api/calendar/events":
                 self._handle_calendar_event_create()
                 return
+            if path == "/api/socials/test_send":
+                self._handle_socials_test_send()
+                return
             if path == "/api/calendar/migrate":
                 self._handle_calendar_migrate()
                 return
@@ -2524,6 +2613,9 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
                 return
             if parsed.path == "/api/trackr/config":
                 self._handle_trackr_config_write(patch=False)
+                return
+            if parsed.path == "/api/socials/config":
+                self._handle_socials_config_write(patch=False)
                 return
             if parsed.path.startswith("/api/calendar/events/"):
                 event_id = parsed.path[len("/api/calendar/events/"):].strip()
@@ -2560,6 +2652,9 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
                 return
             if parsed.path == "/api/trackr/config":
                 self._handle_trackr_config_write(patch=True)
+                return
+            if parsed.path == "/api/socials/config":
+                self._handle_socials_config_write(patch=True)
                 return
             if parsed.path.startswith("/api/calendar/events/"):
                 event_id = parsed.path[len("/api/calendar/events/"):].strip()

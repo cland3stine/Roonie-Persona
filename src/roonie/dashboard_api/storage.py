@@ -341,6 +341,7 @@ class DashboardStorage:
         self._stream_schedule_path = self.data_dir / "stream_schedule.json"
         self._audio_config_path = self.data_dir / "audio_config.json"
         self._trackr_config_path = self.data_dir / "trackr_config.json"
+        self._socials_config_path = self.data_dir / "socials_config.json"
         self._calendar_events_path = self.data_dir / "calendar_events.json"
         self._library_dir = self.data_dir / "library"
         self._library_xml_path = self._library_dir / "rekordbox.xml"
@@ -377,6 +378,17 @@ class DashboardStorage:
         }
         self._audio_runtime_state: Dict[str, Any] = {}
         self._trackr_runtime_state: Dict[str, Any] = {}
+        self._socials_runtime_state: Dict[str, Any] = {
+            "last_attempt_at": None,
+            "last_success_at": None,
+            "last_error": None,
+            "last_network": None,
+            "last_event_type": None,
+            "last_provider": None,
+            "last_message": None,
+            "success_count": 0,
+            "failure_count": 0,
+        }
         self._send_failure_state: Dict[str, Any] = {
             "fail_count": 0,
             "last_fail_reason": None,
@@ -4344,6 +4356,210 @@ class DashboardStorage:
     def get_trackr_state(self) -> Dict[str, Any]:
         with self._lock:
             return dict(self._trackr_runtime_state)
+
+    # ── socials_config ────────────────────────────────────────
+
+    @staticmethod
+    def _default_socials_config() -> Dict[str, Any]:
+        return {
+            "enabled": False,
+            "llm_enabled": True,
+            "prompt_style": "",
+            "discord": {
+                "enabled": False,
+                "webhook_url": "",
+                "username_override": "Roonie",
+                "avatar_url": "",
+                "mention_everyone": False,
+            },
+            "x": {
+                "enabled": False,
+                "auto_post_live": False,
+                "connected": False,
+                "handle": "",
+                "integration_mode": "scaffold",
+            },
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_by": "system",
+        }
+
+    def _normalize_socials_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        base = self._default_socials_config()
+        raw = payload if isinstance(payload, dict) else {}
+
+        discord_raw = raw.get("discord", {})
+        if not isinstance(discord_raw, dict):
+            discord_raw = {}
+        discord_webhook = self._bounded_text(
+            discord_raw.get("webhook_url", base["discord"]["webhook_url"]),
+            field_name="discord.webhook_url",
+            max_len=500,
+            required=False,
+        )
+        if discord_webhook and not _looks_like_url(discord_webhook):
+            raise ValueError("discord.webhook_url must be an http(s) URL.")
+        discord_avatar = self._bounded_text(
+            discord_raw.get("avatar_url", base["discord"]["avatar_url"]),
+            field_name="discord.avatar_url",
+            max_len=500,
+            required=False,
+        )
+        if discord_avatar and not _looks_like_url(discord_avatar):
+            raise ValueError("discord.avatar_url must be an http(s) URL.")
+
+        x_raw = raw.get("x", {})
+        if not isinstance(x_raw, dict):
+            x_raw = {}
+        x_mode = self._bounded_text(
+            x_raw.get("integration_mode", base["x"]["integration_mode"]),
+            field_name="x.integration_mode",
+            max_len=24,
+            required=False,
+        ).lower() or "scaffold"
+        if x_mode not in {"scaffold", "oauth"}:
+            x_mode = "scaffold"
+
+        return {
+            "enabled": _to_bool(raw.get("enabled"), bool(base["enabled"])),
+            "llm_enabled": _to_bool(raw.get("llm_enabled"), bool(base["llm_enabled"])),
+            "prompt_style": self._bounded_text(
+                raw.get("prompt_style", base["prompt_style"]),
+                field_name="prompt_style",
+                max_len=600,
+                required=False,
+            ),
+            "discord": {
+                "enabled": _to_bool(discord_raw.get("enabled"), bool(base["discord"]["enabled"])),
+                "webhook_url": discord_webhook,
+                "username_override": self._bounded_text(
+                    discord_raw.get("username_override", base["discord"]["username_override"]),
+                    field_name="discord.username_override",
+                    max_len=80,
+                    required=False,
+                ) or "Roonie",
+                "avatar_url": discord_avatar,
+                "mention_everyone": _to_bool(
+                    discord_raw.get("mention_everyone"),
+                    bool(base["discord"]["mention_everyone"]),
+                ),
+            },
+            "x": {
+                "enabled": _to_bool(x_raw.get("enabled"), bool(base["x"]["enabled"])),
+                "auto_post_live": _to_bool(x_raw.get("auto_post_live"), bool(base["x"]["auto_post_live"])),
+                "connected": _to_bool(x_raw.get("connected"), bool(base["x"]["connected"])),
+                "handle": self._bounded_text(
+                    x_raw.get("handle", base["x"]["handle"]),
+                    field_name="x.handle",
+                    max_len=80,
+                    required=False,
+                ),
+                "integration_mode": x_mode,
+            },
+        }
+
+    def _read_or_create_socials_config_locked(self) -> Dict[str, Any]:
+        raw = _safe_read_json(self._socials_config_path)
+        if isinstance(raw, dict):
+            config = self._normalize_socials_config(raw)
+        else:
+            config = self._normalize_socials_config(self._default_socials_config())
+        config.setdefault("updated_at", datetime.now(timezone.utc).isoformat())
+        config.setdefault("updated_by", "system")
+        self._write_json_atomic(self._socials_config_path, config)
+        return config
+
+    def get_socials_config(self) -> Dict[str, Any]:
+        with self._lock:
+            config = self._read_or_create_socials_config_locked()
+            return deepcopy(config)
+
+    def update_socials_config(
+        self,
+        payload: Dict[str, Any],
+        *,
+        actor: Optional[str] = None,
+        patch: bool = False,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid JSON payload.")
+        actor_norm = self.normalize_actor(actor)
+        with self._lock:
+            old = self._read_or_create_socials_config_locked()
+            merged = (
+                self._merge_dicts(old, payload)
+                if patch
+                else self._merge_dicts(self._default_socials_config(), payload)
+            )
+            new = self._normalize_socials_config(merged)
+            new["updated_at"] = datetime.now(timezone.utc).isoformat()
+            new["updated_by"] = actor_norm
+            self._write_json_atomic(self._socials_config_path, new)
+
+        changed_keys: List[str] = []
+        for key in ("enabled", "llm_enabled", "prompt_style"):
+            if old.get(key) != new.get(key):
+                changed_keys.append(key)
+        for key in ("enabled", "webhook_url", "username_override", "avatar_url", "mention_everyone"):
+            if old.get("discord", {}).get(key) != new.get("discord", {}).get(key):
+                changed_keys.append(f"discord.{key}")
+        for key in ("enabled", "auto_post_live", "connected", "handle", "integration_mode"):
+            if old.get("x", {}).get(key) != new.get("x", {}).get(key):
+                changed_keys.append(f"x.{key}")
+
+        old_hash = _json_sha256(old)
+        new_hash = _json_sha256(new)
+        audit_payload = {
+            "changed_keys": changed_keys,
+            "old_snapshot_hash": old_hash,
+            "new_snapshot_hash": new_hash,
+            "mode": "patch" if patch else "put",
+        }
+        return new, audit_payload
+
+    # ── socials runtime state ─────────────────────────────────
+
+    def record_social_delivery(
+        self,
+        *,
+        network: str,
+        event_type: str,
+        message: str,
+        provider: Optional[str],
+        sent: bool,
+        error: Optional[str] = None,
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        network_text = str(network or "").strip().lower() or "unknown"
+        event_type_text = str(event_type or "").strip().upper() or "UNKNOWN"
+        provider_text = str(provider or "").strip().lower() or None
+        message_text = str(message or "").strip()
+        with self._lock:
+            state = self._socials_runtime_state
+            state["last_attempt_at"] = now
+            state["last_network"] = network_text
+            state["last_event_type"] = event_type_text
+            state["last_provider"] = provider_text
+            state["last_message"] = message_text or None
+            if bool(sent):
+                state["last_success_at"] = now
+                state["last_error"] = None
+                state["success_count"] = int(state.get("success_count", 0) or 0) + 1
+            else:
+                state["last_error"] = str(error or "").strip() or "send_failed"
+                state["failure_count"] = int(state.get("failure_count", 0) or 0) + 1
+
+    def get_socials_runtime_state(self) -> Dict[str, Any]:
+        with self._lock:
+            return dict(self._socials_runtime_state)
+
+    def get_socials_status(self) -> Dict[str, Any]:
+        with self._lock:
+            config = deepcopy(self._read_or_create_socials_config_locked())
+            runtime = dict(self._socials_runtime_state)
+        return {
+            "config": config,
+            "runtime": runtime,
+        }
 
     # ── calendar events ───────────────────────────────────────
 

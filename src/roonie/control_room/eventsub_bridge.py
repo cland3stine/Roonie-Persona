@@ -4,6 +4,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
 
+from roonie.control_room.social_announcer import SocialAnnouncer
 from twitch.eventsub_ws import EventSubWSClient
 
 
@@ -20,10 +21,16 @@ class EventSubBridge:
         storage: Any,
         live_bridge: Any,
         logger: Optional[Callable[[str], None]] = None,
+        social_announcer: Optional[Any] = None,
     ) -> None:
         self._storage = storage
         self._live_bridge = live_bridge
         self._logger = logger
+        self._social_announcer = (
+            social_announcer
+            if social_announcer is not None
+            else SocialAnnouncer(storage=storage, logger=logger)
+        )
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._client: Optional[EventSubWSClient] = None
@@ -89,6 +96,10 @@ class EventSubBridge:
         if event_type == "RAID":
             count = normalized.get("raid_viewer_count")
             return f"@RoonieTheCat heads up: raid from {display} ({count or 0} viewers)."
+        if event_type == "STREAM_ONLINE":
+            return f"@RoonieTheCat heads up: stream just went live on {display}."
+        if event_type == "STREAM_OFFLINE":
+            return f"@RoonieTheCat heads up: stream went offline on {display}."
         return f"@RoonieTheCat heads up: {display} triggered {event_type}."
 
     @staticmethod
@@ -108,7 +119,20 @@ class EventSubBridge:
         event_type = str(normalized.get("event_type", "UNKNOWN")).strip().upper()
         event_id = str(normalized.get("twitch_event_id", "")).strip()
         result: Dict[str, Any]
-        if self._should_ignore_event(normalized):
+        if event_type == "STREAM_ONLINE":
+            try:
+                social_result = self._social_announcer.announce_stream_online(normalized)
+                result = {
+                    "emitted": bool(social_result.get("sent", False)),
+                    "reason": str(social_result.get("reason", "SOCIAL_NO_SEND")).strip() or "SOCIAL_NO_SEND",
+                    "session_id": None,
+                }
+            except Exception as exc:
+                result = {"emitted": False, "reason": f"SOCIAL_ANNOUNCE_ERROR:{exc}", "session_id": None}
+                self._log(f"[EventSubBridge] social announce failed event_id={event_id} error={exc}")
+        elif event_type == "STREAM_OFFLINE":
+            result = {"emitted": False, "reason": "STREAM_OFFLINE_NOOP", "session_id": None}
+        elif self._should_ignore_event(normalized):
             result = {"emitted": False, "reason": "IGNORED_SELF_SUB", "session_id": None}
         else:
             try:

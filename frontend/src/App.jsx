@@ -15,6 +15,7 @@ const PAGES_BOTTOM = [
   { id: "providers", label: "PROVIDERS & COST" },
   { id: "senses", label: "SENSES" },
   { id: "auth", label: "AUTH & ACCOUNTS" },
+  { id: "socials", label: "CONNECTED SOCIALS" },
   { id: "studio", label: "STUDIO PROFILE" },
   { id: "governance", label: "SETTINGS & GOV" },
 ];
@@ -593,6 +594,7 @@ function useDashboardData(activePage) {
   const [audioDevicesData, setAudioDevicesData] = useState([]);
   const [trackrConfigData, setTrackrConfigData] = useState(null);
   const [trackrStatusData, setTrackrStatusData] = useState(null);
+  const [socialsStatusData, setSocialsStatusData] = useState(null);
   const [culturalNotesData, setCulturalNotesData] = useState([]);
   const [viewerNotesData, setViewerNotesData] = useState([]);
   const [memoryPendingData, setMemoryPendingData] = useState([]);
@@ -622,7 +624,7 @@ function useDashboardData(activePage) {
     }
     refreshDataInFlightRef.current = true;
     try {
-      const [authRes, statusRes, eventsRes, suppressionsRes, operatorRes, queueRes, studioProfileRes, libraryStatusRes, logsEventsRes, logsSuppressionsRes, logsOperatorRes, providersStatusRes, routingStatusRes, sensesStatusRes, memoryCulturalRes, memoryViewersRes, memoryPendingRes, twitchStatusRes, innerCircleRes, ignoreListRes, scheduleRes, audioConfigRes, trackrConfigRes] = await Promise.all([
+      const [authRes, statusRes, eventsRes, suppressionsRes, operatorRes, queueRes, studioProfileRes, libraryStatusRes, logsEventsRes, logsSuppressionsRes, logsOperatorRes, providersStatusRes, routingStatusRes, sensesStatusRes, memoryCulturalRes, memoryViewersRes, memoryPendingRes, twitchStatusRes, innerCircleRes, ignoreListRes, scheduleRes, audioConfigRes, trackrConfigRes, socialsStatusRes] = await Promise.all([
         apiFetch(`${API_BASE}/api/auth/me`),
         apiFetch(`${API_BASE}/api/status`),
         apiFetch(`${API_BASE}/api/events?limit=5`),
@@ -646,6 +648,7 @@ function useDashboardData(activePage) {
         apiFetch(`${API_BASE}/api/stream_schedule`),
         apiFetch(`${API_BASE}/api/audio_config`),
         apiFetch(`${API_BASE}/api/trackr/config`),
+        apiFetch(`${API_BASE}/api/socials/status`),
       ]);
       if (authRes.ok) {
         setAuthData(await authRes.json());
@@ -704,6 +707,9 @@ function useDashboardData(activePage) {
       }
       if (trackrConfigRes.ok) {
         setTrackrConfigData(await trackrConfigRes.json());
+      }
+      if (socialsStatusRes.ok) {
+        setSocialsStatusData(await socialsStatusRes.json());
       }
     } catch (_err) {
       // Polling errors keep prior data.
@@ -819,6 +825,10 @@ function useDashboardData(activePage) {
         handlers.push((res) => res.ok && res.json().then(setTrackrConfigData));
         fetches.push(apiFetch(`${API_BASE}/api/trackr/status`));
         handlers.push((res) => res.ok && res.json().then(setTrackrStatusData));
+      }
+      if (page === "socials") {
+        fetches.push(apiFetch(`${API_BASE}/api/socials/status`));
+        handlers.push((res) => res.ok && res.json().then(setSocialsStatusData));
       }
       if (fetches.length) {
         const results = await Promise.all(fetches);
@@ -1137,6 +1147,69 @@ function useDashboardData(activePage) {
       }
     } catch (err) {
       console.error("[Dashboard] trackr_config save error", err);
+    }
+  };
+
+  const saveSocialsConfig = async (patch) => {
+    const headers = buildOperatorHeaders({ json: true });
+    try {
+      const response = await apiFetch(`${API_BASE}/api/socials/config`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify(patch || {}),
+      });
+      let body = {};
+      try {
+        body = await response.json();
+      } catch (_err) {
+        body = {};
+      }
+      if (!response.ok || body?.ok === false) {
+        const detail = body?.detail || body?.error || response.statusText;
+        console.error(`[Dashboard] socials_config save failed (${response.status}) ${detail}`);
+        return { ok: false, body };
+      }
+      if (body && body.socials_config) {
+        setSocialsStatusData((prev) => ({
+          ...(prev || {}),
+          config: body.socials_config,
+          runtime: (prev && prev.runtime) || {},
+        }));
+      }
+      return { ok: true, body };
+    } catch (err) {
+      console.error("[Dashboard] socials_config save error", err);
+      return { ok: false, body: { detail: String(err || "save error") } };
+    } finally {
+      await refreshData();
+    }
+  };
+
+  const testSocialsSend = async (network = "discord") => {
+    const headers = buildOperatorHeaders({ json: true });
+    try {
+      const response = await apiFetch(`${API_BASE}/api/socials/test_send`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ network: String(network || "discord").trim().toLowerCase() }),
+      });
+      let body = {};
+      try {
+        body = await response.json();
+      } catch (_err) {
+        body = {};
+      }
+      if (!response.ok || body?.ok === false) {
+        const detail = body?.result?.reason || body?.detail || body?.error || response.statusText;
+        console.error(`[Dashboard] socials test send failed (${response.status}) ${detail}`);
+        return { ok: false, body };
+      }
+      return { ok: true, body };
+    } catch (err) {
+      console.error("[Dashboard] socials test send error", err);
+      return { ok: false, body: { detail: String(err || "test send error") } };
+    } finally {
+      await refreshData();
     }
   };
 
@@ -1753,6 +1826,9 @@ function useDashboardData(activePage) {
     trackrConfigData,
     trackrStatusData,
     saveTrackrConfig,
+    socialsStatusData,
+    saveSocialsConfig,
+    testSocialsSend,
     culturalNotesData,
     viewerNotesData,
     memoryPendingData,
@@ -3333,6 +3409,278 @@ function AuthPage({ twitchStatusData, twitchConnectStart, twitchConnectPoll, twi
         </RackPanel>
         <div style={{ padding: "10px 14px", background: "#15151a", border: "1px solid #1f1f22", borderRadius: 3 }}>
           <div style={TEXT_STYLES.meta}>{twitchNotice || "Auth status is backend-verified only."}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// --- PAGE: CONNECTED SOCIALS ---
+
+function ConnectedSocialsPage({ socialsStatusData, saveSocialsConfig, testSocialsSend }) {
+  const config = (socialsStatusData && typeof socialsStatusData.config === "object") ? socialsStatusData.config : null;
+  const runtime = (socialsStatusData && typeof socialsStatusData.runtime === "object") ? socialsStatusData.runtime : {};
+  const [draft, setDraft] = useState(null);
+  const [saveBusy, setSaveBusy] = useState(false);
+  const [testBusy, setTestBusy] = useState(false);
+  const [notice, setNotice] = useState("");
+
+  useEffect(() => {
+    if (!config) return;
+    try {
+      setDraft(JSON.parse(JSON.stringify(config)));
+    } catch (_err) {
+      setDraft(config);
+    }
+  }, [config]);
+
+  if (!draft) {
+    return (
+      <RackPanel>
+        <RackLabel>Connected Socials</RackLabel>
+        <AwaitingBlock message="Loading socials configuration..." />
+      </RackPanel>
+    );
+  }
+
+  const discord = (draft.discord && typeof draft.discord === "object") ? draft.discord : {};
+  const xCfg = (draft.x && typeof draft.x === "object") ? draft.x : {};
+  const discordReady = Boolean(draft.enabled && discord.enabled && String(discord.webhook_url || "").trim());
+
+  const inputStyle = {
+    background: "#111114",
+    border: "1px solid #2a2a2e",
+    borderRadius: 2,
+    padding: "6px 8px",
+    color: "#aaa",
+    fontSize: 11,
+    fontFamily: "'IBM Plex Sans', sans-serif",
+    outline: "none",
+    boxSizing: "border-box",
+    width: "100%",
+  };
+  const textareaStyle = { ...inputStyle, minHeight: 76, resize: "vertical", lineHeight: 1.45 };
+
+  const patchDraft = (updater) => {
+    setDraft((prev) => {
+      const current = prev || {};
+      const next = typeof updater === "function" ? updater(current) : current;
+      return next;
+    });
+  };
+
+  const saveAll = async () => {
+    setSaveBusy(true);
+    const result = await saveSocialsConfig(draft);
+    if (result?.ok) {
+      setNotice("Connected Socials config saved.");
+    } else {
+      const detail = result?.body?.detail || result?.body?.error || "Unable to save socials config.";
+      setNotice(String(detail));
+    }
+    setSaveBusy(false);
+  };
+
+  const runDiscordTest = async () => {
+    setTestBusy(true);
+    const result = await testSocialsSend("discord");
+    if (result?.ok) {
+      const body = result?.body || {};
+      const provider = String(body?.result?.provider || "").trim();
+      const label = provider ? ` (${provider})` : "";
+      setNotice(`Discord test send complete${label}.`);
+    } else {
+      const detail = result?.body?.result?.reason || result?.body?.detail || result?.body?.error || "Discord test send failed.";
+      setNotice(String(detail));
+    }
+    setTestBusy(false);
+  };
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "1.5fr 1fr", gap: 12 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <RackPanel>
+          <RackLabel>Global Controls</RackLabel>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, ...TEXT_STYLES.body }}>
+              <input
+                type="checkbox"
+                checked={Boolean(draft.enabled)}
+                onChange={(e) => patchDraft((prev) => ({ ...prev, enabled: Boolean(e.target.checked) }))}
+              />
+              Enable connected socials posting
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, ...TEXT_STYLES.body }}>
+              <input
+                type="checkbox"
+                checked={Boolean(draft.llm_enabled)}
+                onChange={(e) => patchDraft((prev) => ({ ...prev, llm_enabled: Boolean(e.target.checked) }))}
+              />
+              LLM-generated unique live announcements
+            </label>
+            <div>
+              <RackLabel style={{ marginBottom: 5 }}>Announcement Style Hint</RackLabel>
+              <textarea
+                value={String(draft.prompt_style || "")}
+                onChange={(e) => patchDraft((prev) => ({ ...prev, prompt_style: e.target.value }))}
+                placeholder="Optional style direction for social announcements..."
+                style={textareaStyle}
+              />
+            </div>
+          </div>
+        </RackPanel>
+
+        <RackPanel>
+          <RackLabel>Discord</RackLabel>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <Led color={discordReady ? "#2ecc40" : "#ff851b"} size={8} pulse={discordReady} />
+              <span style={{ fontSize: 12, color: discordReady ? "#2ecc40" : "#999", fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1.3 }}>
+                {discordReady ? "CONNECTED" : "NOT READY"}
+              </span>
+            </div>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, ...TEXT_STYLES.meta }}>
+              <input
+                type="checkbox"
+                checked={Boolean(discord.enabled)}
+                onChange={(e) => patchDraft((prev) => ({
+                  ...prev,
+                  discord: { ...(prev.discord || {}), enabled: Boolean(e.target.checked) },
+                }))}
+              />
+              ENABLE
+            </label>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <div>
+              <RackLabel style={{ marginBottom: 5 }}>Webhook URL</RackLabel>
+              <input
+                type="password"
+                value={String(discord.webhook_url || "")}
+                onChange={(e) => patchDraft((prev) => ({
+                  ...prev,
+                  discord: { ...(prev.discord || {}), webhook_url: e.target.value },
+                }))}
+                placeholder="https://discord.com/api/webhooks/..."
+                style={inputStyle}
+              />
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+              <div>
+                <RackLabel style={{ marginBottom: 5 }}>Username Override</RackLabel>
+                <input
+                  type="text"
+                  value={String(discord.username_override || "")}
+                  onChange={(e) => patchDraft((prev) => ({
+                    ...prev,
+                    discord: { ...(prev.discord || {}), username_override: e.target.value },
+                  }))}
+                  placeholder="Roonie"
+                  style={inputStyle}
+                />
+              </div>
+              <div>
+                <RackLabel style={{ marginBottom: 5 }}>Avatar URL (Optional)</RackLabel>
+                <input
+                  type="text"
+                  value={String(discord.avatar_url || "")}
+                  onChange={(e) => patchDraft((prev) => ({
+                    ...prev,
+                    discord: { ...(prev.discord || {}), avatar_url: e.target.value },
+                  }))}
+                  placeholder="https://..."
+                  style={inputStyle}
+                />
+              </div>
+            </div>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, ...TEXT_STYLES.body }}>
+              <input
+                type="checkbox"
+                checked={Boolean(discord.mention_everyone)}
+                onChange={(e) => patchDraft((prev) => ({
+                  ...prev,
+                  discord: { ...(prev.discord || {}), mention_everyone: Boolean(e.target.checked) },
+                }))}
+              />
+              Prefix announcements with @everyone
+            </label>
+            <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+              <RackButton
+                label={saveBusy ? "SAVING..." : "SAVE CONFIG"}
+                color="#2ecc40"
+                disabled={saveBusy}
+                onClick={saveAll}
+              />
+              <RackButton
+                label={testBusy ? "TESTING..." : "TEST DISCORD SEND"}
+                color="#7faacc"
+                disabled={testBusy || !discordReady}
+                onClick={runDiscordTest}
+              />
+            </div>
+          </div>
+        </RackPanel>
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <RackPanel>
+          <RackLabel>Runtime Telemetry</RackLabel>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, ...TEXT_STYLES.meta }}>
+            <div>LAST ATTEMPT: {runtime?.last_attempt_at ? fmtTime(runtime.last_attempt_at) : "\u2014"}</div>
+            <div>LAST SUCCESS: {runtime?.last_success_at ? fmtTime(runtime.last_success_at) : "\u2014"}</div>
+            <div>NETWORK: {String(runtime?.last_network || "\u2014").toUpperCase()}</div>
+            <div>EVENT: {String(runtime?.last_event_type || "\u2014").toUpperCase()}</div>
+            <div>PROVIDER: {String(runtime?.last_provider || "\u2014").toUpperCase()}</div>
+            <div>SUCCESS COUNT: {Number(runtime?.success_count || 0)}</div>
+            <div>FAIL COUNT: {Number(runtime?.failure_count || 0)}</div>
+            {runtime?.last_error ? (
+              <div style={{ color: "#ff851b", marginTop: 4 }}>LAST ERROR: {String(runtime.last_error)}</div>
+            ) : null}
+          </div>
+        </RackPanel>
+
+        <RackPanel>
+          <RackLabel>X / Twitter</RackLabel>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+            <Led color="#ff851b" size={8} />
+            <span style={{ fontSize: 11, color: "#ff851b", fontFamily: "'JetBrains Mono', monospace", letterSpacing: 1.2 }}>
+              SCAFFOLD READY
+            </span>
+          </div>
+          <div style={{ ...TEXT_STYLES.body, marginBottom: 8 }}>
+            X integration panel is staged. OAuth posting can be wired next without changing this page structure.
+          </div>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, ...TEXT_STYLES.body, marginBottom: 8 }}>
+            <input
+              type="checkbox"
+              checked={Boolean(xCfg.enabled)}
+              onChange={(e) => patchDraft((prev) => ({
+                ...prev,
+                x: { ...(prev.x || {}), enabled: Boolean(e.target.checked) },
+              }))}
+            />
+            Enable X panel
+          </label>
+          <div>
+            <RackLabel style={{ marginBottom: 5 }}>Handle (Optional)</RackLabel>
+            <input
+              type="text"
+              value={String(xCfg.handle || "")}
+              onChange={(e) => patchDraft((prev) => ({
+                ...prev,
+                x: { ...(prev.x || {}), handle: e.target.value },
+              }))}
+              placeholder="@ruleofrune"
+              style={inputStyle}
+            />
+          </div>
+          <div style={{ marginTop: 10 }}>
+            <RackButton label="CONNECT X (COMING SOON)" color="#666" disabled onClick={() => {}} />
+          </div>
+        </RackPanel>
+
+        <div style={{ padding: "10px 14px", background: "#15151a", border: "1px solid #1f1f22", borderRadius: 3 }}>
+          <div style={TEXT_STYLES.meta}>{notice || "Configure Discord, save, then run a test send."}</div>
         </div>
       </div>
     </div>
@@ -4994,6 +5342,9 @@ export default function RoonieControlRoom() {
     trackrConfigData,
     trackrStatusData,
     saveTrackrConfig,
+    socialsStatusData,
+    saveSocialsConfig,
+    testSocialsSend,
     culturalNotesData,
     viewerNotesData,
     memoryPendingData,
@@ -5068,6 +5419,7 @@ export default function RoonieControlRoom() {
       case "library": return <LibraryIndexPage libraryStatusData={libraryStatusData} librarySearchData={librarySearchData} searchLibraryIndex={searchLibraryIndex} uploadLibraryXml={uploadLibraryXml} />;
       case "announcements": return <AnnouncementsPage queueData={queueData} performAction={performAction} />;
       case "trackr": return <TrackrPage trackrConfigData={trackrConfigData} trackrStatusData={trackrStatusData} saveTrackrConfig={saveTrackrConfig} />;
+      case "socials": return <ConnectedSocialsPage socialsStatusData={socialsStatusData} saveSocialsConfig={saveSocialsConfig} testSocialsSend={testSocialsSend} />;
       case "logs": return <LogsPage eventsData={logsEventsData} suppressionsData={logsSuppressionsData} operatorLogData={logsOperatorData} />;
       case "behavior":
       case "culture":

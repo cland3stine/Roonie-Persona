@@ -165,6 +165,7 @@ _AUTO_AUTH_GET_PATHS = {
     "/api/senses/status",
     "/api/auth/twitch_status",
     "/api/twitch/status",
+    "/api/socials/status",
     "/api/library_index/status",
     "/api/library_index/search",
     "/api/logs/events",
@@ -4901,3 +4902,101 @@ def test_retention_purges_run_files_and_jsonl_older_than_180_days(tmp_path: Path
     assert len(kept_eventsub) == 1
     assert json.loads(kept_audit[0])["action"] == "NEW"
     assert json.loads(kept_eventsub[0])["ts"] == new_iso
+
+
+def test_socials_status_and_config_update(tmp_path: Path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_OPERATOR_KEY", "op-key-123")
+
+    headers = {"X-ROONIE-OP-KEY": "op-key-123", "X-ROONIE-ACTOR": "jen"}
+    server, thread = _start_server(runs_dir)
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        code0, status0 = _request_json(base, "/api/socials/status")
+        assert code0 == 200
+        assert bool(status0.get("config"))
+        assert status0["config"]["enabled"] is False
+
+        patch_payload = {
+            "enabled": True,
+            "llm_enabled": True,
+            "prompt_style": "Short and exciting, no spam.",
+            "discord": {
+                "enabled": True,
+                "webhook_url": "https://discord.com/api/webhooks/123/abc",
+                "username_override": "Roonie",
+                "mention_everyone": True,
+            },
+            "x": {
+                "enabled": True,
+                "handle": "@ruleofrune",
+            },
+        }
+        code1, body1 = _request_json(
+            base,
+            "/api/socials/config",
+            method="PATCH",
+            payload=patch_payload,
+            headers=headers,
+        )
+        assert code1 == 200
+        assert body1["ok"] is True
+        assert body1["socials_config"]["enabled"] is True
+        assert body1["socials_config"]["discord"]["enabled"] is True
+        assert body1["socials_config"]["x"]["enabled"] is True
+        assert body1["audit"]["action"] == "SOCIALS_CONFIG_UPDATE"
+
+        code2, status2 = _request_json(base, "/api/socials/status")
+        assert code2 == 200
+        assert status2["config"]["enabled"] is True
+        assert status2["config"]["discord"]["mention_everyone"] is True
+        assert status2["config"]["x"]["handle"] == "@ruleofrune"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+
+def test_socials_test_send_endpoint_records_audit(tmp_path: Path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_OPERATOR_KEY", "op-key-123")
+
+    def _send_test_stub(self, *, network: str = "discord") -> Dict[str, Any]:
+        return {
+            "ok": True,
+            "sent": True,
+            "network": network,
+            "reason": "SENT",
+            "provider": "openai",
+            "message": "We're live now at Rule of Rune.",
+        }
+
+    monkeypatch.setattr("roonie.dashboard_api.app.SocialAnnouncer.send_test", _send_test_stub)
+
+    headers = {"X-ROONIE-OP-KEY": "op-key-123", "X-ROONIE-ACTOR": "jen"}
+    server, thread = _start_server(runs_dir)
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        code, body = _request_json(
+            base,
+            "/api/socials/test_send",
+            method="POST",
+            payload={"network": "discord"},
+            headers=headers,
+        )
+        assert code == 200
+        assert body["ok"] is True
+        assert body["result"]["sent"] is True
+        assert body["audit"]["action"] == "SOCIALS_TEST_SEND"
+
+        _, op_log = _request_json(base, "/api/operator_log?limit=25")
+        actions = [item["action"] for item in op_log]
+        assert "SOCIALS_TEST_SEND" in actions
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
