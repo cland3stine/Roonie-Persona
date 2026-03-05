@@ -59,9 +59,25 @@ def _collapse_whitespace(value: str) -> str:
     return " ".join(str(value or "").strip().split())
 
 
+def _normalize_smart_quotes(value: str) -> str:
+    return (
+        str(value or "")
+        .replace("\u2018", "'")
+        .replace("\u2019", "'")
+        .replace("\u201c", '"')
+        .replace("\u201d", '"')
+        .replace("\u2014", "--")
+        .replace("\u2013", "-")
+    )
+
+
 def _looks_like_stub_output(value: str) -> bool:
     text = str(value or "").strip().lower()
     return bool(text.startswith("[") and "stub]" in text[:32])
+
+
+_MAX_RECENT_MESSAGES = 3
+_LLM_RETRY_ATTEMPTS = 2
 
 
 class SocialAnnouncer:
@@ -75,6 +91,8 @@ class SocialAnnouncer:
         self._logger = logger
         self._lock = threading.Lock()
         self._seen_stream_event_ids: set[str] = set()
+        self._recent_discord_messages: list[str] = []
+        self._recent_x_messages: list[str] = []
 
     def _log(self, message: str) -> None:
         text = str(message or "").strip()
@@ -106,52 +124,176 @@ class SocialAnnouncer:
                 pass
         return "ruleofrune"
 
-    def _default_live_message(self, *, channel_login: str, stream_url: str) -> str:
-        if channel_login:
-            return (
-                f"Hey everyone, Roonie here. We're live now at Rule of Rune. "
-                f"Come hang with us: {stream_url}"
-            )
-        return f"Hey everyone, Roonie here. We're live now. Come hang with us: {stream_url}"
+    def _default_live_message(
+        self, *, channel_login: str, stream_url: str, tiktok_url: str = ""
+    ) -> str:
+        tiktok = tiktok_url or "https://tiktok.com/@ruleofrune"
+        return (
+            f"Rule of Rune is live! Come hang with us.\n\n"
+            f"{stream_url}\n"
+            f"{tiktok}"
+        )
 
     @staticmethod
-    def _sanitize_message(message: str, *, stream_url: str) -> str:
-        text = _collapse_whitespace(message).strip().strip("\"'`")
+    def _sanitize_message(
+        message: str,
+        *,
+        required_urls: Optional[list[str]] = None,
+        max_len: int = 400,
+    ) -> str:
+        text = _normalize_smart_quotes(message).strip().strip("\"'`")
         if not text:
-            text = ""
-        if stream_url and stream_url not in text:
-            text = f"{text} {stream_url}".strip()
-        return text[:280].strip()
+            return ""
+        for url in (required_urls or []):
+            if url and url not in text:
+                text = f"{text}\n{url}"
+        return text[:max_len].strip()
 
-    def _build_live_prompt(
+    def _recent_messages_clause(self, network: str) -> str:
+        with self._lock:
+            recent = list(
+                self._recent_discord_messages if network == "discord"
+                else self._recent_x_messages
+            )
+        if not recent:
+            return ""
+        lines = "\n".join(f'  - "{m[:120]}"' for m in recent[-_MAX_RECENT_MESSAGES:])
+        return f"- Do NOT sound like any of these recent messages:\n{lines}\n"
+
+    def _record_recent_message(self, network: str, message: str) -> None:
+        first_line = str(message or "").strip().split("\n")[0].strip()
+        if not first_line:
+            return
+        with self._lock:
+            buf = (
+                self._recent_discord_messages if network == "discord"
+                else self._recent_x_messages
+            )
+            buf.append(first_line)
+            while len(buf) > _MAX_RECENT_MESSAGES:
+                buf.pop(0)
+
+    def _build_discord_prompt(
         self,
         *,
-        channel_login: str,
         stream_url: str,
+        tiktok_url: str,
         event_id: str,
         prompt_style: str,
-        previous_message: str,
         is_test: bool,
     ) -> str:
-        test_clause = "This is a test send from the dashboard." if is_test else "This is a real go-live announcement."
-        style_clause = prompt_style or "Friendly, welcoming, and energetic without sounding spammy."
-        prev_clause = previous_message or "None"
-        return (
-            "You are Roonie, writing one Discord announcement.\n"
-            f"{test_clause}\n"
-            "Goal: tell viewers Rule of Rune is live on Twitch and invite them in.\n"
-            "Requirements:\n"
-            "- Return exactly one short message (max 220 characters before URL).\n"
-            "- Keep it natural and human. No hashtags.\n"
-            "- Mention 'Rule of Rune' by name.\n"
-            f"- Include this exact URL somewhere in the message: {stream_url}\n"
-            "- Do not wrap the message in quotes.\n"
-            f"- Avoid repeating this previous message style: {prev_clause}\n"
-            f"- Style guidance: {style_clause}\n"
-            f"- Event id for variation: {event_id or 'none'}\n"
-            f"- Twitch login: {channel_login or 'ruleofrune'}\n"
-            "Output only the final message."
+        test_clause = (
+            "This is a test send from the dashboard."
+            if is_test
+            else "This is a real go-live announcement."
         )
+        style_clause = prompt_style or ""
+        style_line = f"- Additional style guidance: {style_clause}\n" if style_clause else ""
+        recent_clause = self._recent_messages_clause("discord")
+        return (
+            "You are Roonie, a blue plushie cat who sits on the DJ booth at "
+            "Rule of Rune, an underground progressive house stream on Twitch.\n"
+            f"{test_clause}\n"
+            "\n"
+            "Write one short Discord announcement telling the server that "
+            "Rule of Rune is LIVE.\n"
+            "\n"
+            "Voice rules:\n"
+            "- You're a plushie cat. You type with your paws. You sit on the "
+            "booth. This is who you are, not a bit you perform.\n"
+            "- Short and warm. Like a friend pinging the group chat. "
+            "1-2 sentences max before the links.\n"
+            "- Do NOT use the word 'vibes' or 'vibing.' Ever.\n"
+            "- Do NOT start with 'Hey everyone.' Find a more natural opener.\n"
+            "- Do NOT repeat the phrase 'perched on the booth' or 'come sit "
+            "with me.'\n"
+            "- No emojis, no hashtags, no 'click here' language.\n"
+            "- Do not wrap your output in quotes.\n"
+            "- Vary your sentence structure. Sometimes lead with what you're "
+            "hearing. Sometimes lead with the invite. Sometimes lead with "
+            "something physical (falling over, paws buzzing, ears perking up).\n"
+            f"{style_line}"
+            f"{recent_clause}"
+            "\n"
+            "Format rules:\n"
+            "- Message text first (max 180 chars).\n"
+            "- Then a blank line.\n"
+            "- Then both URLs on their own lines exactly as shown:\n"
+            f"{stream_url}\n"
+            f"{tiktok_url}\n"
+            "\n"
+            f"Event id for variation seed: {event_id or 'none'}\n"
+            "\n"
+            "Output ONLY the final message. Nothing else."
+        )
+
+    def _build_x_prompt(
+        self,
+        *,
+        stream_url: str,
+        tiktok_url: str,
+        event_id: str,
+        prompt_style: str,
+        is_test: bool,
+    ) -> str:
+        test_clause = (
+            "This is a test post from the dashboard."
+            if is_test
+            else "This is a real go-live announcement."
+        )
+        style_clause = prompt_style or ""
+        style_line = f"- Additional style guidance: {style_clause}\n" if style_clause else ""
+        recent_clause = self._recent_messages_clause("x")
+        return (
+            "You are posting from the Rule of Rune account on X (Twitter). "
+            "Rule of Rune is a progressive house and underground electronic "
+            "music collective featuring Clandestine, Corcyra, and Roonie.\n"
+            f"{test_clause}\n"
+            "\n"
+            "Write one tweet announcing that Rule of Rune is LIVE on Twitch "
+            "right now.\n"
+            "\n"
+            "Voice rules:\n"
+            "- You are the voice of the collective, not a character. "
+            "Professional but not corporate. Creative, confident, "
+            "music-forward.\n"
+            "- A touch of humor is welcome -- dry, clever, music-nerd humor. "
+            "Not corny, not try-hard.\n"
+            "- Reference the music naturally: progressive house, deep grooves, "
+            "underground sounds, late-night frequencies, melodic layers -- "
+            "pick ONE angle per tweet, don't stack descriptors.\n"
+            "- Do NOT use a plushie cat persona. No 'paws,' no 'booth cat,' "
+            "no character voice.\n"
+            "- Do NOT use the word 'vibes' or 'vibing.'\n"
+            "- Do NOT start with 'We're live' -- find a more creative hook.\n"
+            "- No emojis.\n"
+            "- You MAY use 1 hashtag if it fits naturally "
+            "(#ProgressiveHouse, #MelodicHouse, #DeepHouse, "
+            "#UndergroundHouse). Not required. Never more than 1.\n"
+            "- Do not wrap your output in quotes.\n"
+            f"{style_line}"
+            f"{recent_clause}"
+            "\n"
+            "URL rules (CRITICAL -- follow exactly):\n"
+            "- You MUST include these two URLs and ONLY these two URLs. "
+            "Do NOT invent, guess, or substitute any other URL:\n"
+            f"  Twitch: {stream_url}\n"
+            f"  TikTok: {tiktok_url}\n"
+            "- Copy them character-for-character. Do NOT use ruleofrune.com, "
+            "linktr.ee, or any other domain.\n"
+            "\n"
+            "Format rules:\n"
+            "- Total tweet must be under 280 characters including URLs and "
+            "any hashtag.\n"
+            "\n"
+            f"Event id for variation seed: {event_id or 'none'}\n"
+            "\n"
+            "Output ONLY the final tweet. Nothing else."
+        )
+
+    def _get_tiktok_url(self, config: Dict[str, Any]) -> str:
+        url = str(config.get("tiktok_url") or "").strip()
+        return url or "https://tiktok.com/@ruleofrune"
 
     def _generate_live_message(
         self,
@@ -161,61 +303,97 @@ class SocialAnnouncer:
         event_id: str,
         config: Dict[str, Any],
         is_test: bool,
+        network: str = "discord",
     ) -> Dict[str, Any]:
-        fallback = self._default_live_message(channel_login=channel_login, stream_url=stream_url)
+        tiktok_url = self._get_tiktok_url(config)
+        fallback = self._default_live_message(
+            channel_login=channel_login, stream_url=stream_url, tiktok_url=tiktok_url
+        )
         llm_enabled = bool(config.get("llm_enabled", True))
         if not llm_enabled:
             return {"message": fallback, "provider": None, "used_llm": False}
 
-        runtime_state = {}
-        if hasattr(self._storage, "get_socials_runtime_state"):
-            try:
-                runtime_state = self._storage.get_socials_runtime_state()
-            except Exception:
-                runtime_state = {}
-        previous_message = str(runtime_state.get("last_message") or "").strip()
         prompt_style = str(config.get("prompt_style") or "").strip()
-
-        prompt = self._build_live_prompt(
-            channel_login=channel_login,
-            stream_url=stream_url,
-            event_id=event_id,
-            prompt_style=prompt_style,
-            previous_message=previous_message,
-            is_test=is_test,
-        )
-        context: Dict[str, Any] = {
-            "use_provider_config": True,
-            "allow_live_provider_network": _truthy_env("ROONIE_ENABLE_LIVE_PROVIDER_NETWORK", True),
-            "message_text": "social live announcement for discord",
-            "category": "social_announcement",
-            "utility_source": "discord_live_announce",
-            "event_id": event_id,
-        }
-        provider_name: Optional[str] = None
-        try:
-            registry = _provider_registry_from_runtime()
-            out = route_generate(
-                registry=registry,
-                routing_cfg={},
-                prompt=prompt,
-                context=context,
+        if network == "x":
+            prompt = self._build_x_prompt(
+                stream_url=stream_url,
+                tiktok_url=tiktok_url,
+                event_id=event_id,
+                prompt_style=prompt_style,
+                is_test=is_test,
             )
-            provider_name = str(
-                context.get("provider_selected")
-                or context.get("active_provider")
-                or registry.get_default().name
-            ).strip().lower() or None
-            candidate = str(out or "").strip()
-            if not candidate or _looks_like_stub_output(candidate):
+            required_urls = [stream_url, tiktok_url]
+            max_len = 280
+        else:
+            prompt = self._build_discord_prompt(
+                stream_url=stream_url,
+                tiktok_url=tiktok_url,
+                event_id=event_id,
+                prompt_style=prompt_style,
+                is_test=is_test,
+            )
+            required_urls = [stream_url, tiktok_url]
+            max_len = 400
+
+        utility_source = f"{network}_live_announce"
+        provider_name: Optional[str] = None
+
+        for attempt in range(_LLM_RETRY_ATTEMPTS + 1):
+            context: Dict[str, Any] = {
+                "use_provider_config": True,
+                "allow_live_provider_network": _truthy_env(
+                    "ROONIE_ENABLE_LIVE_PROVIDER_NETWORK", True
+                ),
+                "message_text": f"social live announcement for {network}",
+                "category": "social_announcement",
+                "utility_source": utility_source,
+                "event_id": f"{event_id}-{attempt}" if attempt else event_id,
+            }
+            try:
+                registry = _provider_registry_from_runtime()
+                out = route_generate(
+                    registry=registry,
+                    routing_cfg={},
+                    prompt=prompt,
+                    context=context,
+                )
+                provider_name = str(
+                    context.get("provider_selected")
+                    or context.get("active_provider")
+                    or registry.get_default().name
+                ).strip().lower() or None
+                candidate = str(out or "").strip()
+                if (
+                    not candidate
+                    or len(candidate) < 10
+                    or _looks_like_stub_output(candidate)
+                ):
+                    if attempt < _LLM_RETRY_ATTEMPTS:
+                        self._log(
+                            f"[SocialAnnouncer] Empty/stub on attempt {attempt + 1}, retrying"
+                        )
+                        continue
+                    return {"message": fallback, "provider": provider_name, "used_llm": False}
+                final = self._sanitize_message(
+                    candidate,
+                    required_urls=required_urls,
+                    max_len=max_len,
+                )
+                if not final:
+                    final = fallback
+                else:
+                    self._record_recent_message(network, final)
+                return {"message": final, "provider": provider_name, "used_llm": True}
+            except Exception as exc:
+                if attempt < _LLM_RETRY_ATTEMPTS:
+                    self._log(
+                        f"[SocialAnnouncer] LLM attempt {attempt + 1} failed: {exc}, retrying"
+                    )
+                    continue
+                self._log(f"[SocialAnnouncer] LLM generation failed: {exc}")
                 return {"message": fallback, "provider": provider_name, "used_llm": False}
-            final = self._sanitize_message(candidate, stream_url=stream_url)
-            if not final:
-                final = fallback
-            return {"message": final, "provider": provider_name, "used_llm": True}
-        except Exception as exc:
-            self._log(f"[SocialAnnouncer] LLM generation failed: {exc}")
-            return {"message": fallback, "provider": provider_name, "used_llm": False}
+
+        return {"message": fallback, "provider": provider_name, "used_llm": False}
 
     def _send_discord(
         self,
@@ -229,9 +407,9 @@ class SocialAnnouncer:
         username_override = str(discord_cfg.get("username_override") or "").strip()
         avatar_url = str(discord_cfg.get("avatar_url") or "").strip()
         mention_everyone = bool(discord_cfg.get("mention_everyone", False))
-        message = _collapse_whitespace(content)
+        message = _normalize_smart_quotes(content).strip()
         if mention_everyone and not message.lower().startswith("@everyone"):
-            message = f"@everyone {message}".strip()
+            message = f"@everyone\n{message}".strip()
         payload: Dict[str, Any] = {"content": message}
         if username_override:
             payload["username"] = username_override
@@ -362,6 +540,7 @@ class SocialAnnouncer:
             event_id=(event_id or f"stream-online-{int(time.time() * 1000)}"),
             config=config,
             is_test=is_test,
+            network="discord",
         )
         message = str(generated.get("message") or "").strip()
         provider = str(generated.get("provider") or "").strip().lower() or None
