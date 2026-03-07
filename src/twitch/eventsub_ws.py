@@ -59,6 +59,7 @@ def normalize_eventsub_notification(message: Dict[str, Any]) -> Optional[Dict[st
     elif raw_type == "channel.subscribe":
         base["event_type"] = "SUB"
         base["tier"] = str(event.get("tier", "")).strip() or None
+        base["is_gift"] = bool(event.get("is_gift", False))
         try:
             months = int(event.get("cumulative_months", 0) or 0)
         except (TypeError, ValueError):

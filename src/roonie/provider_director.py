@@ -1476,7 +1476,11 @@ class ProviderDirector:
         approved_emotes = self._approved_emotes(metadata)
         now_playing = self._now_playing_text(metadata)
         now_playing_available = bool(now_playing)
-        context_turns = self.context_buffer.get_context(max_turns=8)
+        # EventSub events (follow/sub/cheer/raid) are standalone acknowledgments —
+        # injecting the chat context buffer causes topic latching from unrelated viewers.
+        _EVENTSUB_CATEGORIES = {"EVENT_FOLLOW", "EVENT_SUB", "EVENT_CHEER", "EVENT_RAID"}
+        is_eventsub = category in _EVENTSUB_CATEGORIES
+        context_turns = [] if is_eventsub else self.context_buffer.get_context(max_turns=8)
         context_turns_used = len(context_turns)
         context_active = context_turns_used > 0
 
@@ -1498,7 +1502,7 @@ class ProviderDirector:
             )
             self._topic_anchor_kind = "music" if anchor_musicish else "general"
         topic_anchor_candidate = ""
-        if self._topic_anchor:
+        if self._topic_anchor and not is_eventsub:
             age = self._turn_counter - self._topic_anchor_turn
             if age <= _TOPIC_ANCHOR_TTL_TURNS:
                 topic_anchor_candidate = self._topic_anchor

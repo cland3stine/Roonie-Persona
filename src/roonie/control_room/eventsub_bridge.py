@@ -2,7 +2,7 @@
 
 import threading
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, ClassVar, Dict, Optional
 
 from roonie.control_room.social_announcer import SocialAnnouncer
 from twitch.eventsub_ws import EventSubWSClient
@@ -88,8 +88,12 @@ class EventSubBridge:
         if event_type == "FOLLOW":
             return f"@RoonieTheCat heads up: {display} just followed."
         if event_type == "SUB":
-            tier = str(normalized.get("tier") or "").strip()
-            return f"@RoonieTheCat heads up: {display} subscribed{(' tier ' + tier) if tier else ''}."
+            tier_raw = str(normalized.get("tier") or "").strip()
+            tier_label = {"1000": "Tier 1", "2000": "Tier 2", "3000": "Tier 3"}.get(tier_raw, tier_raw)
+            tier_suffix = f" ({tier_label})" if tier_label else ""
+            if normalized.get("is_gift"):
+                return f"@RoonieTheCat heads up: {display} received a gifted sub{tier_suffix}! Welcome them."
+            return f"@RoonieTheCat heads up: {display} just subscribed{tier_suffix}! Say thanks."
         if event_type == "CHEER":
             amount = normalized.get("amount")
             return f"@RoonieTheCat heads up: {display} cheered {amount or 0} bits."
@@ -106,8 +110,13 @@ class EventSubBridge:
     def _normalize_username(value: Any) -> str:
         return str(value or "").strip().lstrip("@").lower()
 
+    # TODO: re-enable SUB events once prompt/response quality is fixed
+    _SUPPRESSED_EVENT_TYPES: ClassVar[frozenset] = frozenset({"SUB"})
+
     def _should_ignore_event(self, normalized: Dict[str, Any]) -> bool:
         event_type = str(normalized.get("event_type", "UNKNOWN")).strip().upper()
+        if event_type in self._SUPPRESSED_EVENT_TYPES:
+            return True
         if event_type != "SUB":
             return False
         user_login = self._normalize_username(normalized.get("user_login"))

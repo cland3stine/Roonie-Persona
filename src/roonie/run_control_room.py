@@ -359,6 +359,18 @@ def main(argv: list[str] | None = None) -> int:
             paths.control_log_path,
             f"TWITCH_REFRESH: loop_started interval_seconds={int(refresh_interval)}",
         )
+    # Auto-sync channel emotes on startup
+    if storage is not None and hasattr(storage, "sync_channel_emotes_on_startup"):
+        try:
+            emote_result = storage.sync_channel_emotes_on_startup()
+            if emote_result.get("ok"):
+                added = emote_result.get("added", 0)
+                total = emote_result.get("total", 0)
+                _append_log(paths.control_log_path, f"EMOTE_SYNC: ok added={added} total={total}")
+            else:
+                _append_log(paths.control_log_path, f'EMOTE_SYNC: skipped reason={emote_result.get("error", "unknown")}')
+        except Exception as exc:
+            _append_log(paths.control_log_path, f"EMOTE_SYNC: error={exc}")
     if bool(args.start_live_chat) and storage is not None:
         from roonie.control_room.live_chat import LiveChatBridge
         from roonie.control_room.eventsub_bridge import EventSubBridge

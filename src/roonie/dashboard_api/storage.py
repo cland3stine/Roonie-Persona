@@ -3614,7 +3614,11 @@ class DashboardStorage:
 
             decision_type = "speak"
             if suppression_reason:
-                decision_type = "suppress"
+                if suppression_reason.upper() == "NOOP":
+                    decision_type = "noop"
+                    suppression_reason = None
+                else:
+                    decision_type = "suppress"
             else:
                 final_upper = str(final_text or "").strip().upper()
                 if not final_upper or final_upper == "NOOP":
@@ -5357,6 +5361,41 @@ class DashboardStorage:
                     url = f"https://static-cdn.jtvnbs.net/emoticons/v2/{emote_id}/static/dark/1.0"
                 emotes.append({"name": name, "id": emote_id, "url": url})
         return {"ok": True, "emotes": emotes}
+
+    def sync_channel_emotes_on_startup(self) -> Dict[str, Any]:
+        """Fetch channel emotes from Twitch and merge into studio profile.
+
+        Called once at startup to keep approved_emotes fresh without manual pull.
+        Returns {"ok": bool, "added": int, "total": int} or {"ok": False, "error": str}.
+        """
+        result = self.fetch_channel_emotes()
+        if not result.get("ok"):
+            return result
+        fetched = result.get("emotes", [])
+        if not isinstance(fetched, list) or not fetched:
+            return {"ok": True, "added": 0, "total": 0}
+        profile = self.get_studio_profile()
+        existing = profile.get("approved_emotes", [])
+        if not isinstance(existing, list):
+            existing = []
+        existing_names: set = set()
+        for e in existing:
+            if isinstance(e, dict):
+                existing_names.add(str(e.get("name", "")).strip())
+            elif isinstance(e, str):
+                existing_names.add(e.strip())
+        new_emotes = [
+            {"name": str(e["name"]).strip(), "desc": "", "denied": False}
+            for e in fetched
+            if isinstance(e, dict) and str(e.get("name", "")).strip()
+            and str(e["name"]).strip() not in existing_names
+        ]
+        if new_emotes:
+            merged = existing + new_emotes
+            profile["approved_emotes"] = merged
+            self.update_studio_profile(profile, actor="system-startup", patch=False)
+        total = len(existing) + len(new_emotes)
+        return {"ok": True, "added": len(new_emotes), "total": total}
 
     def _default_twitch_config(self) -> Dict[str, Any]:
         return {
