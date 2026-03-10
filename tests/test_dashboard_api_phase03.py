@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import io
 import json
@@ -449,6 +449,7 @@ def test_dashboard_api_status_structure(tmp_path: Path, monkeypatch) -> None:
         "provider_models",
         "resolved_models",
         "routing_info",
+        "event_reply_controls",
     }
     assert expected.issubset(set(data.keys()))
     assert data["active_provider"] == "openai"
@@ -457,6 +458,14 @@ def test_dashboard_api_status_structure(tmp_path: Path, monkeypatch) -> None:
     assert isinstance(data["provider_models"], dict)
     assert isinstance(data["resolved_models"], dict)
     assert isinstance(data["routing_info"], dict)
+    assert isinstance(data["event_reply_controls"], dict)
+    assert data["event_reply_controls"] == {
+        "FOLLOW": False,
+        "SUB": False,
+        "GIFTED_SUB": False,
+        "CHEER": True,
+        "RAID": True,
+    }
 
 
 def test_status_and_provider_status_expose_effective_models(tmp_path: Path, monkeypatch) -> None:
@@ -642,6 +651,43 @@ def test_write_endpoints_and_audit_with_operator_key(tmp_path: Path, monkeypatch
     assert arm_entry["auth_mode"] == "legacy_key"
     assert arm_entry["role"] == "operator"
 
+
+def test_event_reply_controls_can_be_toggled_and_persisted(tmp_path: Path, monkeypatch) -> None:
+    runs_dir = tmp_path / "runs"
+    _write_sample_run(runs_dir)
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("ROONIE_OPERATOR_KEY", "op-key-123")
+
+    headers = {"X-ROONIE-OP-KEY": "op-key-123", "X-ROONIE-ACTOR": "jen"}
+    server, thread = _start_server(runs_dir)
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        code, body = _request_json(
+            base,
+            "/api/live/event_replies",
+            method="POST",
+            payload={"event_type": "follow", "enabled": True},
+            headers=headers,
+        )
+        assert code == 200
+        assert body["ok"] is True
+        assert body["state"]["event_reply_controls"]["FOLLOW"] is True
+        assert body["audit"]["action"] == "CONTROL_EVENT_REPLY_SET"
+
+        _, status = _request_json(base, "/api/status")
+        _, op_log = _request_json(base, "/api/operator_log?limit=10")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    assert status["event_reply_controls"]["FOLLOW"] is True
+    assert any(item["action"] == "CONTROL_EVENT_REPLY_SET" for item in op_log)
+
+    from roonie.dashboard_api.storage import DashboardStorage
+
+    storage = DashboardStorage(runs_dir=runs_dir)
+    assert storage.get_event_reply_controls()["FOLLOW"] is True
 
 def test_legacy_operator_key_rejected_for_director_only_route(tmp_path: Path, monkeypatch) -> None:
     runs_dir = tmp_path / "runs"
@@ -5000,3 +5046,5 @@ def test_socials_test_send_endpoint_records_audit(tmp_path: Path, monkeypatch) -
         server.shutdown()
         server.server_close()
         thread.join(timeout=2.0)
+
+

@@ -2174,6 +2174,51 @@ def build_handler(storage: DashboardStorage) -> type[BaseHTTPRequestHandler]:
                 _json_response(self, {"ok": True, "state": state, "audit": audit.to_dict()})
                 return
 
+            if path == "/api/live/event_replies":
+                ok_body, payload = self._read_json_body()
+                if not ok_body:
+                    _json_response(
+                        self,
+                        {"ok": False, "error": "bad_request", "detail": "Invalid JSON body."},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                identity = self._authorize_write(
+                    action="CONTROL_EVENT_REPLY_SET", payload=payload, required_role="operator"
+                )
+                if identity is None:
+                    return
+                if "enabled" not in payload:
+                    _json_response(
+                        self,
+                        {"ok": False, "error": "bad_request", "detail": "enabled is required."},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                requested_event_type = str(payload.get("event_type", "")).strip().upper()
+                try:
+                    state = storage.set_event_reply_enabled(requested_event_type, payload.get("enabled"))
+                except ValueError as exc:
+                    _json_response(
+                        self,
+                        {"ok": False, "error": "bad_request", "detail": str(exc)},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                updated_event_type = str(state.get("updated_event_type", requested_event_type)).strip().upper()
+                enabled = bool((state.get("event_reply_controls") or {}).get(updated_event_type, False))
+                audit = storage.record_operator_action(
+                    operator=identity["operator"],
+                    action="CONTROL_EVENT_REPLY_SET",
+                    payload={"event_type": updated_event_type, "enabled": enabled},
+                    result="OK",
+                    actor=identity["actor"],
+                    username=identity.get("username"),
+                    role=identity.get("role"),
+                    auth_mode=identity.get("auth_mode"),
+                )
+                _json_response(self, {"ok": True, "state": state, "audit": audit.to_dict()})
+                return
             if path == "/api/live/silence_now":
                 ok_body, payload = self._read_json_body()
                 if not ok_body:
@@ -3086,3 +3131,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

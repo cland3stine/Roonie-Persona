@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import io
@@ -107,6 +107,34 @@ def _canonical_json(value: Any) -> str:
 def _json_sha256(value: Any) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
+
+_EVENT_REPLY_TYPES = ("FOLLOW", "SUB", "GIFTED_SUB", "CHEER", "RAID")
+_EVENT_REPLY_DEFAULTS = {
+    "FOLLOW": False,
+    "SUB": False,
+    "GIFTED_SUB": False,
+    "CHEER": True,
+    "RAID": True,
+}
+
+
+def _normalize_event_reply_type(value: Any) -> str:
+    text = str(value or "").strip().upper()
+    return text if text in _EVENT_REPLY_TYPES else ""
+
+
+def _default_event_reply_controls() -> Dict[str, bool]:
+    return dict(_EVENT_REPLY_DEFAULTS)
+
+
+def _normalize_event_reply_controls(raw: Any) -> Dict[str, bool]:
+    controls = _default_event_reply_controls()
+    if not isinstance(raw, dict):
+        return controls
+    for event_type in _EVENT_REPLY_TYPES:
+        if event_type in raw:
+            controls[event_type] = _to_bool(raw.get(event_type), controls[event_type])
+    return controls
 
 def hash_password(password: str) -> str:
     salt = secrets.token_bytes(16)
@@ -841,6 +869,7 @@ class DashboardStorage:
             "silence_until": None,
             "session_id": None,
             "active_director": "ProviderDirector",
+            "event_reply_controls": _default_event_reply_controls(),
         }
         loaded = _safe_read_json(self._control_state_path)
         if not isinstance(loaded, dict):
@@ -854,8 +883,8 @@ class DashboardStorage:
                 state["dry_run"] = bool(loaded.get("dry_run", False))
             elif "read_only_mode" in loaded:
                 state["dry_run"] = bool(loaded.get("read_only_mode", False))
+            state["event_reply_controls"] = _normalize_event_reply_controls(loaded.get("event_reply_controls"))
         return state
-
     def _reload_control_state_from_file_locked(self) -> None:
         loaded = _safe_read_json(self._control_state_path)
         if not isinstance(loaded, dict):
@@ -870,6 +899,9 @@ class DashboardStorage:
             self._control_state["dry_run"] = bool(loaded.get("dry_run", False))
         elif "read_only_mode" in loaded:
             self._control_state["dry_run"] = bool(loaded.get("read_only_mode", False))
+        self._control_state["event_reply_controls"] = _normalize_event_reply_controls(
+            loaded.get("event_reply_controls")
+        )
 
     def _save_control_state_locked(self) -> None:
         self._control_state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -879,6 +911,9 @@ class DashboardStorage:
             "dry_run": bool(self._control_state.get("dry_run", False)),
             "silence_until": self._control_state.get("silence_until"),
             "active_director": self.normalize_active_director(self._control_state.get("active_director")),
+            "event_reply_controls": _normalize_event_reply_controls(
+                self._control_state.get("event_reply_controls")
+            ),
         }
         tmp_path = self._control_state_path.with_suffix(".tmp")
         try:
@@ -918,6 +953,9 @@ class DashboardStorage:
             "silence_until": self._control_state.get("silence_until") if silenced else None,
             "session_id": (session_id or None),
             "active_director": self.normalize_active_director(self._control_state.get("active_director")),
+            "event_reply_controls": deepcopy(
+                _normalize_event_reply_controls(self._control_state.get("event_reply_controls"))
+            ),
         }
 
     def _sync_env_from_state_locked(self) -> None:
@@ -996,6 +1034,23 @@ class DashboardStorage:
         snap["kill_switch_on"] = on
         return snap
 
+    def get_event_reply_controls(self) -> Dict[str, bool]:
+        with self._lock:
+            return deepcopy(_normalize_event_reply_controls(self._control_state.get("event_reply_controls")))
+
+    def set_event_reply_enabled(self, event_type: Any, enabled: Any) -> Dict[str, Any]:
+        normalized_type = _normalize_event_reply_type(event_type)
+        if not normalized_type:
+            raise ValueError("event_type must be one of: FOLLOW, SUB, GIFTED_SUB, CHEER, RAID")
+        with self._lock:
+            controls = _normalize_event_reply_controls(self._control_state.get("event_reply_controls"))
+            controls[normalized_type] = _to_bool(enabled, controls.get(normalized_type, False))
+            self._control_state["event_reply_controls"] = controls
+            self._save_control_state_locked()
+            snap = self._control_snapshot_locked()
+        snap["updated_event_type"] = normalized_type
+        snap["event_reply_enabled"] = bool(controls.get(normalized_type, False))
+        return snap
     def force_safe_start_defaults(self) -> Dict[str, Any]:
         with self._lock:
             self._control_state["armed"] = False
@@ -3903,6 +3958,9 @@ class DashboardStorage:
                 ).strip()
                 or None,
             },
+            event_reply_controls=deepcopy(
+                _normalize_event_reply_controls(control.get("event_reply_controls"))
+            ),
             send_fail_count=int(send_fail.get("fail_count", 0) or 0),
             send_fail_reason=send_fail.get("last_fail_reason"),
             send_fail_at=send_fail.get("last_fail_at"),
@@ -7445,3 +7503,7 @@ class DashboardStorage:
     @staticmethod
     def event_time(event: EventResponse) -> str:
         return _hms(event.ts)
+
+
+
+

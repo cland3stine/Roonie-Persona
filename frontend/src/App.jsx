@@ -45,6 +45,21 @@ async function apiFetch(url, options = {}) {
   return fetch(url, opts);
 }
 
+const EMPTY_EVENT_REPLY_CONTROLS = {
+  FOLLOW: false,
+  SUB: false,
+  GIFTED_SUB: false,
+  CHEER: true,
+  RAID: true,
+};
+
+const EVENT_REPLY_ROWS = [
+  { key: "FOLLOW", label: "Follow", detail: "Log the event but suppress public follow replies." },
+  { key: "SUB", label: "Sub", detail: "Allow persona replies for new and resub events." },
+  { key: "GIFTED_SUB", label: "Gifted Sub", detail: "Allow persona replies for gifted subscription events." },
+  { key: "CHEER", label: "Cheer", detail: "Allow anchored public replies to cheer events." },
+  { key: "RAID", label: "Raid", detail: "Allow persona replies when a raid arrives." },
+];
 const EMPTY_STATUS = {
   kill_switch_on: false,
   armed: false,
@@ -74,6 +89,7 @@ const EMPTY_STATUS = {
   send_fail_reason: null,
   send_fail_at: null,
   provider_error_active: false,
+  event_reply_controls: { ...EMPTY_EVENT_REPLY_CONTROLS },
 };
 
 const AWAITING = "\u2014";
@@ -1913,6 +1929,14 @@ function LivePage({ statusData, eventsData, suppressionsData, performAction, bus
     }
   };
 
+  const eventReplyControls = { ...EMPTY_EVENT_REPLY_CONTROLS, ...(statusData.event_reply_controls || {}) };
+  const handleEventReplyToggle = (eventType) => {
+    performAction(
+      "/api/live/event_replies",
+      { event_type: eventType, enabled: !Boolean(eventReplyControls[eventType]) },
+      `eventreply-${eventType}`,
+    );
+  };
   const systemLive = statusData.armed && !statusData.read_only_mode && !statusData.silenced && !statusData.kill_switch_on && statusData.can_post;
   const blockedReason = statusData.kill_switch_on ? "KILL_SWITCH" : (Array.isArray(statusData.blocked_by) && statusData.blocked_by.length ? statusData.blocked_by[0] : "UNKNOWN");
   const isOfflineDirector = statusData.active_director === "OfflineDirector";
@@ -2011,6 +2035,43 @@ function LivePage({ statusData, eventsData, suppressionsData, performAction, bus
         </RackPanel>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <RackPanel>
+            <RackLabel>Event Replies</RackLabel>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {EVENT_REPLY_ROWS.map((row, index) => {
+                const enabled = Boolean(eventReplyControls[row.key]);
+                const actionKey = `eventreply-${row.key}`;
+                return (
+                  <div
+                    key={row.key}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: 12,
+                      paddingBottom: index === EVENT_REPLY_ROWS.length - 1 ? 0 : 10,
+                      borderBottom: index === EVENT_REPLY_ROWS.length - 1 ? "none" : "1px solid #252528",
+                    }}
+                  >
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                      <div style={{ fontSize: 12, color: "#ccc", fontFamily: "'IBM Plex Sans', sans-serif" }}>{row.label}</div>
+                      <div style={{ ...TEXT_STYLES.meta, color: enabled ? "#2ecc40" : "#666", letterSpacing: 0.6 }}>
+                        {row.detail}
+                      </div>
+                    </div>
+                    <Toggle
+                      on={enabled}
+                      onToggle={() => handleEventReplyToggle(row.key)}
+                      disabled={busyAction === actionKey}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{ ...TEXT_STYLES.meta, marginTop: 10 }}>
+              Applies only when armed. Off still receives and logs the event, but blocks the public reply.
+            </div>
+          </RackPanel>
           <RackPanel>
             <RackLabel>Next (Auto-Approved)</RackLabel>
             {status === "ACTIVE" ? (
@@ -5605,4 +5666,10 @@ export default function RoonieControlRoom() {
     </div>
   );
 }
+
+
+
+
+
+
 

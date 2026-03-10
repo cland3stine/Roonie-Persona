@@ -35,6 +35,7 @@ class StatusResponse:
     provider_models: Dict[str, str] = field(default_factory=dict)
     resolved_models: Dict[str, str] = field(default_factory=dict)
     routing_info: Dict[str, Any] = field(default_factory=dict)
+    event_reply_controls: Dict[str, bool] = field(default_factory=dict)
     send_fail_count: int = 0
     send_fail_reason: Optional[str] = None
     send_fail_at: Optional[str] = None
@@ -93,3 +94,5 @@ def serialize_many(items: List[Any]) -> List[Dict[str, Any]]:
         elif isinstance(item, dict):
             out.append(item)
     return out
+
+

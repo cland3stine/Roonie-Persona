@@ -123,8 +123,14 @@ class EventSubBridge:
     def _normalize_username(value: Any) -> str:
         return str(value or "").strip().lstrip("@").lower()
 
-    # FOLLOW stays utility-only; sub-related events remain suppressed until payload handling is ready.
-    _SUPPRESSED_EVENT_TYPES: ClassVar[frozenset[str]] = frozenset({"FOLLOW", "SUB", "GIFTED_SUB"})
+    # Operator-controlled reply eligibility. Disabled events are still normalized and logged.
+    _EVENT_REPLY_DEFAULTS: ClassVar[Dict[str, bool]] = {
+        "FOLLOW": False,
+        "SUB": False,
+        "GIFTED_SUB": False,
+        "CHEER": True,
+        "RAID": True,
+    }
 
     def _is_ignored_self_sub(self, normalized: Dict[str, Any]) -> bool:
         event_type = str(normalized.get("event_type", "UNKNOWN")).strip().upper()
@@ -135,14 +141,29 @@ class EventSubBridge:
         actor = user_login or display_name
         return bool(actor and actor in self._IGNORED_SUB_USERNAMES)
 
+    def _event_reply_enabled(self, event_type: str) -> bool:
+        normalized_type = str(event_type or "").strip().upper()
+        default = bool(self._EVENT_REPLY_DEFAULTS.get(normalized_type, True))
+        if normalized_type not in self._EVENT_REPLY_DEFAULTS:
+            return default
+        getter = getattr(self._storage, "get_event_reply_controls", None)
+        if not callable(getter):
+            return default
+        try:
+            controls = getter()
+        except Exception:
+            return default
+        if not isinstance(controls, dict):
+            return default
+        return bool(controls.get(normalized_type, default))
+
     def _suppression_reason(self, normalized: Dict[str, Any]) -> Optional[str]:
         if self._is_ignored_self_sub(normalized):
             return "IGNORED_SELF_SUB"
         event_type = str(normalized.get("event_type", "UNKNOWN")).strip().upper()
-        if event_type in self._SUPPRESSED_EVENT_TYPES:
+        if event_type in self._EVENT_REPLY_DEFAULTS and not self._event_reply_enabled(event_type):
             return f"SUPPRESSED_EVENT_TYPE:{event_type}"
         return None
-
     def _on_event(self, normalized: Dict[str, Any]) -> None:
         event_type = str(normalized.get("event_type", "UNKNOWN")).strip().upper()
         event_id = str(normalized.get("twitch_event_id", "")).strip()
@@ -230,4 +251,5 @@ class EventSubBridge:
             }
         )
         self._log("[EventSubBridge] stopped")
+
 

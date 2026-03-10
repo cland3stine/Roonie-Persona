@@ -331,6 +331,49 @@ def test_eventsub_follow_events_are_suppressed_before_persona_path(tmp_path: Pat
     assert last["suppression_reason"] == "SUPPRESSED_EVENT_TYPE:FOLLOW"
 
 
+def test_eventsub_follow_events_ingest_when_reply_enabled(tmp_path: Path, monkeypatch) -> None:
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    storage = DashboardStorage(runs_dir=tmp_path / "runs")
+    live_bridge = LiveChatBridge(storage=storage, account="bot")
+    eventsub_bridge = EventSubBridge(storage=storage, live_bridge=live_bridge)
+
+    ingest_calls: List[Dict[str, Any]] = []
+
+    def _ingest_stub(normalized_event: Dict[str, Any], *, text: str) -> Dict[str, Any]:
+        ingest_calls.append({"normalized_event": dict(normalized_event), "text": str(text)})
+        return {"emitted": True, "reason": "SENT", "session_id": "sid-follow-enabled"}
+
+    monkeypatch.setattr(live_bridge, "ingest_eventsub_event", _ingest_stub)
+
+    storage.set_armed(True)
+    storage.set_event_reply_enabled("FOLLOW", True)
+    eventsub_bridge._on_event(
+        {
+            "event_type": "FOLLOW",
+            "raw_type": "channel.follow",
+            "twitch_event_id": "evt-follow-enabled-1",
+            "user_login": "alice",
+            "display_name": "Alice",
+            "timestamp": "2026-02-28T00:00:01Z",
+        }
+    )
+
+    assert len(ingest_calls) == 1
+    assert ingest_calls[0]["normalized_event"]["event_type"] == "FOLLOW"
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "logs" / "eventsub_events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert rows
+    last = rows[-1]
+    assert last["twitch_event_id"] == "evt-follow-enabled-1"
+    assert last["event_type"] == "FOLLOW"
+    assert last["emitted"] is True
+    assert last["session_id"] == "sid-follow-enabled"
+    assert last["suppression_reason"] == "SENT"
+
 def test_eventsub_sub_events_are_suppressed_by_event_type_before_reenable(tmp_path: Path, monkeypatch) -> None:
     _set_dashboard_paths(monkeypatch, tmp_path)
     storage = DashboardStorage(runs_dir=tmp_path / "runs")
@@ -529,3 +572,4 @@ def test_eventsub_stream_online_routes_to_social_announcer(tmp_path: Path, monke
     assert last["twitch_event_id"] == "evt-stream-online-1"
     assert last["event_type"] == "STREAM_ONLINE"
     assert last["emitted"] is True
+
