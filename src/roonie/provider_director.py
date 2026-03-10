@@ -105,6 +105,8 @@ _SPECIFICITY_GENERIC_PATTERNS = (
     ("glad_youre_here", re.compile(r"\bglad (?:you(?:'re| are)|to have you)\b", re.IGNORECASE)),
     ("good_to_see_you", re.compile(r"\bgood to see you\b", re.IGNORECASE)),
     ("appreciate_that", re.compile(r"\bappreciate (?:that|the love|it)\b", re.IGNORECASE)),
+    ("appreciate_bits", re.compile(r"\bappreciate you(?:\s+for)?\s+(?:the\s+)?bits\b", re.IGNORECASE)),
+    ("thanks_for_bits", re.compile(r"\bthanks?(?:\s+for)?\s+(?:the\s+)?bits\b", re.IGNORECASE)),
     ("thank_you", re.compile(r"\bthank you\b", re.IGNORECASE)),
     ("good_timing", re.compile(r"\bgood timing\b", re.IGNORECASE)),
     ("perfect_timing", re.compile(r"\bperfect timing\b", re.IGNORECASE)),
@@ -324,7 +326,7 @@ def _specificity_overlap_tokens(*, user_message: str, candidate: str) -> list[st
 
 
 def _specificity_generic_hits(candidate: str) -> list[str]:
-    text = str(candidate or "")
+    text = _strip_leading_mentions(candidate)
     hits: list[str] = []
     for name, pattern in _SPECIFICITY_GENERIC_PATTERNS:
         if pattern.search(text):
@@ -333,7 +335,7 @@ def _specificity_generic_hits(candidate: str) -> list[str]:
 
 
 def _specificity_anchor_hits(*, candidate: str, user_message: str) -> list[str]:
-    text = str(candidate or "")
+    text = _strip_leading_mentions(candidate)
     hits: list[str] = []
     if _SPECIFICITY_MUSIC_ANCHOR_RE.search(text):
         hits.append("music_detail")
@@ -377,7 +379,7 @@ def _specificity_assessment(
         "exempt_reason": None,
         "suppressed": False,
     }
-    text = str(candidate or "").strip()
+    text = _strip_leading_mentions(candidate).strip()
     if not text or mode == "off":
         return result
 
@@ -2097,5 +2099,7 @@ class ProviderDirector:
             context_active=context_active,
             context_turns_used=context_turns_used,
         )
+
+
 
 

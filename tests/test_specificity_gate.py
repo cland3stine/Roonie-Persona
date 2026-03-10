@@ -91,6 +91,54 @@ def test_specificity_gate_logs_shadow_reject_for_good_to_see_you_greeting(monkey
     assert record.trace["specificity"]["suppressed"] is False
 
 
+
+def test_specificity_gate_active_mode_suppresses_generic_cheer_without_specific_anchor(monkeypatch) -> None:
+    monkeypatch.setenv("ROONIE_SPECIFICITY_GATE_MODE", "active")
+    monkeypatch.setattr(
+        "roonie.provider_director.route_generate",
+        _stub_route_generate_factory("@cat appreciate you for the bits."),
+    )
+
+    director = ProviderDirector()
+    record = director.evaluate(
+        _event(
+            "evt-cheer-generic",
+            "@RoonieTheCat heads up: cat cheered 250 bits.",
+            user="cat",
+            category="EVENT_CHEER",
+        ),
+        Env(offline=False),
+    )
+
+    assert record.action == "NOOP"
+    assert record.route == "suppressed:specificity"
+    assert record.response_text is None
+    assert record.trace["specificity_would_reject"] is True
+    assert "appreciate_bits" in record.trace["specificity"]["generic_hits"]
+    assert record.trace["specificity"]["anchor_hits"] == []
+
+
+def test_specificity_gate_active_mode_allows_anchored_cheer_response(monkeypatch) -> None:
+    monkeypatch.setenv("ROONIE_SPECIFICITY_GATE_MODE", "active")
+    monkeypatch.setattr(
+        "roonie.provider_director.route_generate",
+        _stub_route_generate_factory("@cat 250 bits? that landed right on the drop."),
+    )
+
+    director = ProviderDirector()
+    record = director.evaluate(
+        _event(
+            "evt-cheer-anchored",
+            "@RoonieTheCat heads up: cat cheered 250 bits.",
+            user="cat",
+            category="EVENT_CHEER",
+        ),
+        Env(offline=False),
+    )
+
+    assert record.action == "RESPOND_PUBLIC"
+    assert record.trace["specificity_would_reject"] is False
+    assert "event_detail" in record.trace["specificity"]["anchor_hits"]
 def test_specificity_gate_allows_anchored_banter_response_in_active_mode(monkeypatch) -> None:
     monkeypatch.setenv("ROONIE_SPECIFICITY_GATE_MODE", "active")
     monkeypatch.setattr(
@@ -166,3 +214,5 @@ def test_specificity_gate_exempts_continuation(monkeypatch) -> None:
     assert second.response_text == "@cland3stine lol fair"
     assert second.trace["specificity_would_reject"] is False
     assert second.trace["specificity"]["exempt_reason"] == "continuation"
+
+
