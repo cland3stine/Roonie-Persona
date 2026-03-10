@@ -804,6 +804,7 @@ class TestEventHandling:
     @pytest.mark.parametrize("event_type,expected_cat,expected_cooldown", [
         ("FOLLOW", "EVENT_FOLLOW", 45.0),
         ("SUB", "EVENT_SUB", 20.0),
+        ("GIFTED_SUB", "EVENT_SUB", 20.0),
         ("CHEER", "EVENT_CHEER", 20.0),
         ("RAID", "EVENT_RAID", 30.0),
     ])

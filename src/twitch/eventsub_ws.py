@@ -50,6 +50,11 @@ def normalize_eventsub_notification(message: Dict[str, Any]) -> Optional[Dict[st
         "amount": None,
         "tier": None,
         "months": None,
+        "gift_count": None,
+        "cumulative_total": None,
+        "is_gift": False,
+        "is_resub": False,
+        "is_anonymous": False,
         "raid_viewer_count": None,
         "timestamp": timestamp,
     }
@@ -65,6 +70,31 @@ def normalize_eventsub_notification(message: Dict[str, Any]) -> Optional[Dict[st
         except (TypeError, ValueError):
             months = 0
         base["months"] = months
+    elif raw_type == "channel.subscription.message":
+        base["event_type"] = "SUB"
+        base["tier"] = str(event.get("tier", "")).strip() or None
+        base["is_resub"] = True
+        try:
+            months = int(event.get("cumulative_months", 0) or 0)
+        except (TypeError, ValueError):
+            months = 0
+        base["months"] = months
+    elif raw_type == "channel.subscription.gift":
+        base["event_type"] = "GIFTED_SUB"
+        base["tier"] = str(event.get("tier", "")).strip() or None
+        base["is_gift"] = True
+        base["is_anonymous"] = bool(event.get("is_anonymous", False))
+        try:
+            base["gift_count"] = int(event.get("total", 0) or 0)
+        except (TypeError, ValueError):
+            base["gift_count"] = 0
+        try:
+            base["cumulative_total"] = int(event.get("cumulative_total", 0) or 0)
+        except (TypeError, ValueError):
+            base["cumulative_total"] = 0
+        if base["is_anonymous"]:
+            base["user_login"] = None
+            base["display_name"] = "Anonymous"
     elif raw_type == "channel.cheer":
         base["event_type"] = "CHEER"
         try:
@@ -96,7 +126,6 @@ def normalize_eventsub_notification(message: Dict[str, Any]) -> Optional[Dict[st
     else:
         return None
     return base
-
 
 class EventSubWSClient:
     def __init__(
@@ -239,6 +268,8 @@ class EventSubWSClient:
         specs = [
             ("channel.follow", "2", {"broadcaster_user_id": self._broadcaster_user_id, "moderator_user_id": self._broadcaster_user_id}),
             ("channel.subscribe", "1", {"broadcaster_user_id": self._broadcaster_user_id}),
+            ("channel.subscription.message", "1", {"broadcaster_user_id": self._broadcaster_user_id}),
+            ("channel.subscription.gift", "1", {"broadcaster_user_id": self._broadcaster_user_id}),
             ("channel.cheer", "1", {"broadcaster_user_id": self._broadcaster_user_id}),
             ("channel.raid", "1", {"to_broadcaster_user_id": self._broadcaster_user_id}),
             ("stream.online", "1", {"broadcaster_user_id": self._broadcaster_user_id}),
@@ -333,3 +364,4 @@ class EventSubWSClient:
                         ws.close()
                     except Exception:
                         pass
+

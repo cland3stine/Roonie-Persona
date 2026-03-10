@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict
@@ -33,9 +33,8 @@ class ProviderRegistry:
 
         # Special deterministic stubs for tests (no real calls).
         if prov.name == "openai":
-            # Override generate() with a deterministic stub.
             class _OpenAIStub(Provider):
-                def generate(self, *, prompt: str, context: Dict[str, Any]):
+                def generate(self, *, prompt="", messages=None, context=None):
                     return f"[openai stub] {prompt}"
 
             return cls(_default=_OpenAIStub(name="openai", enabled=True))

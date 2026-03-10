@@ -16,6 +16,12 @@ class Provider:
     name: str
     enabled: bool
 
-    def generate(self, *, prompt: str, context: Dict[str, Any]) -> Optional[str]:
+    def generate(
+        self,
+        *,
+        prompt: str = "",
+        messages: Optional[list[Dict[str, str]]] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
         # Default behavior: silent (no output).
         return None

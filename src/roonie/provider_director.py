@@ -32,7 +32,7 @@ from providers.router import (
     route_generate,
 )
 from roonie.context.context_buffer import ContextBuffer
-from roonie.prompting import build_roonie_prompt
+from roonie.prompting import build_roonie_messages, flatten_roonie_messages
 from roonie.safety_policy import classify_message_safety
 from roonie.types import DecisionRecord, Env, Event
 
@@ -98,6 +98,75 @@ _GENERIC_GREETING_TARGETS = {
     "ya",
 }
 _DEFAULT_OTHER_NAME_TARGETS = {"art", "jen"}
+_SPECIFICITY_GATE_MODES = {"off", "shadow", "active"}
+_SPECIFICITY_GENERIC_PATTERNS = (
+    ("welcome_in", re.compile(r"\bwelcome(?:\s+in)?\b", re.IGNORECASE)),
+    ("glad_you_found_us", re.compile(r"\bglad you found us\b", re.IGNORECASE)),
+    ("glad_youre_here", re.compile(r"\bglad (?:you(?:'re| are)|to have you)\b", re.IGNORECASE)),
+    ("good_to_see_you", re.compile(r"\bgood to see you\b", re.IGNORECASE)),
+    ("appreciate_that", re.compile(r"\bappreciate (?:that|the love|it)\b", re.IGNORECASE)),
+    ("thank_you", re.compile(r"\bthank you\b", re.IGNORECASE)),
+    ("good_timing", re.compile(r"\bgood timing\b", re.IGNORECASE)),
+    ("perfect_timing", re.compile(r"\bperfect timing\b", re.IGNORECASE)),
+    ("picked_good_night", re.compile(r"\byou picked a good night\b", re.IGNORECASE)),
+    ("stick_around", re.compile(r"\bstick around\b", re.IGNORECASE)),
+    ("settle_in", re.compile(r"\bsettle in\b", re.IGNORECASE)),
+    ("part_of_this_now", re.compile(r"\byou(?:'re| are) part of this now\b", re.IGNORECASE)),
+)
+_SPECIFICITY_MUSIC_ANCHOR_RE = re.compile(
+    r"\b(bassline|low[- ]end|pads?|groove|swing|transition|percussion|kick|drum|drop|break(?:down)?|arrangement|melody|atmosphere|pressure|set|track|tune|mix|electro|progressive|acid)\b",
+    re.IGNORECASE,
+)
+_SPECIFICITY_EVENT_ANCHOR_RE = re.compile(
+    r"\b(?:\d{1,4}\s*(?:viewer|viewers|raider|raiders|bit|bits|month|months|sub|subs)|tier\s*[123]|gift(?:ed|ing)?|resub(?:bed)?)\b",
+    re.IGNORECASE,
+)
+_SPECIFICITY_BOOTH_ANCHOR_RE = re.compile(
+    r"\b(booth|paw|paws|plushie|cat|seat in the house|best seat|fell over|falling over|running hot)\b",
+    re.IGNORECASE,
+)
+_SPECIFICITY_TIMING_ANCHOR_RE = re.compile(
+    r"\b(right as|right when|just in time|this part of the set|late set)\b",
+    re.IGNORECASE,
+)
+_SPECIFICITY_CALLBACK_STOPWORDS = _ANCHOR_STOPWORDS | {
+    "roonie",
+    "rooniethecat",
+    "yeah",
+    "yep",
+    "welcome",
+    "glad",
+    "good",
+    "timing",
+    "thank",
+    "you",
+    "your",
+    "appreciate",
+    "viewer",
+    "viewers",
+    "raider",
+    "raiders",
+    "raid",
+    "bits",
+    "bit",
+    "sub",
+    "subs",
+    "gift",
+    "gifted",
+    "follow",
+    "follows",
+    "follower",
+    "chat",
+    "crew",
+    "night",
+    "found",
+    "part",
+    "around",
+    "everyone",
+    "perfect",
+    "right",
+    "here",
+}
 
 
 def _repo_root() -> Path:
@@ -226,6 +295,111 @@ def _topic_overlap(message: str, anchor: str) -> bool:
         return True
     return False
 
+
+def _specificity_gate_mode() -> str:
+    mode = str(os.getenv("ROONIE_SPECIFICITY_GATE_MODE", "shadow")).strip().lower()
+    if mode not in _SPECIFICITY_GATE_MODES:
+        return "shadow"
+    return mode
+
+
+def _strip_leading_mentions(text: str) -> str:
+    return re.sub(r"^(?:@[A-Za-z0-9_]{2,30}\s+)+", "", str(text or "").strip())
+
+
+def _specificity_overlap_tokens(*, user_message: str, candidate: str) -> list[str]:
+    user_norm = _normalize_text(_strip_leading_mentions(user_message))
+    cand_norm = _normalize_text(_strip_leading_mentions(candidate))
+    user_tokens = {
+        token
+        for token in _TOKEN_RE.findall(user_norm)
+        if token and len(token) >= 3 and token not in _SPECIFICITY_CALLBACK_STOPWORDS
+    }
+    cand_tokens = {
+        token
+        for token in _TOKEN_RE.findall(cand_norm)
+        if token and len(token) >= 3 and token not in _SPECIFICITY_CALLBACK_STOPWORDS
+    }
+    return sorted(user_tokens & cand_tokens)[:5]
+
+
+def _specificity_generic_hits(candidate: str) -> list[str]:
+    text = str(candidate or "")
+    hits: list[str] = []
+    for name, pattern in _SPECIFICITY_GENERIC_PATTERNS:
+        if pattern.search(text):
+            hits.append(name)
+    return hits
+
+
+def _specificity_anchor_hits(*, candidate: str, user_message: str) -> list[str]:
+    text = str(candidate or "")
+    hits: list[str] = []
+    if _SPECIFICITY_MUSIC_ANCHOR_RE.search(text):
+        hits.append("music_detail")
+    if _SPECIFICITY_EVENT_ANCHOR_RE.search(text):
+        hits.append("event_detail")
+    overlap = _specificity_overlap_tokens(user_message=user_message, candidate=text)
+    if overlap:
+        hits.append("viewer_callback:" + ",".join(overlap[:3]))
+    if _SPECIFICITY_BOOTH_ANCHOR_RE.search(text):
+        hits.append("booth_image")
+    if _SPECIFICITY_TIMING_ANCHOR_RE.search(text):
+        hits.append("timing_detail")
+    return hits
+
+
+def _looks_like_direct_answer_prompt(message: str) -> bool:
+    text = _strip_leading_mentions(message)
+    if not text:
+        return False
+    lowered = text.lower()
+    if "?" in text:
+        return True
+    if starts_with_direct_verb(lowered):
+        return True
+    return bool(re.match(r"^(how|what|why|when|where|which|who|can|could|do|does|did|is|are|will|would|should|tell|say|give)\b", lowered))
+
+
+def _specificity_assessment(
+    *,
+    candidate: str,
+    user_message: str,
+    category: str,
+    continuation: bool,
+) -> Dict[str, Any]:
+    mode = _specificity_gate_mode()
+    result: Dict[str, Any] = {
+        "mode": mode,
+        "would_reject": False,
+        "generic_hits": [],
+        "anchor_hits": [],
+        "exempt_reason": None,
+        "suppressed": False,
+    }
+    text = str(candidate or "").strip()
+    if not text or mode == "off":
+        return result
+
+    normalized_category = str(category or "").strip().upper()
+    if normalized_category == CATEGORY_TRACK_ID:
+        result["exempt_reason"] = "track_id"
+        return result
+    if continuation:
+        result["exempt_reason"] = "continuation"
+        return result
+    if normalized_category == CATEGORY_BANTER and _looks_like_direct_answer_prompt(user_message):
+        result["exempt_reason"] = "direct_answer_banter"
+        return result
+
+    anchor_hits = _specificity_anchor_hits(candidate=text, user_message=user_message)
+    result["anchor_hits"] = anchor_hits
+    generic_hits = _specificity_generic_hits(text)
+    result["generic_hits"] = generic_hits
+    if not generic_hits:
+        return result
+    result["would_reject"] = bool(generic_hits and not anchor_hits)
+    return result
 
 def _load_persona_policy_text() -> str:
     path = _persona_policy_path()
@@ -1325,6 +1499,104 @@ class ProviderDirector:
             return _pick(_RAID, msg or cat)
         return _pick(_GENERIC, msg or cat)
 
+    def _build_messages(
+        self,
+        event: Event,
+        context_turns: list[Any],
+        *,
+        category: str,
+        approved_emotes: List[str],
+        now_playing_available: bool,
+        now_playing_text: str = "",
+        enrichment_text: str = "",
+        previous_track_text: str = "",
+        inner_circle_text: str = "",
+        schedule_text: str = "",
+        memory_hints: str,
+        topic_anchor: str,
+        library_block: str,
+        music_fact_question: bool,
+        short_ack_preferred: bool = False,
+        safety_classification: str = "allowed",
+        track_command: str = "",
+        continuation: bool = False,
+    ) -> list[Dict[str, str]]:
+        behavior_block = behavior_guidance(
+            category=category,
+            approved_emotes=approved_emotes,
+            now_playing_available=now_playing_available,
+            enrichment_available=bool(enrichment_text),
+            topic_anchor=topic_anchor,
+            short_ack_preferred=short_ack_preferred,
+            track_command=track_command,
+        )
+        grounding_block = ""
+        if library_block:
+            grounding_block = (
+                f"{library_block}\n"
+                "- Use the library match list to resolve ambiguous references.\n"
+                "- If there are multiple matches, ask one short clarifying question."
+            )
+        music_fact_block = ""
+        if music_fact_question:
+            music_fact_block = (
+                "Music facts policy:\n"
+                "- If asked for label/release date and you cannot verify, answer best-effort but hedge clearly.\n"
+                "- Prefer: 'not 100% without the exact title/link' and ask for the title/link to confirm."
+            )
+        safety_block = ""
+        if safety_classification == "refuse":
+            safety_block = (
+                "IMPORTANT - This message may be asking for private or identifying information. "
+                "Deflect casually and stay fully in character. Never reveal real addresses, "
+                "phone numbers, full names, email addresses, IP addresses, or other identifying "
+                "details about yourself or your people. If asked about location, say \"DC area\" "
+                "and nothing more specific. Keep it brief and natural."
+            )
+        elif safety_classification == "sensitive_no_followup":
+            safety_block = (
+                "IMPORTANT - This viewer may be expressing emotional distress. "
+                "Respond with brief warmth and care, staying in character. "
+                "Do not ask follow-up questions about their emotional state. "
+                "Do not play therapist or counselor. A short, genuine acknowledgment is enough."
+            )
+        continuation_block = ""
+        if continuation:
+            continuation_block = (
+                "Awareness note: This message was NOT directed at you. The viewer was chatting "
+                "with you recently, so this might be a follow-up - or they might have moved on "
+                "to talking to someone else or the room in general.\n"
+                "Read the room:\n"
+                "- Is this a natural follow-up to what you were just discussing?\n"
+                "- Is the viewer talking to or about someone else? (Look for @mentions, names, greetings)\n"
+                "- Would jumping in here feel natural, or would you be inserting yourself?\n"
+                "- Did someone ELSE in recent chat ask a question you can answer? If so, respond to THEM with their @tag, not the person whose message triggered this.\n"
+                "If this isn't for you, or you have nothing worth adding, respond with exactly: [SKIP]\n"
+                "Silence is always an option and often the right one."
+            )
+        return build_roonie_messages(
+            message=event.message,
+            metadata={
+                "viewer": event.metadata.get("user", "viewer"),
+                "channel": event.metadata.get("channel", ""),
+            },
+            context_turns=context_turns,
+            max_context_turns=8,
+            max_context_chars=1200,
+            now_playing_text=now_playing_text,
+            enrichment_text=enrichment_text,
+            previous_track_text=previous_track_text,
+            inner_circle_text=inner_circle_text,
+            schedule_text=schedule_text,
+            behavior_block=behavior_block,
+            grounding_block=grounding_block,
+            music_fact_block=music_fact_block,
+            memory_hints=memory_hints,
+            safety_block=safety_block,
+            continuation_block=continuation_block,
+            persona_policy_text=self._persona_policy_text,
+        )
+
     def _build_prompt(
         self,
         event: Event,
@@ -1347,94 +1619,27 @@ class ProviderDirector:
         track_command: str = "",
         continuation: bool = False,
     ) -> str:
-        base_prompt = build_roonie_prompt(
-            message=event.message,
-            metadata={
-                "viewer": event.metadata.get("user", "viewer"),
-                "channel": event.metadata.get("channel", ""),
-            },
-            context_turns=context_turns,
-            max_context_turns=8,
-            max_context_chars=1200,
+        messages = self._build_messages(
+            event,
+            context_turns,
+            category=category,
+            approved_emotes=approved_emotes,
+            now_playing_available=now_playing_available,
             now_playing_text=now_playing_text,
             enrichment_text=enrichment_text,
             previous_track_text=previous_track_text,
             inner_circle_text=inner_circle_text,
             schedule_text=schedule_text,
-        )
-        behavior_block = behavior_guidance(
-            category=category,
-            approved_emotes=approved_emotes,
-            now_playing_available=now_playing_available,
-            enrichment_available=bool(enrichment_text),
+            memory_hints=memory_hints,
             topic_anchor=topic_anchor,
+            library_block=library_block,
+            music_fact_question=music_fact_question,
             short_ack_preferred=short_ack_preferred,
+            safety_classification=safety_classification,
             track_command=track_command,
+            continuation=continuation,
         )
-        grounding_block = ""
-        if library_block:
-            grounding_block = (
-                "\n\n"
-                f"{library_block}\n"
-                "- Use the library match list to resolve ambiguous references.\n"
-                "- If there are multiple matches, ask one short clarifying question."
-            )
-        music_fact_block = ""
-        if music_fact_question:
-            music_fact_block = (
-                "\n\n"
-                "Music facts policy:\n"
-                "- If asked for label/release date and you cannot verify, answer best-effort but hedge clearly.\n"
-                "- Prefer: 'not 100% without the exact title/link' and ask for the title/link to confirm."
-            )
-        memory_block = ""
-        if memory_hints:
-            memory_block = (
-                "\n\n"
-                "Memory hints (do not treat as factual claims):\n"
-                f"{memory_hints}"
-            )
-        safety_block = ""
-        if safety_classification == "refuse":
-            safety_block = (
-                "\n\n"
-                "IMPORTANT — This message may be asking for private or identifying information. "
-                "Deflect casually and stay fully in character. Never reveal real addresses, "
-                "phone numbers, full names, email addresses, IP addresses, or other identifying "
-                "details about yourself or your people. If asked about location, say \"DC area\" "
-                "and nothing more specific. Keep it brief and natural."
-            )
-        elif safety_classification == "sensitive_no_followup":
-            safety_block = (
-                "\n\n"
-                "IMPORTANT — This viewer may be expressing emotional distress. "
-                "Respond with brief warmth and care, staying in character. "
-                "Do not ask follow-up questions about their emotional state. "
-                "Do not play therapist or counselor. A short, genuine acknowledgment is enough."
-            )
-        continuation_block = ""
-        if continuation:
-            continuation_block = (
-                "\n\n"
-                "Awareness note: This message was NOT directed at you. The viewer was chatting "
-                "with you recently, so this might be a follow-up — or they might have moved on "
-                "to talking to someone else or the room in general.\n"
-                "Read the room:\n"
-                "- Is this a natural follow-up to what you were just discussing?\n"
-                "- Is the viewer talking to or about someone else? (Look for @mentions, names, greetings)\n"
-                "- Would jumping in here feel natural, or would you be inserting yourself?\n"
-                "- Did someone ELSE in recent chat ask a question you can answer? If so, respond to THEM with their @tag, not the person whose message triggered this.\n"
-                "If this isn't for you, or you have nothing worth adding, respond with exactly: [SKIP]\n"
-                "Silence is always an option and often the right one."
-            )
-        if not self._persona_policy_text:
-            return f"{base_prompt}\n\n{behavior_block}{grounding_block}{music_fact_block}{memory_block}{safety_block}{continuation_block}\n"
-        return (
-            f"{base_prompt}\n\n"
-            f"{behavior_block}{grounding_block}{music_fact_block}{memory_block}{safety_block}{continuation_block}\n\n"
-            "Canonical Persona Policy (do not violate):\n"
-            f"{self._persona_policy_text}\n"
-        )
+        return flatten_roonie_messages(messages)
 
     def evaluate(self, event: Event, env: Env) -> DecisionRecord:
         session_id = str(event.metadata.get("session_id", "")).strip()
@@ -1671,7 +1876,7 @@ class ProviderDirector:
         enrichment_text = self._track_enrichment_block(metadata)
         previous_track_text = self._previous_track_block(metadata)
 
-        prompt = self._build_prompt(
+        messages = self._build_messages(
             event,
             context_turns,
             category=category,
@@ -1691,6 +1896,7 @@ class ProviderDirector:
             track_command=track_cmd or "",
             continuation=continuation,
         )
+        prompt = flatten_roonie_messages(messages)
         context: Dict[str, Any] = {
             "use_provider_config": True,
             "message_text": event.message,
@@ -1715,6 +1921,7 @@ class ProviderDirector:
             routing_cfg={},
             prompt=prompt,
             context=context,
+            messages=messages,
             test_overrides=test_overrides,
         )
 
@@ -1737,6 +1944,14 @@ class ProviderDirector:
         route = "none"
         continuation_skipped = False
         redundant_name_stripped = False
+        specificity: Dict[str, Any] = {
+            "mode": _specificity_gate_mode(),
+            "would_reject": False,
+            "generic_hits": [],
+            "anchor_hits": [],
+            "exempt_reason": None,
+            "suppressed": False,
+        }
         if isinstance(out, str) and out.strip():
             raw = out.strip()
             # [SKIP] opt-out: continuation, quiet nudge, or proactive — LLM decided to stay silent
@@ -1761,6 +1976,18 @@ class ProviderDirector:
                 response_text = " ".join(response_text.split())
                 action = "RESPOND_PUBLIC"
                 route = f"primary:{provider_used}"
+                specificity = _specificity_assessment(
+                    candidate=response_text,
+                    user_message=event.message,
+                    category=category,
+                    continuation=continuation,
+                )
+                if specificity["would_reject"] and specificity["mode"] == "active":
+                    specificity["suppressed"] = True
+                    suppression_reason = "SPECIFICITY_GATE"
+                    response_text = None
+                    action = "NOOP"
+                    route = "suppressed:specificity"
 
         # Continuation streak tracking
         if continuation and response_text and viewer_key:
@@ -1847,6 +2074,14 @@ class ProviderDirector:
                 "memory_dropped_count": memory_result.dropped_count,
             },
         }
+        trace["specificity_would_reject"] = specificity["would_reject"]
+        trace["specificity"] = {
+            "mode": specificity["mode"],
+            "generic_hits": list(specificity["generic_hits"]),
+            "anchor_hits": list(specificity["anchor_hits"]),
+            "exempt_reason": specificity["exempt_reason"],
+            "suppressed": specificity["suppressed"],
+        }
         if suppression_reason:
             trace["suppression_reason"] = suppression_reason
             trace["provider_block_reason"] = str(context.get("provider_block_reason") or suppression_reason)
@@ -1862,3 +2097,5 @@ class ProviderDirector:
             context_active=context_active,
             context_turns_used=context_turns_used,
         )
+
+

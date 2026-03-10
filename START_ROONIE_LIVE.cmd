@@ -17,6 +17,7 @@ if not exist "%RUNNER%" (
 )
 
 if not defined ROONIE_ENFORCE_SETUP_GATE set "ROONIE_ENFORCE_SETUP_GATE=1"
+if not defined ROONIE_SPECIFICITY_GATE_MODE set "ROONIE_SPECIFICITY_GATE_MODE=active"
 
 set "AUDIO_FLAG="
 if defined ROONIE_AUDIO_ENABLED (
@@ -28,6 +29,7 @@ echo [ROONIE] Python: %PY_EXE%
 echo [ROONIE] Launching Control Room for LAN monitoring...
 echo [ROONIE] Bind: 0.0.0.0:8787
 echo [ROONIE] Setup gate: %ROONIE_ENFORCE_SETUP_GATE% (ROONIE_ENFORCE_SETUP_GATE)
+echo [ROONIE] Specificity gate: %ROONIE_SPECIFICITY_GATE_MODE% (ROONIE_SPECIFICITY_GATE_MODE)
 if defined AUDIO_FLAG echo [ROONIE] Audio: ENABLED (ROONIE_AUDIO_ENABLED=1)
 echo.
 

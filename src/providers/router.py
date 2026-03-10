@@ -822,7 +822,13 @@ def classify_request(text: str, category: Optional[str], utility_source: Optiona
 
 def _mk_openai_provider(enabled: bool) -> Provider:
     class _OpenAIStub(Provider):
-        def generate(self, *, prompt: str, context: Dict[str, Any]) -> Optional[str]:
+        def generate(
+            self,
+            *,
+            prompt: str = "",
+            messages: Optional[list[Dict[str, str]]] = None,
+            context: Optional[Dict[str, Any]] = None,
+        ) -> Optional[str]:
             return f"[openai stub] {prompt}"
 
     return _OpenAIStub(name="openai", enabled=enabled)
@@ -1358,6 +1364,7 @@ def _failover_chain(
     routing_runtime_cfg: Dict[str, Any],
     prompt: str,
     context: Dict[str, Any],
+    messages: Optional[list[Dict[str, str]]] = None,
     primary_provider: "Provider",
 ) -> Tuple[Optional[str], Optional[str]]:
     """Try remaining providers in weight-descending order. Returns (output, provider_name) or (None, None)."""
@@ -1378,7 +1385,10 @@ def _failover_chain(
         try:
             fallback = _provider_for_name(candidate_name, primary_provider, context=context)
             start = time.monotonic()
-            result = fallback.generate(prompt=prompt, context=context)
+            if messages is None:
+                result = fallback.generate(prompt=prompt, context=context)
+            else:
+                result = fallback.generate(prompt=prompt, messages=messages, context=context)
             latency_ms = int((time.monotonic() - start) * 1000)
             if result is not None:
                 _record_provider_result(candidate_name, latency_ms=latency_ms, success=True)
@@ -1662,13 +1672,25 @@ def _mk_shadow_provider(name: str, enabled: bool) -> Provider:
     name = name.strip().lower()
     if name == "anthropic":
         class _AnthropicStub(Provider):
-            def generate(self, *, prompt: str, context: Dict[str, Any]) -> Optional[str]:
+            def generate(
+                self,
+                *,
+                prompt: str = "",
+                messages: Optional[list[Dict[str, str]]] = None,
+                context: Optional[Dict[str, Any]] = None,
+            ) -> Optional[str]:
                 # deterministic, but will never be returned by router
                 return f"[anthropic stub] {prompt}"
         return _AnthropicStub(name="anthropic", enabled=enabled)
     if name == "grok":
         class _GrokStub(Provider):
-            def generate(self, *, prompt: str, context: Dict[str, Any]) -> Optional[str]:
+            def generate(
+                self,
+                *,
+                prompt: str = "",
+                messages: Optional[list[Dict[str, str]]] = None,
+                context: Optional[Dict[str, Any]] = None,
+            ) -> Optional[str]:
                 return f"[grok stub] {prompt}"
         return _GrokStub(name="grok", enabled=enabled)
     return Provider(name=name, enabled=enabled)
@@ -1680,6 +1702,7 @@ def route_generate(
     routing_cfg: Dict[str, Any],
     prompt: str,
     context: Dict[str, Any],
+    messages: Optional[list[Dict[str, str]]] = None,
     test_overrides: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """
@@ -1770,7 +1793,10 @@ def route_generate(
     try:
         if test_overrides and test_overrides.get("primary_behavior") == "throw":
             raise RuntimeError("primary forced throw (test override)")
-        out = primary.generate(prompt=prompt, context=context)
+        if messages is None:
+            out = primary.generate(prompt=prompt, context=context)
+        else:
+            out = primary.generate(prompt=prompt, messages=messages, context=context)
         last_exc = None
     except Exception as exc:
         last_exc = exc
@@ -1798,6 +1824,7 @@ def route_generate(
                 routing_runtime_cfg=routing_runtime_cfg,
                 prompt=prompt,
                 context=context,
+                messages=messages,
                 primary_provider=primary,
             )
             if failover_out is not None and failover_name is not None:
@@ -1893,7 +1920,10 @@ def route_generate(
         shadow = _mk_shadow_provider(shadow_name, enabled=enabled)
         if shadow.enabled:
             try:
-                _ = shadow.generate(prompt=prompt, context=context)
+                if messages is None:
+                    _ = shadow.generate(prompt=prompt, context=context)
+                else:
+                    _ = shadow.generate(prompt=prompt, messages=messages, context=context)
             except Exception:
                 pass
 

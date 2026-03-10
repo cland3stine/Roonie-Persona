@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
@@ -22,15 +22,23 @@ class GrokProvider(Provider):
         object.__setattr__(self, "transport", transport)
         object.__setattr__(self, "api_key", api_key)
 
-    def generate(self, *, prompt: str, context: Dict[str, Any]) -> Optional[str]:
+    def generate(
+        self,
+        *,
+        prompt: str = "",
+        messages: Optional[list[Dict[str, str]]] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
         if not self.enabled:
             return None
 
-        fixture_name = context.get("fixture_name")
+        ctx = context or {}
+        fixture_name = ctx.get("fixture_name")
         url = "https://api.x.ai/v1/chat/completions"
+        payload_messages = list(messages or []) or [{"role": "user", "content": prompt}]
         payload = {
-            "model": context.get("model", "grok-4-1-fast-non-reasoning"),
-            "messages": [{"role": "user", "content": prompt}],
+            "model": ctx.get("model", "grok-4-1-fast-non-reasoning"),
+            "messages": payload_messages,
         }
         api_key = (self.api_key or "").strip() or "REDACTED"
         headers = {"Authorization": f"Bearer {api_key}"}

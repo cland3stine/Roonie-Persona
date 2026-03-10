@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -30,6 +30,16 @@ def test_eventsub_normalization_maps_supported_types() -> None:
             "channel.subscribe",
             {"user_login": "bob", "user_name": "Bob", "tier": "1000", "cumulative_months": 3},
             "SUB",
+        ),
+        (
+            "channel.subscription.message",
+            {"user_login": "bob", "user_name": "Bob", "tier": "1000", "cumulative_months": 14},
+            "SUB",
+        ),
+        (
+            "channel.subscription.gift",
+            {"user_login": "gifter", "user_name": "Gifter", "tier": "1000", "total": 5, "cumulative_total": 42},
+            "GIFTED_SUB",
         ),
         (
             "channel.cheer",
@@ -66,7 +76,62 @@ def test_eventsub_normalization_maps_supported_types() -> None:
         assert normalized["twitch_event_id"] == f"evt-{idx}"
 
 
-def test_eventsub_subscriptions_include_stream_online(monkeypatch) -> None:
+
+def test_eventsub_subscription_message_normalization_carries_resub_months() -> None:
+    message = {
+        "metadata": {
+            "message_type": "notification",
+            "message_id": "evt-resub-1",
+            "message_timestamp": "2026-02-15T00:00:01Z",
+        },
+        "payload": {
+            "subscription": {"type": "channel.subscription.message"},
+            "event": {
+                "user_login": "bob",
+                "user_name": "Bob",
+                "tier": "1000",
+                "cumulative_months": 14,
+            },
+        },
+    }
+    normalized = normalize_eventsub_notification(message)
+    assert normalized is not None
+    assert normalized["event_type"] == "SUB"
+    assert normalized["is_resub"] is True
+    assert normalized["months"] == 14
+    assert normalized["tier"] == "1000"
+
+
+def test_eventsub_subscription_gift_normalization_carries_gifter_identity() -> None:
+    message = {
+        "metadata": {
+            "message_type": "notification",
+            "message_id": "evt-gift-1",
+            "message_timestamp": "2026-02-15T00:00:01Z",
+        },
+        "payload": {
+            "subscription": {"type": "channel.subscription.gift"},
+            "event": {
+                "user_login": "gifter",
+                "user_name": "Gifter",
+                "tier": "1000",
+                "total": 5,
+                "cumulative_total": 42,
+                "is_anonymous": False,
+            },
+        },
+    }
+    normalized = normalize_eventsub_notification(message)
+    assert normalized is not None
+    assert normalized["event_type"] == "GIFTED_SUB"
+    assert normalized["user_login"] == "gifter"
+    assert normalized["display_name"] == "Gifter"
+    assert normalized["gift_count"] == 5
+    assert normalized["cumulative_total"] == 42
+    assert normalized["is_gift"] is True
+
+
+def test_eventsub_subscriptions_include_phase1_types(monkeypatch) -> None:
     posted_types: List[str] = []
     client = EventSubWSClient(
         oauth_token="oauth:testtoken",
@@ -82,6 +147,8 @@ def test_eventsub_subscriptions_include_stream_online(monkeypatch) -> None:
 
     monkeypatch.setattr(client, "_post_subscription", _post_subscription)
     client._ensure_subscriptions("session-1")
+    assert "channel.subscription.message" in posted_types
+    assert "channel.subscription.gift" in posted_types
     assert "stream.online" in posted_types
 
 
@@ -143,7 +210,7 @@ def test_eventsub_reconnect_backoff_is_scheduled_on_disconnect() -> None:
     assert any(int(item.get("reconnect_count", 0)) >= 1 for item in state_events)
 
 
-def test_eventsub_pipeline_disarmed_suppresses_and_does_not_send(tmp_path: Path, monkeypatch) -> None:
+def test_eventsub_pipeline_disarmed_raid_suppresses_and_does_not_send(tmp_path: Path, monkeypatch) -> None:
     _set_dashboard_paths(monkeypatch, tmp_path)
     monkeypatch.setenv("ROONIE_KILL_SWITCH", "0")
     storage = DashboardStorage(runs_dir=tmp_path / "runs")
@@ -182,11 +249,12 @@ def test_eventsub_pipeline_disarmed_suppresses_and_does_not_send(tmp_path: Path,
     monkeypatch.setattr("roonie.provider_director.ProviderDirector.evaluate", _provider_stub)
 
     normalized = {
-        "event_type": "FOLLOW",
-        "raw_type": "channel.follow",
-        "twitch_event_id": "evt-follow-1",
-        "user_login": "alice",
-        "display_name": "Alice",
+        "event_type": "RAID",
+        "raw_type": "channel.raid",
+        "twitch_event_id": "evt-raid-1",
+        "user_login": "djx",
+        "display_name": "DJX",
+        "raid_viewer_count": 42,
         "timestamp": "2026-02-15T00:00:01Z",
     }
     eventsub_bridge._on_event(normalized)
@@ -201,7 +269,7 @@ def test_eventsub_pipeline_disarmed_suppresses_and_does_not_send(tmp_path: Path,
     eventsub_log = (tmp_path / "logs" / "eventsub_events.jsonl").read_text(encoding="utf-8").strip().splitlines()
     assert len(eventsub_log) >= 1
     last_disarmed = json.loads(eventsub_log[-1])
-    assert last_disarmed["twitch_event_id"] == "evt-follow-1"
+    assert last_disarmed["twitch_event_id"] == "evt-raid-1"
     assert last_disarmed["session_id"] is None
     assert last_disarmed["emitted"] is False
     assert last_disarmed["suppression_reason"] in {"OUTPUT_DISABLED", "DISARMED", "ACTION_NOT_ALLOWED"}
@@ -211,13 +279,142 @@ def test_eventsub_pipeline_disarmed_suppresses_and_does_not_send(tmp_path: Path,
     active_session_id = str(storage.get_status().to_dict().get("session_id", "")).strip()
     assert active_session_id
     normalized2 = dict(normalized)
-    normalized2["twitch_event_id"] = "evt-follow-2"
+    normalized2["twitch_event_id"] = "evt-raid-2"
     eventsub_bridge._on_event(normalized2)
     eventsub_log2 = (tmp_path / "logs" / "eventsub_events.jsonl").read_text(encoding="utf-8").strip().splitlines()
     last_armed = json.loads(eventsub_log2[-1])
-    assert last_armed["twitch_event_id"] == "evt-follow-2"
+    assert last_armed["twitch_event_id"] == "evt-raid-2"
     assert str(last_armed.get("session_id", "")).strip() == active_session_id
 
+
+
+
+def test_eventsub_follow_events_are_suppressed_before_persona_path(tmp_path: Path, monkeypatch) -> None:
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    storage = DashboardStorage(runs_dir=tmp_path / "runs")
+    live_bridge = LiveChatBridge(storage=storage, account="bot")
+    eventsub_bridge = EventSubBridge(storage=storage, live_bridge=live_bridge)
+
+    ingest_calls: List[Dict[str, Any]] = []
+
+    def _ingest_stub(normalized_event: Dict[str, Any], *, text: str) -> Dict[str, Any]:
+        ingest_calls.append({"normalized_event": dict(normalized_event), "text": str(text)})
+        return {"emitted": True, "reason": "SENT", "session_id": "sid-follow"}
+
+    monkeypatch.setattr(live_bridge, "ingest_eventsub_event", _ingest_stub)
+
+    storage.set_armed(True)
+    eventsub_bridge._on_event(
+        {
+            "event_type": "FOLLOW",
+            "raw_type": "channel.follow",
+            "twitch_event_id": "evt-follow-1",
+            "user_login": "alice",
+            "display_name": "Alice",
+            "timestamp": "2026-02-28T00:00:01Z",
+        }
+    )
+
+    assert ingest_calls == []
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "logs" / "eventsub_events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert rows
+    last = rows[-1]
+    assert last["twitch_event_id"] == "evt-follow-1"
+    assert last["event_type"] == "FOLLOW"
+    assert last["emitted"] is False
+    assert last["session_id"] is None
+    assert last["suppression_reason"] == "SUPPRESSED_EVENT_TYPE:FOLLOW"
+
+
+def test_eventsub_sub_events_are_suppressed_by_event_type_before_reenable(tmp_path: Path, monkeypatch) -> None:
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    storage = DashboardStorage(runs_dir=tmp_path / "runs")
+    live_bridge = LiveChatBridge(storage=storage, account="bot")
+    eventsub_bridge = EventSubBridge(storage=storage, live_bridge=live_bridge)
+
+    ingest_calls: List[Dict[str, Any]] = []
+
+    def _ingest_stub(normalized_event: Dict[str, Any], *, text: str) -> Dict[str, Any]:
+        ingest_calls.append({"normalized_event": dict(normalized_event), "text": str(text)})
+        return {"emitted": True, "reason": "SENT", "session_id": "sid-sub"}
+
+    monkeypatch.setattr(live_bridge, "ingest_eventsub_event", _ingest_stub)
+
+    eventsub_bridge._on_event(
+        {
+            "event_type": "SUB",
+            "raw_type": "channel.subscribe",
+            "twitch_event_id": "evt-sub-general-1",
+            "user_login": "alice",
+            "display_name": "Alice",
+            "tier": "1000",
+            "timestamp": "2026-02-28T00:00:01Z",
+        }
+    )
+
+    assert ingest_calls == []
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "logs" / "eventsub_events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert rows
+    last = rows[-1]
+    assert last["twitch_event_id"] == "evt-sub-general-1"
+    assert last["event_type"] == "SUB"
+    assert last["emitted"] is False
+    assert last["session_id"] is None
+    assert last["suppression_reason"] == "SUPPRESSED_EVENT_TYPE:SUB"
+
+
+
+def test_eventsub_gifted_sub_events_are_suppressed_before_reenable(tmp_path: Path, monkeypatch) -> None:
+    _set_dashboard_paths(monkeypatch, tmp_path)
+    storage = DashboardStorage(runs_dir=tmp_path / "runs")
+    live_bridge = LiveChatBridge(storage=storage, account="bot")
+    eventsub_bridge = EventSubBridge(storage=storage, live_bridge=live_bridge)
+
+    ingest_calls: List[Dict[str, Any]] = []
+
+    def _ingest_stub(normalized_event: Dict[str, Any], *, text: str) -> Dict[str, Any]:
+        ingest_calls.append({"normalized_event": dict(normalized_event), "text": str(text)})
+        return {"emitted": True, "reason": "SENT", "session_id": "sid-gift"}
+
+    monkeypatch.setattr(live_bridge, "ingest_eventsub_event", _ingest_stub)
+
+    eventsub_bridge._on_event(
+        {
+            "event_type": "GIFTED_SUB",
+            "raw_type": "channel.subscription.gift",
+            "twitch_event_id": "evt-gifted-sub-1",
+            "user_login": "gifter",
+            "display_name": "Gifter",
+            "tier": "1000",
+            "gift_count": 3,
+            "timestamp": "2026-02-28T00:00:01Z",
+        }
+    )
+
+    assert ingest_calls == []
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "logs" / "eventsub_events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert rows
+    last = rows[-1]
+    assert last["twitch_event_id"] == "evt-gifted-sub-1"
+    assert last["event_type"] == "GIFTED_SUB"
+    assert last["emitted"] is False
+    assert last["session_id"] is None
+    assert last["suppression_reason"] == "SUPPRESSED_EVENT_TYPE:GIFTED_SUB"
 
 
 def test_eventsub_sub_events_from_inner_circle_are_suppressed(tmp_path: Path, monkeypatch) -> None:
@@ -262,11 +459,12 @@ def test_eventsub_sub_events_from_inner_circle_are_suppressed(tmp_path: Path, mo
 
     eventsub_bridge._on_event(
         {
-            "event_type": "FOLLOW",
-            "raw_type": "channel.follow",
-            "twitch_event_id": "evt-follow-1",
+            "event_type": "RAID",
+            "raw_type": "channel.raid",
+            "twitch_event_id": "evt-raid-1",
             "user_login": "cland3stine",
             "display_name": "cland3stine",
+            "raid_viewer_count": 14,
             "timestamp": "2026-02-28T00:00:02Z",
         }
     )

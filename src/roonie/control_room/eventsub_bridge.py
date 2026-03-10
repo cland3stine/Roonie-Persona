@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import threading
 from datetime import datetime, timezone
@@ -91,9 +91,22 @@ class EventSubBridge:
             tier_raw = str(normalized.get("tier") or "").strip()
             tier_label = {"1000": "Tier 1", "2000": "Tier 2", "3000": "Tier 3"}.get(tier_raw, tier_raw)
             tier_suffix = f" ({tier_label})" if tier_label else ""
+            months = int(normalized.get("months") or 0)
             if normalized.get("is_gift"):
                 return f"@RoonieTheCat heads up: {display} received a gifted sub{tier_suffix}! Welcome them."
+            if normalized.get("is_resub") and months > 0:
+                month_label = "month" if months == 1 else "months"
+                return f"@RoonieTheCat heads up: {display} just resubscribed{tier_suffix} ({months} {month_label})! Say thanks."
             return f"@RoonieTheCat heads up: {display} just subscribed{tier_suffix}! Say thanks."
+        if event_type == "GIFTED_SUB":
+            tier_raw = str(normalized.get("tier") or "").strip()
+            tier_label = {"1000": "Tier 1", "2000": "Tier 2", "3000": "Tier 3"}.get(tier_raw, tier_raw)
+            tier_suffix = f" ({tier_label})" if tier_label else ""
+            gift_count = int(normalized.get("gift_count") or 0)
+            gift_label = "sub" if gift_count == 1 else "subs"
+            gifter = "an anonymous gifter" if normalized.get("is_anonymous") else display
+            count_text = str(gift_count or 1)
+            return f"@RoonieTheCat heads up: {gifter} gifted {count_text} {gift_label}{tier_suffix}."
         if event_type == "CHEER":
             amount = normalized.get("amount")
             return f"@RoonieTheCat heads up: {display} cheered {amount or 0} bits."
@@ -110,13 +123,11 @@ class EventSubBridge:
     def _normalize_username(value: Any) -> str:
         return str(value or "").strip().lstrip("@").lower()
 
-    # TODO: re-enable SUB events once prompt/response quality is fixed
-    _SUPPRESSED_EVENT_TYPES: ClassVar[frozenset] = frozenset({"SUB"})
+    # FOLLOW stays utility-only; sub-related events remain suppressed until payload handling is ready.
+    _SUPPRESSED_EVENT_TYPES: ClassVar[frozenset[str]] = frozenset({"FOLLOW", "SUB", "GIFTED_SUB"})
 
-    def _should_ignore_event(self, normalized: Dict[str, Any]) -> bool:
+    def _is_ignored_self_sub(self, normalized: Dict[str, Any]) -> bool:
         event_type = str(normalized.get("event_type", "UNKNOWN")).strip().upper()
-        if event_type in self._SUPPRESSED_EVENT_TYPES:
-            return True
         if event_type != "SUB":
             return False
         user_login = self._normalize_username(normalized.get("user_login"))
@@ -124,9 +135,18 @@ class EventSubBridge:
         actor = user_login or display_name
         return bool(actor and actor in self._IGNORED_SUB_USERNAMES)
 
+    def _suppression_reason(self, normalized: Dict[str, Any]) -> Optional[str]:
+        if self._is_ignored_self_sub(normalized):
+            return "IGNORED_SELF_SUB"
+        event_type = str(normalized.get("event_type", "UNKNOWN")).strip().upper()
+        if event_type in self._SUPPRESSED_EVENT_TYPES:
+            return f"SUPPRESSED_EVENT_TYPE:{event_type}"
+        return None
+
     def _on_event(self, normalized: Dict[str, Any]) -> None:
         event_type = str(normalized.get("event_type", "UNKNOWN")).strip().upper()
         event_id = str(normalized.get("twitch_event_id", "")).strip()
+        suppression_reason = self._suppression_reason(normalized)
         result: Dict[str, Any]
         if event_type == "STREAM_ONLINE":
             try:
@@ -141,8 +161,8 @@ class EventSubBridge:
                 self._log(f"[EventSubBridge] social announce failed event_id={event_id} error={exc}")
         elif event_type == "STREAM_OFFLINE":
             result = {"emitted": False, "reason": "STREAM_OFFLINE_NOOP", "session_id": None}
-        elif self._should_ignore_event(normalized):
-            result = {"emitted": False, "reason": "IGNORED_SELF_SUB", "session_id": None}
+        elif suppression_reason is not None:
+            result = {"emitted": False, "reason": suppression_reason, "session_id": None}
         else:
             try:
                 result = self._live_bridge.ingest_eventsub_event(normalized, text=self._eventsub_text(normalized))
@@ -210,3 +230,4 @@ class EventSubBridge:
             }
         )
         self._log("[EventSubBridge] stopped")
+

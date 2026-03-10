@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
@@ -47,6 +47,34 @@ def _extract_anthropic_text(body: Any) -> str:
     return ""
 
 
+def _coerce_anthropic_messages(
+    *,
+    prompt: str = "",
+    messages: Optional[list[Dict[str, str]]] = None,
+) -> Dict[str, Any]:
+    system_parts: list[str] = []
+    payload_messages: list[Dict[str, str]] = []
+    for message in list(messages or []):
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role", "user")).strip().lower() or "user"
+        content = str(message.get("content", "")).strip()
+        if not content:
+            continue
+        if role == "system":
+            system_parts.append(content)
+            continue
+        if role not in {"user", "assistant"}:
+            role = "user"
+        payload_messages.append({"role": role, "content": content})
+    if not payload_messages:
+        payload_messages.append({"role": "user", "content": str(prompt or "")})
+    payload: Dict[str, Any] = {"messages": payload_messages}
+    if system_parts:
+        payload["system"] = "\n\n".join(system_parts)
+    return payload
+
+
 class AnthropicProvider(Provider):
     transport: Transport
     api_key: str
@@ -63,17 +91,24 @@ class AnthropicProvider(Provider):
         object.__setattr__(self, "transport", transport)
         object.__setattr__(self, "api_key", api_key)
 
-    def generate(self, *, prompt: str, context: Dict[str, Any]) -> Optional[str]:
+    def generate(
+        self,
+        *,
+        prompt: str = "",
+        messages: Optional[list[Dict[str, str]]] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
         if not self.enabled:
             return None
 
-        fixture_name = context.get("fixture_name")
+        ctx = context or {}
+        fixture_name = ctx.get("fixture_name")
         url = "https://api.anthropic.com/v1/messages"
         payload = {
-            "model": context.get("model", "claude-opus-4-6"),
-            "max_tokens": int(context.get("max_tokens", 140)),
-            "messages": [{"role": "user", "content": prompt}],
+            "model": ctx.get("model", "claude-opus-4-6"),
+            "max_tokens": int(ctx.get("max_tokens", 140)),
         }
+        payload.update(_coerce_anthropic_messages(prompt=prompt, messages=messages))
         api_key = (self.api_key or "").strip() or "REDACTED"
         headers = {
             "x-api-key": api_key,
@@ -98,8 +133,6 @@ class AnthropicProvider(Provider):
             if extracted:
                 return extracted
 
-            # If we got here, response succeeded but we couldn't find text.
-            # Raise a schema-only error (safe) so the caller can log it in shadow mode.
             if isinstance(body, dict):
                 keys = sorted(list(body.keys()))
                 sample = {k: type(body.get(k)).__name__ for k in keys[:25]}
