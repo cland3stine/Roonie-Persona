@@ -97,13 +97,29 @@ _GENERIC_GREETING_TARGETS = {
     "yall",
     "ya",
 }
-_DEFAULT_OTHER_NAME_TARGETS = {"art", "jen"}
+_DEFAULT_OTHER_NAME_TARGETS = {"art", "jen", "c0rcyra", "corcyra", "cland3stine", "clandestine"}
+_HIDDEN_STATE_QUESTION_RE = re.compile(
+    r"(?:\b(?:how many|how much|count|number of|who(?:'s| is)|is there|any)\b[^?.!]{0,60}\b(?:lurkers?|lurking|viewers?|watching|watchers|chatters?)\b)"
+    r"|(?:\b(?:lurkers?|lurking|viewers?|watching|watchers|chatters?)\b[^?.!]{0,60}\b(?:how many|how much|count|number|who(?:'s| is)|any)\b)",
+    re.IGNORECASE,
+)
+_PLATFORM_HELP_QUESTION_RE = re.compile(
+    r"\b(twitch|app|settings?|privacy|profile|account|mode|toggle|tab|menu|option|visibility|visible|hidden|viewer card|chat settings?)\b",
+    re.IGNORECASE,
+)
+_PLATFORM_TECH_PROBLEM_RE = re.compile(
+    r"(?:\b(?:smart\s*tvs?|tvs?|tv|phone|mobile|browser|app|console|fire\s*stick|firestick|roku|laptop|desktop|pc)\b[^?.!]{0,80}\b(?:crash|crashes|crashing|freeze|freezes|freezing|glitch|glitches|glitching|lag|lags|lagging|buffer|buffers|buffering|broken|issue|issues|problem|problems|working|incompatible)\b)"
+    r"|(?:\b(?:crash|crashes|crashing|freeze|freezes|freezing|glitch|glitches|glitching|lag|lags|lagging|buffer|buffers|buffering|broken|issue|issues|problem|problems|working|incompatible)\b[^?.!]{0,80}\b(?:smart\s*tvs?|tvs?|tv|phone|mobile|browser|app|console|fire\s*stick|firestick|roku|laptop|desktop|pc)\b)",
+    re.IGNORECASE,
+)
+_LEETSPEAK_ALIAS_TRANSLATION = str.maketrans({"0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t"})
 _SPECIFICITY_GATE_MODES = {"off", "shadow", "active"}
 _SPECIFICITY_GENERIC_PATTERNS = (
     ("welcome_in", re.compile(r"\bwelcome(?:\s+in)?\b", re.IGNORECASE)),
     ("glad_you_found_us", re.compile(r"\bglad you found us\b", re.IGNORECASE)),
     ("glad_youre_here", re.compile(r"\bglad (?:you(?:'re| are)|to have you)\b", re.IGNORECASE)),
     ("good_to_see_you", re.compile(r"\bgood to see you\b", re.IGNORECASE)),
+    ("means_a_lot", re.compile(r"\bmeans a lot\b", re.IGNORECASE)),
     ("appreciate_that", re.compile(r"\bappreciate (?:that|the love|it)\b", re.IGNORECASE)),
     ("appreciate_bits", re.compile(r"\bappreciate you(?:\s+for)?\s+(?:the\s+)?bits\b", re.IGNORECASE)),
     ("thanks_for_bits", re.compile(r"\bthanks?(?:\s+for)?\s+(?:the\s+)?bits\b", re.IGNORECASE)),
@@ -361,6 +377,64 @@ def _looks_like_direct_answer_prompt(message: str) -> bool:
     if starts_with_direct_verb(lowered):
         return True
     return bool(re.match(r"^(how|what|why|when|where|which|who|can|could|do|does|did|is|are|will|would|should|tell|say|give)\b", lowered))
+
+
+def _normalize_name_alias(value: str) -> str:
+    token = str(value or "").strip().lower().lstrip("@")
+    if not token:
+        return ""
+    token = token.translate(_LEETSPEAK_ALIAS_TRANSLATION)
+    token = re.sub(r"[^a-z0-9_]+", "", token)
+    return token
+
+
+def _is_hidden_state_question(message: str) -> bool:
+    text = _strip_leading_mentions(message)
+    if not text:
+        return False
+    lowered = text.lower()
+    if not any(token in lowered for token in ("lurker", "lurkers", "lurking", "viewer", "viewers", "watching", "watchers", "chatter", "chatters")):
+        return False
+    return bool(_HIDDEN_STATE_QUESTION_RE.search(text))
+
+
+def _is_platform_help_question(message: str) -> bool:
+    text = _strip_leading_mentions(message)
+    if not text or not _looks_like_direct_answer_prompt(text):
+        return False
+    if _PLATFORM_TECH_PROBLEM_RE.search(text):
+        return True
+    return bool(_PLATFORM_HELP_QUESTION_RE.search(text))
+
+
+def _deterministic_truthful_reply(
+    *,
+    viewer: str,
+    message: str,
+    safety_classification: str,
+) -> Optional[tuple[str, str]]:
+    if str(safety_classification or "").strip().lower() != "allowed":
+        return None
+    text = _strip_leading_mentions(message)
+    if not text:
+        return None
+    viewer_token = str(viewer or "viewer").strip().lstrip("@") or "viewer"
+    if _is_hidden_state_question(text):
+        return (
+            f"@{viewer_token} hard to tell from the booth. chat's the part i can actually see.",
+            "hidden_state_unknown",
+        )
+    if _is_platform_help_question(text):
+        if _PLATFORM_TECH_PROBLEM_RE.search(text):
+            return (
+                f"@{viewer_token} not sure what's causing that on Twitch's side. laptop might just be the safer bet for now.",
+                "platform_tech_unknown",
+            )
+        return (
+            f"@{viewer_token} not sure on the exact Twitch setting for that.",
+            "platform_help_unknown",
+        )
+    return None
 
 
 def _specificity_assessment(
@@ -719,13 +793,39 @@ class ProviderDirector:
                 for token in configured.split(",")
                 if token.strip()
             } or set(_DEFAULT_OTHER_NAME_TARGETS)
+        inner_circle = metadata.get("inner_circle")
+        if isinstance(inner_circle, list):
+            for member in inner_circle:
+                if not isinstance(member, dict):
+                    continue
+                for raw in (member.get("username"), member.get("display_name"), member.get("name")):
+                    token = str(raw or "").strip()
+                    if not token:
+                        continue
+                    names.add(token)
+                    normalized = _normalize_name_alias(token)
+                    if normalized:
+                        names.add(normalized)
         aliases = self._roonie_aliases(metadata)
+        current_user_tokens = {
+            str(metadata.get("user") or "").strip().lower().lstrip("@"),
+            str(metadata.get("display_name") or metadata.get("viewer_display_name") or "").strip().lower().lstrip("@"),
+        }
+        current_user_tokens = {token for token in current_user_tokens if token}
+        current_user_tokens |= {
+            normalized
+            for token in list(current_user_tokens)
+            if (normalized := _normalize_name_alias(token))
+        }
         cleaned: set[str] = set()
         for name in names:
-            token = str(name or "").strip().lower().lstrip("@")
-            if not token or token in aliases:
+            raw_token = str(name or "").strip().lower().lstrip("@")
+            if not raw_token:
                 continue
-            cleaned.add(token)
+            for candidate in {raw_token, _normalize_name_alias(raw_token)}:
+                if not candidate or candidate in aliases or candidate in current_user_tokens:
+                    continue
+                cleaned.add(candidate)
         return cleaned
 
     def _mentions_other_user(self, *, message: str, metadata: Dict[str, Any]) -> bool:
@@ -1917,15 +2017,28 @@ class ProviderDirector:
             test_overrides = None
 
         routing_status = get_routing_runtime_status()
+        context["routing_enabled"] = bool(routing_status.get("enabled", True))
         registry = _provider_registry_from_runtime()
-        out = route_generate(
-            registry=registry,
-            routing_cfg={},
-            prompt=prompt,
-            context=context,
-            messages=messages,
-            test_overrides=test_overrides,
+        guardrail_reply = _deterministic_truthful_reply(
+            viewer=str(metadata.get("user") or viewer_key or "viewer"),
+            message=event.message,
+            safety_classification=safety_classification,
         )
+        if guardrail_reply:
+            out, guardrail_reason = guardrail_reply
+            context["provider_selected"] = "guardrail"
+            context["moderation_result"] = "allow"
+            context["override_mode"] = "deterministic_guardrail"
+            context["guardrail_reason"] = guardrail_reason
+        else:
+            out = route_generate(
+                registry=registry,
+                routing_cfg={},
+                prompt=prompt,
+                context=context,
+                messages=messages,
+                test_overrides=test_overrides,
+            )
 
         provider_used = str(
             context.get("provider_selected")
@@ -2084,6 +2197,8 @@ class ProviderDirector:
             "exempt_reason": specificity["exempt_reason"],
             "suppressed": specificity["suppressed"],
         }
+        if context.get("guardrail_reason"):
+            trace["guardrail_reason"] = str(context.get("guardrail_reason"))
         if suppression_reason:
             trace["suppression_reason"] = suppression_reason
             trace["provider_block_reason"] = str(context.get("provider_block_reason") or suppression_reason)
