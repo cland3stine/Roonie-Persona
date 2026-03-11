@@ -122,6 +122,7 @@ def behavior_guidance(
     elif category in EVENT_COOLDOWN_SECONDS:
         lines.append("Quick thank-you for the event. Be warm and hyped, make them feel like it matters. Keep it brief.")
         lines.append("Avoid stock filler like 'means a lot,' 'appreciate the love,' or 'welcome to the stream.' Keep it tied to this exact moment.")
+        lines.append("Vary the sentence shape. Don't always lead with the count, and don't always tie it to the current track.")
     elif category == CATEGORY_GREETING:
         lines.append("Greet them like a friend you're happy to see. Match their energy or bring it up a notch.")
         lines.append("Avoid generic ceremony like 'good to see you' or 'glad you're here' unless you can ground it in something specific they just said.")
@@ -133,6 +134,7 @@ def behavior_guidance(
         if topic_anchor:
             lines.append(f"Recent topic: {topic_anchor}. Pick up the thread if relevant.")
         lines.append("Chat naturally. Be warm, react to what they actually said. Light teasing with people you know well is welcome if the moment is right.")
+        lines.append("A dry joke or a slightly weird observation is welcome when it fits the moment.")
         lines.append("You know what's playing but don't force track references into every reply. Only mention music when the conversation is about it or it fits naturally.")
         lines.append("If you need to dodge a topic, do it smoothly — redirect to what's happening in the set, ask about something else, or just let it pass. Never sound like you're reading a policy.")
         lines.append("Avoid stock filler like 'good to see you,' 'glad you're here,' or 'means a lot' unless you can anchor it to something concrete in this exact exchange.")

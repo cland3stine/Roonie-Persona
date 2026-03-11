@@ -39,6 +39,8 @@ class GrokProvider(Provider):
         payload = {
             "model": ctx.get("model", "grok-4-1-fast-non-reasoning"),
             "messages": payload_messages,
+            "temperature": float(ctx.get("temperature", 0.65)),
+            "max_tokens": int(ctx.get("max_tokens", 120)),
         }
         api_key = (self.api_key or "").strip() or "REDACTED"
         headers = {"Authorization": f"Bearer {api_key}"}

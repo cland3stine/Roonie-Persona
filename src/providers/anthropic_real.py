@@ -106,7 +106,8 @@ class AnthropicProvider(Provider):
         url = "https://api.anthropic.com/v1/messages"
         payload = {
             "model": ctx.get("model", "claude-opus-4-6"),
-            "max_tokens": int(ctx.get("max_tokens", 140)),
+            "max_tokens": int(ctx.get("max_tokens", 120)),
+            "temperature": float(ctx.get("temperature", 0.65)),
         }
         payload.update(_coerce_anthropic_messages(prompt=prompt, messages=messages))
         api_key = (self.api_key or "").strip() or "REDACTED"
