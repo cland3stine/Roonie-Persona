@@ -299,7 +299,15 @@ class TestContinuationLaunch:
         assert r.trace["director"]["continuation_capped"] is False
 
     def test_skip_parsing_for_continuation(self, monkeypatch):
-        _stub_route(monkeypatch, response="[SKIP]")
+        call_count = {"n": 0}
+
+        def _stub(**kwargs):
+            call_count["n"] += 1
+            kwargs["context"]["provider_selected"] = "openai"
+            kwargs["context"]["moderation_result"] = "allow"
+            return "@viewer_a hey!" if call_count["n"] == 1 else "[SKIP]"
+
+        monkeypatch.setattr("roonie.provider_director.route_generate", _stub)
         d = ProviderDirector()
         env = Env(offline=False)
 
@@ -308,15 +316,15 @@ class TestContinuationLaunch:
         assert r2.action == "NOOP"
         assert r2.trace["director"]["continuation_skipped"] is True
 
-    def test_skip_NOT_parsed_for_direct_address(self, monkeypatch):
+    def test_skip_safety_net_for_direct_address(self, monkeypatch):
         _stub_route(monkeypatch, response="[SKIP]")
         d = ProviderDirector()
         env = Env(offline=False)
 
         r = _say(d, env, "e1", "@RoonieTheCat hey?", user="viewer_a", mention=True, send=False)
-        # Direct address should output "[SKIP]" literally, NOT suppress
-        assert r.action == "RESPOND_PUBLIC"
-        assert r.trace["director"]["continuation_skipped"] is False
+        # Safety net: [SKIP] on direct address → NOOP (not literal "[SKIP]" in chat)
+        assert r.action == "NOOP"
+        assert r.trace["director"]["skip_safety_net"] is True
 
     def test_continuation_prompt_block_injected(self, monkeypatch):
         captured = _stub_route(monkeypatch)

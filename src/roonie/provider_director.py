@@ -2058,6 +2058,7 @@ class ProviderDirector:
         action = "NOOP"
         route = "none"
         continuation_skipped = False
+        skip_safety_net = False
         redundant_name_stripped = False
         specificity: Dict[str, Any] = {
             "mode": _specificity_gate_mode(),
@@ -2071,10 +2072,17 @@ class ProviderDirector:
             raw = out.strip()
             # [SKIP] opt-out: continuation, quiet nudge, or proactive — LLM decided to stay silent
             skip_eligible = continuation or category in ("QUIET_NUDGE", "PROACTIVE_FAVORITE")
-            if skip_eligible and _SKIP_RE.match(raw):
-                response_text = None
-                action = "NOOP"
-                continuation_skipped = True
+            if _SKIP_RE.match(raw):
+                if skip_eligible:
+                    response_text = None
+                    action = "NOOP"
+                    continuation_skipped = True
+                else:
+                    # Safety net: LLM returned [SKIP] on a direct-address message.
+                    # Suppress to NOOP rather than sending literal "[SKIP]" to chat.
+                    response_text = None
+                    action = "NOOP"
+                    skip_safety_net = True
             else:
                 response_text = raw
                 if str(os.getenv("ROONIE_SANITIZE_PROVIDER_STUB_OUTPUT", "")).strip().lower() in {"1", "true", "yes", "on"}:
@@ -2130,6 +2138,7 @@ class ProviderDirector:
                 "continuation_reason": continuation_reason,
                 "continuation_capped": continuation_capped,
                 "continuation_skipped": continuation_skipped,
+                "skip_safety_net": skip_safety_net,
                 "continuation_streak": self._continuation_streak.get(viewer_key, 0) if viewer_key else 0,
                 "unaddressed_track_id_gate": allow_unaddressed_track_id,
                 "redundant_name_stripped": redundant_name_stripped,

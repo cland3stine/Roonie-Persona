@@ -292,16 +292,22 @@ def test_continuation_decays_after_multiple_messages(monkeypatch):
 
 def test_skip_response_suppresses_output(monkeypatch):
     """LLM returns [SKIP] for continuation → action is NOOP."""
-    def _stub_skip(**kwargs):
+    call_count = {"n": 0}
+
+    def _stub(**kwargs):
+        call_count["n"] += 1
         kwargs["context"]["provider_selected"] = "openai"
         kwargs["context"]["moderation_result"] = "allow"
+        # First call (direct address) returns real response; second (continuation) returns [SKIP]
+        if call_count["n"] == 1:
+            return "@viewer_a hey!"
         return "[SKIP]"
 
-    monkeypatch.setattr("roonie.provider_director.route_generate", _stub_skip)
+    monkeypatch.setattr("roonie.provider_director.route_generate", _stub)
     director = ProviderDirector()
     env = Env(offline=False)
 
-    # Setup: addressed + confirmed
+    # Setup: addressed + confirmed (real response so context buffer gets the turn)
     director.evaluate(_event("e1", "@RoonieTheCat hey!", is_direct_mention=True), env)
     director.apply_output_feedback(event_id="e1", emitted=True, send_result={"sent": True})
 
@@ -313,8 +319,11 @@ def test_skip_response_suppresses_output(monkeypatch):
     assert r.response_text is None
 
 
-def test_skip_not_parsed_for_direct_address(monkeypatch):
-    """[SKIP] from LLM for a direct-address message should NOT suppress output."""
+def test_skip_safety_net_for_direct_address(monkeypatch):
+    """[SKIP] from LLM on direct-address is suppressed to NOOP (safety net).
+
+    Prevents literal '[SKIP]' from being sent as chat text.
+    """
     def _stub_skip(**kwargs):
         kwargs["context"]["provider_selected"] = "openai"
         kwargs["context"]["moderation_result"] = "allow"
@@ -324,10 +333,11 @@ def test_skip_not_parsed_for_direct_address(monkeypatch):
     director = ProviderDirector()
     env = Env(offline=False)
 
-    # Direct address — [SKIP] should be treated as literal text
+    # Direct address — [SKIP] must NOT go out as literal chat text
     r = director.evaluate(_event("e1", "@RoonieTheCat hey!", is_direct_mention=True), env)
-    assert r.action == "RESPOND_PUBLIC"
-    assert r.response_text is not None
+    assert r.action == "NOOP"
+    assert r.response_text is None
+    assert r.trace["director"].get("skip_safety_net") is True
 
 
 # ---------------------------------------------------------------------------

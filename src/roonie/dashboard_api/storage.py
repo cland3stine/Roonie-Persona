@@ -403,6 +403,7 @@ class DashboardStorage:
             "last_eventsub_message_ts": None,
             "reconnect_count": 0,
             "eventsub_last_error": None,
+            "stream_is_live": False,
         }
         self._audio_runtime_state: Dict[str, Any] = {}
         self._trackr_runtime_state: Dict[str, Any] = {}
@@ -4284,6 +4285,7 @@ class DashboardStorage:
         last_message_ts: Optional[str] = None,
         reconnect_count: Optional[int] = None,
         last_error: Optional[str] = None,
+        stream_is_live: Optional[bool] = None,
     ) -> Dict[str, Any]:
         with self._lock:
             state = self._eventsub_runtime_state
@@ -4300,6 +4302,8 @@ class DashboardStorage:
                     pass
             if last_error is not None:
                 state["eventsub_last_error"] = str(last_error).strip() or None
+            if stream_is_live is not None:
+                state["stream_is_live"] = bool(stream_is_live)
             return dict(state)
 
     def get_eventsub_runtime_state(self) -> Dict[str, Any]:
@@ -5442,18 +5446,44 @@ class DashboardStorage:
                 existing_names.add(str(e.get("name", "")).strip())
             elif isinstance(e, str):
                 existing_names.add(e.strip())
+        # Build lookup of fetched emotes by name for URL/ID refresh
+        fetched_by_name: Dict[str, Dict[str, Any]] = {}
+        for e in fetched:
+            if isinstance(e, dict):
+                name = str(e.get("name", "")).strip()
+                if name:
+                    fetched_by_name[name] = e
+
+        # Update existing emotes with fresh id/url from Twitch
+        updated = 0
+        for entry in existing:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name", "")).strip()
+            if name in fetched_by_name:
+                fresh = fetched_by_name[name]
+                fresh_id = str(fresh.get("id", "")).strip()
+                fresh_url = str(fresh.get("url", "")).strip()
+                if fresh_id and entry.get("id") != fresh_id:
+                    entry["id"] = fresh_id
+                    updated += 1
+                if fresh_url and entry.get("url") != fresh_url:
+                    entry["url"] = fresh_url
+                    updated += 1
+
         new_emotes = [
-            {"name": str(e["name"]).strip(), "desc": "", "denied": False}
+            {"name": str(e["name"]).strip(), "desc": "", "denied": False,
+             "id": str(e.get("id", "")).strip(), "url": str(e.get("url", "")).strip()}
             for e in fetched
             if isinstance(e, dict) and str(e.get("name", "")).strip()
             and str(e["name"]).strip() not in existing_names
         ]
-        if new_emotes:
+        if new_emotes or updated:
             merged = existing + new_emotes
             profile["approved_emotes"] = merged
             self.update_studio_profile(profile, actor="system-startup", patch=False)
         total = len(existing) + len(new_emotes)
-        return {"ok": True, "added": len(new_emotes), "total": total}
+        return {"ok": True, "added": len(new_emotes), "updated": updated, "total": total}
 
     def _default_twitch_config(self) -> Dict[str, Any]:
         return {

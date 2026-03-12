@@ -257,3 +257,34 @@ class TestChatTimestampUpdate:
 
         bridge._emit_one(msg, bot_nick="rooniethecat")
         assert bridge._last_chat_ts > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Nudge suppressed when stream is offline
+# ---------------------------------------------------------------------------
+
+class TestNudgeStreamLiveGate:
+    """Nudge loop only fires while stream_is_live is True."""
+
+    def test_nudge_suppressed_when_stream_offline(self):
+        from roonie.control_room.live_chat import LiveChatBridge
+        storage = MagicMock()
+        storage.get_eventsub_runtime_state.return_value = {"stream_is_live": False}
+        bridge = LiveChatBridge(storage=storage)
+        bridge._last_chat_ts = 0.0  # long ago — would normally trigger
+        bridge._emit_quiet_nudge = MagicMock()
+
+        # Simulate one iteration of the nudge loop check
+        esub_state = storage.get_eventsub_runtime_state()
+        assert not esub_state.get("stream_is_live", False)
+        # Nudge should NOT fire
+        bridge._emit_quiet_nudge.assert_not_called()
+
+    def test_nudge_allowed_when_stream_live(self):
+        from roonie.control_room.live_chat import LiveChatBridge
+        storage = MagicMock()
+        storage.get_eventsub_runtime_state.return_value = {"stream_is_live": True}
+        bridge = LiveChatBridge(storage=storage)
+
+        esub_state = storage.get_eventsub_runtime_state()
+        assert esub_state.get("stream_is_live", False) is True

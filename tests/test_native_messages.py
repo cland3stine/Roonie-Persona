@@ -82,6 +82,20 @@ def test_example_bank_contains_deadpan_booth_cat_humor_examples():
     assert examples["raid"] == "@royal_lama_ that's how you show up. 101 deep too."
     assert examples["cheer"] == "@darkorange73 100 bits? caught the exact moment for that."
     assert examples["contrast_pair_good_specific"] == "@dirty13duck booth just got a little more crowded."
+    # anti_example_generic_ceremony removed — was causing over-skipping on Anthropic
+    assert "contrast_pair_bad_generic" not in examples
+
+
+def test_example_bank_skip_examples_are_last():
+    """[SKIP] examples should be at the end of the bank to reduce primacy over-indexing."""
+    skip_indices = [i for i, ex in enumerate(EXAMPLE_BANK) if ex.get("assistant") == "[SKIP]"]
+    non_skip_indices = [i for i, ex in enumerate(EXAMPLE_BANK) if ex.get("assistant") != "[SKIP]"]
+    if skip_indices and non_skip_indices:
+        assert min(skip_indices) > max(non_skip_indices)
+
+
+def test_compressed_style_skip_only_for_non_addressed():
+    assert "[SKIP] is only for messages that aren't meant for you" in COMPRESSED_STYLE
 
 
 def test_event_guidance_discourages_template_event_shapes():

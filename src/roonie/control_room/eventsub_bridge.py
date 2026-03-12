@@ -170,6 +170,8 @@ class EventSubBridge:
         suppression_reason = self._suppression_reason(normalized)
         result: Dict[str, Any]
         if event_type == "STREAM_ONLINE":
+            if hasattr(self._storage, "set_eventsub_runtime_state"):
+                self._storage.set_eventsub_runtime_state(stream_is_live=True)
             try:
                 social_result = self._social_announcer.announce_stream_online(normalized)
                 result = {
@@ -181,6 +183,8 @@ class EventSubBridge:
                 result = {"emitted": False, "reason": f"SOCIAL_ANNOUNCE_ERROR:{exc}", "session_id": None}
                 self._log(f"[EventSubBridge] social announce failed event_id={event_id} error={exc}")
         elif event_type == "STREAM_OFFLINE":
+            if hasattr(self._storage, "set_eventsub_runtime_state"):
+                self._storage.set_eventsub_runtime_state(stream_is_live=False)
             result = {"emitted": False, "reason": "STREAM_OFFLINE_NOOP", "session_id": None}
         elif suppression_reason is not None:
             result = {"emitted": False, "reason": suppression_reason, "session_id": None}

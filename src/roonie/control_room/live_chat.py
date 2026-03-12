@@ -599,6 +599,11 @@ class LiveChatBridge:
             self._stop.wait(30.0)
             if self._stop.is_set():
                 break
+            # Only nudge while stream is live
+            if hasattr(self._storage, "get_eventsub_runtime_state"):
+                esub_state = self._storage.get_eventsub_runtime_state()
+                if not esub_state.get("stream_is_live", False):
+                    continue
             cfg = self._get_quiet_nudge_config()
             if not cfg.get("quiet_nudge_enabled", True):
                 continue

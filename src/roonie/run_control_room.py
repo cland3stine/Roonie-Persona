@@ -365,8 +365,9 @@ def main(argv: list[str] | None = None) -> int:
             emote_result = storage.sync_channel_emotes_on_startup()
             if emote_result.get("ok"):
                 added = emote_result.get("added", 0)
+                updated = emote_result.get("updated", 0)
                 total = emote_result.get("total", 0)
-                _append_log(paths.control_log_path, f"EMOTE_SYNC: ok added={added} total={total}")
+                _append_log(paths.control_log_path, f"EMOTE_SYNC: ok added={added} updated={updated} total={total}")
             else:
                 _append_log(paths.control_log_path, f'EMOTE_SYNC: skipped reason={emote_result.get("error", "unknown")}')
         except Exception as exc:
